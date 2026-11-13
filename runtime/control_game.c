@@ -461,6 +461,8 @@ void control_game_init(void) {
     control_prof_init();
     control_input_init();
     control_mem_init();
+    extern void rt_data_watch_control_init(void);  // [pc-vr-audit] runtime/dispatch.c: `watch`
+    rt_data_watch_control_init();
     control_cells_init();
     control_fly_init();
     control_items_init();

@@ -42,6 +42,7 @@ extern "C" {
 #include "../color_grade.h"
 #include "../pc_cursor.h"
 #include "../window_size.h"
+#include "../pc_vr.h"
 void guest_call(Cpu *, uint64_t);
 Cpu *kernel_current_cpu(void);
 void rt_request_reboot(int kind);           // runtime/main.c (1: start the game again)
@@ -1956,6 +1957,7 @@ static void title_hide_dlc(uint64_t menu) {
 // The title menu's update (menu = the screen): 1 = open the Options screen again now (it has gone, a page is due).
 // The quit question's answer is read here too.
 extern "C" int rt_opt_title_tick(uint64_t menu) {
+    pc_vr_startup_tick();  // (PC VR: the original VR request at title readiness, runtime/pc_vr.c)
     quit_poll();
     title_hide_dlc(menu);
     if (rd32(menu + g_site.title_options_state) != MENU_OPTIONS_ACTIVE) {  // (the Options button isn't active: next opening, first page)

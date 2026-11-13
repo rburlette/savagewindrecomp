@@ -14,6 +14,7 @@
 #include "record.h"
 #include "shaders.h"
 #include "../../settings.h"
+#include "../../pc_vr.h"
 #include "../astc.h"
 #include "../../perfcount.h"
 #include "../glyphs.h"
@@ -180,7 +181,9 @@ static bool format_is_float(VkFormat f) {  // (uncompressed: these can hold NaN 
 //             2048 to 8192) they are made at instead of the game's (output_scale.c shadow_map_size). Also
 //             their half-size copy (R16 448x448x3, the max of each 2x2), at the same factor: water and the other
 //             forward-shaded surfaces take their shadows from it (issue #101)
-static float g_rs[4][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}};
+//   RS_EYE    Labo VR's per-eye targets (800x900, and their same-shaped fractions), only with an explicit
+//             SAVAGEWIND_PC_VR_EYE_SCALE: the headset copies these pixels, so their count sets its sharpness
+static float g_rs[5][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
 static uint32_t g_shadow_size;
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs[RS_OUT][0]; *sy = g_rs[RS_OUT][1]; }
 void renderer_set_scale(float sx, float sy) { g_rs[RS_OUT][0] = sx; g_rs[RS_OUT][1] = sy; }
@@ -229,6 +232,34 @@ bool vk_shadow_direct(void) {
 // The cascades t are made bigger than the game's (Shadow resolution above Console); at Console the copy's readers keep it
 bool vk_shadow_scaled(const NvnTexture *t) { return t && g_shadow_size > t->width; }
 
+// PC VR eye scale (1 = off, up to 5: 4000x4500), exact decimal text only. The eye chain's shape (0.87..0.91, the
+// 800x900 Labo eye targets and their fractions) is otherwise never scaled.
+static bool eye_scale_on(void) {
+    static int on = -1;
+    if (on >= 0) return on;
+    on = 0;
+    unsigned width, height;
+    if (pc_vr_eye_size(&width, &height)) {
+        g_rs[RS_EYE][0] = (float)width / 800.0f;
+        g_rs[RS_EYE][1] = (float)height / 900.0f;
+        on = 1;
+        LOG("[pc-vr-eye-size] exact eye renders %ux%u; final halves match, poses/FOV unchanged\n", width, height);
+        return on;
+    }
+    // (SAVAGEWIND_PC_VR_EYE_SCALE: the configuration takes a decimal in (1, 5], and leaves 1 otherwise)
+    const PcVrConfig *config = pc_vr_config();
+    const double scale = config->play.eye_scale;
+    if (scale > 1.0) {
+        g_rs[RS_EYE][0] = g_rs[RS_EYE][1] = (float)scale;
+        on = 1;
+        LOG("[pc-vr-eye-scale] Labo eye targets scaled %.3fx (800x900 -> %ldx%ld)\n", scale,
+            lround(800 * scale), lround(900 * scale));
+    } else if (config->settings_ignored >> PC_VR_SETTING_EYE_SCALE & 1) {
+        LOG("[pc-vr-eye-scale] ignored SAVAGEWIND_PC_VR_EYE_SCALE (needs a decimal in (1, 5])\n");
+    }
+    return on;
+}
+
 static uint8_t tex_scale_group(const NvnTexture *t) {
     static int on = -1;
     if (on < 0) on = getenv("SAVAGEWIND_NO_SCALE") == NULL;
@@ -239,6 +270,12 @@ static uint8_t tex_scale_group(const NvnTexture *t) {
     if (!vk_shadow_direct() && vk_is_shadow_copy(t)) return RS_SHADOW;  // (the copy's readers use the cascades instead)
     if ((t->target != 1 && t->target != 4) || t->samples > 1 || !(t->flags & 9) || t->width < 32 || t->height < 16) return RS_NONE;
     float a = (float)t->width / (float)t->height;
+    if (a >= 0.87f && a <= 0.91f && eye_scale_on()) {
+        static unsigned logged;
+        if (logged++ < 24) LOG("[pc-vr-eye-scale] eye target %ux%u flags %#x format %#x layers %u levels %u\n",
+                               t->width, t->height, t->flags, t->format, t->depth, t->levels);
+        return RS_EYE;
+    }
     if (a < 1.74f || a > 1.81f) return RS_NONE;
     if (t->flags & 1) return RS_OUT;  // NVN_TEXTURE_FLAGS_DISPLAY: the images the game presents
     for (int k = 0; k < 4; k++)       // the final image's 1920x1080 and its halves (rounded either way)
@@ -2148,11 +2185,12 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
 }
 
 // 1x1 black textures for unbound slots, per type
+static TexBackend dummies[10];
+static VkImageView dummy_views[10];
+
 VkImageView vk_dummy_view(int textype) {
-    static TexBackend dummies[10];
-    static VkImageView views[10];
     if (textype < 0 || textype >= 10) textype = TEXTYPE_2D;
-    if (views[textype]) return views[textype];
+    if (dummy_views[textype]) return dummy_views[textype];
     TexBackend *b = &dummies[textype];
     VkImageViewType vt = view_type_for(textype);
     bool cube = vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
@@ -2172,11 +2210,35 @@ VkImageView vk_dummy_view(int textype) {
     b->format = VK_FORMAT_R8G8B8A8_UNORM;
     b->levels = 1;
     b->layers = cube ? 6 : 1;
-    views[textype] = vk_image_view(b, vt, b->format, 0, 1, 0, cube ? 6 : 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
-    return views[textype];
+    dummy_views[textype] = vk_image_view(b, vt, b->format, 0, 1, 0, cube ? 6 : 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    return dummy_views[textype];
+}
+
+// The 2D dummy read as opaque black (exec.c: a popup's screen capture on the PC VR HUD panel).
+VkImageView vk_black_view(void) {
+    static VkImageView view;
+    if (view) return view;
+    vk_dummy_view(TEXTYPE_2D);
+    const VkComponentMapping black = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
+                                      VK_COMPONENT_SWIZZLE_ONE};
+    view = vk_image_view(&dummies[TEXTYPE_2D], VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 0, 1, 0, 1, black,
+                         VK_IMAGE_ASPECT_COLOR_BIT);
+    return view;
 }
 
 // ================================================================== samplers
+#include "always_shadow.h"
+
+VkImageView vk_always_shadow_view(VkImageView view, bool shader_shadow, const NvnSamplerDesc *sampler) {
+    if (!shader_shadow || !sampler || !sampler->compare_mode || sampler->compare_func != 8) return view;
+    for (unsigned i = 0; i < VIEW_TAB; ++i) {
+        const ViewEnt *entry = &view_tab[i];
+        if (entry->b && entry->view == view)
+            return vk_always_shadow_backing(view, shader_shadow, sampler, entry->b, entry->k1, entry->k2);
+    }
+    return view;
+}
+
 static VkCompareOp compare_op(uint32_t f) {
     switch (f) {
     case 1: return VK_COMPARE_OP_NEVER;
@@ -2199,9 +2261,26 @@ static VkCompareOp compare_op(uint32_t f) {
 // they put stepped light outlines along edges (around Link's bow and quiver most) - and the blended draws:
 // particles, effects, decals, whose quads' square edges the wider footprint brought out (floating dust as small
 // squares). Both the worse the higher the setting.
+// [pc-vr-audit] (docs/vr-resolution-audit.md; off unless set): SAVAGEWIND_AUDIT_ANISO=<2|4|8|16>@<first>-<last> acts
+// as that Video > Anisotropic filtering setting in those presents only (a same-view A/B in one run).
+static int audit_aniso(int setting) {
+    static int read, level;
+    static unsigned long long first, last;
+    if (!read) {
+        read = 1;
+        const char *setting = getenv("SAVAGEWIND_AUDIT_ANISO");
+        unsigned anisotropy = 0;
+        if (setting && sscanf(setting, "%u@%llu-%llu", &anisotropy, &first, &last) == 3)
+            level = anisotropy >= 16 ? 4 : anisotropy >= 8 ? 3 : anisotropy >= 4 ? 2 : anisotropy >= 2 ? 1 : 0;
+        if (setting) LOG("[pc-vr-audit] anisotropy %ux in presents %llu-%llu (diagnostic)\n", anisotropy, first, last);
+    }
+    const uint64_t present = renderer_present_count() + 1;
+    return level && present >= first && present <= last ? level : setting;
+}
+
 static float sampler_aniso(const NvnSamplerDesc *d, bool aniso_ok) {
     float game = d->max_aniso > 1 ? fminf(d->max_aniso, 16) : 1;
-    int a = g_settings.anisotropy;
+    int a = audit_aniso(g_settings.anisotropy);
     if (a <= 0 || a > 4 || !g_vk.feat_aniso || !aniso_ok) return game;
     if (d->compare_mode || d->mag_filter != 1 || (d->min_filter != 3 && d->min_filter != 5)) return game;
     if (d->lod_max - d->lod_min < 0.5f) return game;

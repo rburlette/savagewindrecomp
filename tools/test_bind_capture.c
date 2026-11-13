@@ -4,7 +4,10 @@
 #include <assert.h>
 #include <stdio.h>
 
+#include "game_sites.h"
 #include "input_bind.h"
+
+GameSites g_site;  // (no game: runtime/hle/bindings.c finds no HUD prompt)
 
 static uint64_t now;
 Uint64 SDL_GetTicks(void) { return now; }

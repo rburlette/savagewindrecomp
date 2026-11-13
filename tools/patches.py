@@ -546,7 +546,8 @@ def _frustum_load(word, regs, what):
 
 def _proj_update(gen, a):
     assert _word(gen, a) == 0x39402008, hex(_word(gen, a))  # ldrb w8, [x0, #8]
-    return f'c->x[8] = 1;  /* {a:#x}: ldrb w8, [x0, #8] (projection update: dirty, always) */'
+    return ('{ extern uint32_t rt_proj_dirty(uint64_t); c->x[8] = rt_proj_dirty(c->x[0]); }'
+            f'  /* {a:#x}: ldrb w8, [x0, #8] (projection update: dirty, always outside PC VR) */')
 
 
 # ... and its load of the view's offset (+0xb4 x, +0xb8 y: a frustum moved by a fraction of its width and height; the
@@ -938,6 +939,165 @@ def _lookat_update(gen, a):
             f'  /* {a:#x}: ldp s1, s2, [x0, #0x38] (LookAtCamera view: eye x, y) */')
 
 
+# PC VR's world-tied HUD (runtime/pc_vr_hud.c, D073): the HUD's world-to-screen helper (1.9.0 0x7000e1dde0; x19 the
+# position it writes, the point it projected in the UI camera's space at sp + 0x14) calls the Labo VR object's
+# adjustment of that position last. After it, the runtime records the position and the point.
+def _hud_point(gen, address):
+    word = _word(gen, address)
+    assert word >> 26 == 0x25, hex(word)  # bl
+    target = address + sext(word & 0x3ffffff, 26) * 4
+    return (f'{{ extern void f_{target:x}(Cpu *); extern void rt_hud_point(Cpu *, uint64_t, uint64_t); '
+            f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); rt_hud_point(c, c->x[19], c->sp + 0x14); }}'
+            f'  /* {address:#x}: bl (HUD world-to-screen helper: the Labo adjustment) */')
+
+
+# PC VR's HUD by screen (runtime/pc_vr_hud.c): the UI screen manager draws each screen of a draw unit in one loop,
+# through the screen's vtable (x0 the screen, w22 its id). The runtime notes the screen while it draws; every draw the
+# game records meanwhile carries its id (runtime/nvn/cmdbuf.c), so the renderer knows which screen made it.
+def _screen_draw(gen, address):
+    assert _word(gen, address) == 0xd63f0100, hex(_word(gen, address))  # blr x8
+    return ('{ extern uint32_t rt_screen_draw_begin(uint64_t, uint32_t); extern void rt_screen_draw_end(uint32_t); '
+            'uint32_t prev = rt_screen_draw_begin(c->x[0], (uint32_t)c->x[22]); '
+            f'c->pc = c->x[8]; c->x[30] = {address + 4:#x}ull; rt_dispatch(c); rt_screen_draw_end(prev); }}'
+            f'  /* {address:#x}: blr x8 (the UI screen manager draws a screen) */')
+
+
+# PC VR's markers by pane (runtime/pc_vr_hud.c): nn::ui2d's pane draw calls each pane's own DrawSelf, and each child's
+# Draw (a pane that overrides Draw, a capture pane, never reaches DrawSelf), through the vtable (x0 the pane). The
+# runtime notes the pane while it draws; a draw recorded meanwhile is linked to the marker the game positioned that
+# pane, or one of its parents, at.
+def _pane_draw(gen, address):
+    assert _word(gen, address) == 0xd63f0100, hex(_word(gen, address))  # blr x8
+    return ('{ extern uint64_t rt_pane_draw_begin(uint64_t); extern void rt_pane_draw_end(uint64_t); '
+            'uint64_t prev = rt_pane_draw_begin(c->x[0]); '
+            f'c->pc = c->x[8]; c->x[30] = {address + 4:#x}ull; rt_dispatch(c); rt_pane_draw_end(prev); }}'
+            f'  /* {address:#x}: blr x8 (a UI pane draws itself) */')
+
+
+# PC VR's speech balloons (runtime/pc_vr_hud.c): the balloon screen projects an NPC's head with the HUD helper's camera
+# calls and writes the result into the balloon's pane. After the game's own store of the pane's x the runtime reports
+# the point like the helper's (its camera-space point at sp + 0x1c, the pane's x and y in s0 and s8), so the balloon's
+# draws link to it through their pane.
+def _balloon_point(gen, address):
+    assert _word(gen, address) == 0xbd003100, hex(_word(gen, address))  # str s0, [x8, #0x30]
+    return ('{ extern void rt_balloon_point(Cpu *); ST32(c->x[8] + 0x30, (uint32_t)c->v[0]); rt_balloon_point(c); }'
+            f'  /* {address:#x}: str s0, [x8, #0x30] (a speech balloon pane x) */')
+
+
+# PC VR's markers by the game's own store (runtime/pc_vr_hud.c, the marker links; item 3). Eight of the HUD helper's
+# callers copy its result into the piece's pane right after the call: `bl helper; ldp s0, s1, [sp, #N]; str wzr,
+# [xP, #0x38]; ...` and the stores of the pane's translate, xP the pane and sp + N the buffer the helper wrote. After
+# the game's store of the pane's +0x38 the runtime binds the pane to the helper's report, if the helper wrote it to
+# sp + N. site_number tells the runtime which store it is (in its logs).
+def _marker_store(site_number):
+    def patch(gen, address):
+        word = _word(gen, address)
+        assert word & 0xfffffc1f == 0xb900381f, hex(word)  # str wzr, [xP, #0x38]
+        pane = (word >> 5) & 0x1f
+        assert pane != 31, hex(word)  # (a pane register, not sp)
+        load = _word(gen, address - 4)
+        assert load & 0xffc07fff == 0x2d4007e0, hex(load)  # ldp s0, s1, [sp, #N]
+        offset = sext((load >> 15) & 0x7f, 7) * 4
+        assert offset >= 0, hex(load)
+        call = _word(gen, address - 8)
+        assert call >> 26 == 0x25, hex(call)  # bl (the helper)
+        # (the helper is the function that holds pcvr_hud_point, its report: that site lies under 0x100 bytes after the
+        # call's target; without the site, no report is made and no store binds)
+        helper = address - 8 + sext(call & 0x3ffffff, 26) * 4
+        report = gen.sites.get('pcvr_hud_point')
+        assert report is None or 0 <= report - helper < 0x100, f'{helper:#x} is not the HUD helper'
+        return ('{ extern void rt_marker_pane_bind(uint64_t, uint64_t, uint32_t); '
+                f'ST32(c->x[{pane}] + 0x38, 0); '
+                f'rt_marker_pane_bind(c->x[{pane}], c->sp + {offset:#x}, {site_number}); }}'
+                f"  /* {address:#x}: str wzr, [x{pane}, #0x38] (a world marker pane at the HUD helper's result, store "
+                f'{site_number}) */')
+    return patch
+
+
+# ... and one hands the result to a component's set-position function (1.9.0 0x7000d727f4, which writes the pane at
+# [[component + 8] + 0x18]): at its call x0 is the component, x1 the buffer the helper wrote. The runtime binds the
+# component's pane, then the call is made.
+def _marker_component_call(site_number):
+    def patch(gen, address):
+        word = _word(gen, address)
+        assert word >> 26 == 0x25, hex(word)  # bl
+        target = address + sext(word & 0x3ffffff, 26) * 4
+        # (the set-position function's two loads that the runtime repeats to find the pane)
+        assert _word(gen, target) == 0xf9400408, hex(_word(gen, target))  # ldr x8, [x0, #8]
+        assert _word(gen, target + 8) == 0xf9400d08, hex(_word(gen, target + 8))  # ldr x8, [x8, #0x18]
+        return (f'{{ extern void f_{target:x}(Cpu *); '
+                'extern void rt_marker_component_bind(uint64_t, uint64_t, uint32_t); '
+                f'rt_marker_component_bind(c->x[0], c->x[1], {site_number}); c->x[30] = {address + 4:#x}ull; '
+                f'f_{target:x}(c); }}'
+                f"  /* {address:#x}: bl (a world marker component set at the HUD helper's result, store "
+                f'{site_number}) */')
+    return patch
+
+
+# A second wheel-like piece (its component in x20) keeps in w25 whether it follows Link (0: at the helper's result,
+# which the helper wrote to sp + 0x18) or sits at, or moves toward, a fixed HUD place (1). After the game's assignment
+# the runtime binds the component's pane to the helper's report (0) or releases it (1).
+def _marker_wheel_flag(site_number, follows):
+    def patch(gen, address):
+        if follows:
+            assert _word(gen, address) == 0x2a1f03f9, hex(_word(gen, address))  # mov w25, wzr
+            return ('{ extern void rt_marker_component_bind(uint64_t, uint64_t, uint32_t); '
+                    f'c->x[25] = 0; rt_marker_component_bind(c->x[20], c->sp + 0x18, {site_number}); }}'
+                    f'  /* {address:#x}: mov w25, wzr (a wheel-like piece follows Link, store {site_number}) */')
+        assert _word(gen, address) == 0x52800039, hex(_word(gen, address))  # mov w25, #1
+        return ('{ extern void rt_marker_component_release(uint64_t, uint32_t); '
+                f'c->x[25] = 1; rt_marker_component_release(c->x[20], {site_number}); }}'
+                f'  /* {address:#x}: mov w25, #1 (a wheel-like piece at a fixed HUD place, store {site_number}) */')
+    return patch
+
+
+# PC VR's UI without Labo's screen parallax (runtime/pc_vr_hud.c rt_ui_parallax). In its VR mode the game shifts its
+# whole UI toward the nose in each eye, for the goggles' lenses. The Labo display's setup stores the amount in its UI
+# views each frame through one setter (1.9.0 0x7000eeee50: view + 0x404, then the views chained at + 0x208), and the
+# UI layout, the crops of the UI's own textures and the lens mask all read it from there. PC VR shows the UI on a
+# panel of its own, so the runtime stores zero instead; every reader then agrees. (MacNativeGames'
+# botw_vr_ui_profile.h zeroes the same value at its four inlined stores in 1.6.0.)
+def _ui_parallax(gen, address):
+    assert _word(gen, address) == 0xbd040400, hex(_word(gen, address))  # str s0, [x0, #0x404]
+    return ('{ extern uint32_t rt_ui_parallax(uint32_t); ST32(c->x[0] + 0x404, rt_ui_parallax((uint32_t)c->v[0])); }'
+            f'  /* {address:#x}: str s0, [x0, #0x404] (the UI screen parallax of a view) */')
+
+
+# PC VR's rune aim (runtime/pc_vr_hud.c, D078): the rune target test (stasis, magnesis) is a GPU draw that looks for an
+# object around one screen position. Its setup (1.9.0 0x700126f6a8; x21 the test's entry) picks the constants block
+# it fills this frame (its address at x21 + 0x10), then has the Labo VR object adjust the position (to x29 - 0x18)
+# and writes it into the block. After that adjustment the runtime notes the block, so the renderer knows the test's
+# draw by the constants it binds and can move the position onto the aim ray.
+def _rune_test(gen, address):
+    word = _word(gen, address)
+    assert word >> 26 == 0x25, hex(word)  # bl
+    target = address + sext(word & 0x3ffffff, 26) * 4
+    return (f'{{ extern void f_{target:x}(Cpu *); extern void rt_rune_test(uint64_t, uint64_t); '
+            f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); rt_rune_test(LD64(c->x[21] + 0x10), c->x[29] - 0x18); }}'
+            f'  /* {address:#x}: bl (rune target test: the Labo adjustment of its screen position) */')
+
+
+# PC VR's eye images (runtime/hle/pc_vr_render_trace.h): the game finishes every render layer with one call of its
+# screen-quad draw for the layer's finished image (kind 1) and one for that image's placement in the final image
+# (kind 2), and shows the frame by drawing the final image to the display (kind 3): through the callback Labo's
+# display registers (its lens pass, a blr x8) or, without one, a plain copy (a bl). The runtime notes the kind while
+# the call runs; the draws recorded meanwhile carry it (runtime/nvn/cmdbuf.c), so the renderer knows them by the code
+# that issues them.
+def _layer_draw(kind, what):
+    def patch(gen, address):
+        word = _word(gen, address)
+        hooks = ('extern uint32_t rt_layer_draw_begin(uint32_t); extern void rt_layer_draw_end(uint32_t); '
+                 f'uint32_t prev = rt_layer_draw_begin({kind}); ')
+        if word == 0xd63f0100:  # blr x8
+            return ('{ ' + hooks + f'c->pc = c->x[8]; c->x[30] = {address + 4:#x}ull; rt_dispatch(c); '
+                    'rt_layer_draw_end(prev); }' + f'  /* {address:#x}: blr x8 ({what}) */')
+        assert word >> 26 == 0x25, hex(word)  # bl
+        target = address + sext(word & 0x3ffffff, 26) * 4
+        return (f'{{ extern void f_{target:x}(Cpu *); ' + hooks + f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); '
+                'rt_layer_draw_end(prev); }' + f'  /* {address:#x}: bl ({what}) */')
+    return patch
+
+
 # The wait for the ground. Every game update asks (at 1.9.0 FUN_71010b7a40, called from the code that raises pause reason
 # 9, bit 9 of the flags at pause_state + 0 / 0x7001e1611c) whether the map sections around Link (his position +-200 on
 # x and z) are still loading. While they are, reason 9 pauses the world, and the world's own update is what loads
@@ -962,6 +1122,28 @@ PATCHES = {
     'quick_sort_enter': _quick_sort_enter,
     'quick_sort_menu': _quick_sort_menu,
     'lookat_update': _lookat_update,
+    'pcvr_hud_point': _hud_point,
+    'pcvr_screen_draw': _screen_draw,
+    'pcvr_pane_draw': _pane_draw,
+    'pcvr_pane_child_draw': _pane_draw,
+    'pcvr_balloon_point': _balloon_point,
+    'pcvr_marker_store_1': _marker_store(1),
+    'pcvr_marker_store_2': _marker_store(2),
+    'pcvr_marker_store_3': _marker_store(3),
+    'pcvr_marker_store_4': _marker_store(4),
+    'pcvr_marker_store_5': _marker_store(5),
+    'pcvr_marker_store_6': _marker_store(6),
+    'pcvr_marker_store_7': _marker_store(7),
+    'pcvr_marker_store_8': _marker_store(8),
+    'pcvr_marker_component_call': _marker_component_call(9),
+    'pcvr_marker_wheel_follow': _marker_wheel_flag(10, True),
+    'pcvr_marker_wheel_flat': _marker_wheel_flag(11, False),
+    'pcvr_rune_test': _rune_test,
+    'pcvr_ui_parallax': _ui_parallax,
+    'pcvr_layer_final_draw': _layer_draw(1, "a render layer's finished image"),
+    'pcvr_layer_placement_draw': _layer_draw(2, "a render layer's image placed in the final image"),
+    'pcvr_display_lens_draw': _layer_draw(3, "the final image to the display: Labo's lens pass"),
+    'pcvr_display_copy_draw': _layer_draw(3, 'the final image to the display: the plain copy'),
     'pc_map_focus': _pc_map_focus(False),
     'pc_map_focus_target': _pc_map_focus(True),
     'pc_map_focus_now': _pc_map_focus(True),

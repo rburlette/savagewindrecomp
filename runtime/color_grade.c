@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,23 @@ void color_preset_apply(int i) {
     g_settings.color_tint = p->tint;
 }
 
+static atomic_bool live_off;  // (color_grade_toggle_live)
+void color_grade_toggle_live(void) {
+    bool off = !atomic_load(&live_off);
+    atomic_store(&live_off, off);
+    LOG("[colour] grading %s (live key ';')\n", off ? "off" : "on");
+}
+
+static atomic_int live_preset = -1;  // (color_grade_cycle_live) -1: the settings' own sliders
+void color_grade_cycle_live(void) {
+    int preset = atomic_load(&live_preset) + 1;
+    if (preset >= g_color_preset_count) preset = -1;
+    atomic_store(&live_preset, preset);
+    LOG("[colour] sliders: %s (live key ''')\n", preset < 0 ? "the settings' own" : g_color_presets[preset].name);
+}
+
 bool color_grade_get(ColorGrade *g) {
+    if (atomic_load(&live_off)) return false;
     const Settings *s = &g_settings;
     Settings filtered;
     {   // the free camera's photo filter (hle/photo.c), over these settings: they stay as they are
@@ -62,6 +79,15 @@ bool color_grade_get(ColorGrade *g) {
             filtered.color_exposure = ev, filtered.color_tint = 0, filtered.color_lut[0] = 0;
             s = &filtered;
         }
+    }
+    int preset_index = atomic_load(&live_preset);
+    if (preset_index >= 0 && s == &g_settings) {  // (PC VR's live preset key: a preset's sliders, the LUT as set)
+        const ColorPreset *preset = &g_color_presets[preset_index];
+        filtered = g_settings;
+        filtered.color_exposure = preset->exposure, filtered.color_contrast = preset->contrast;
+        filtered.color_saturation = preset->saturation, filtered.color_temperature = preset->temperature;
+        filtered.color_tint = preset->tint;
+        s = &filtered;
     }
     // white balance: temperature moves red against blue, tint green against both (+: magenta), at the same brightness
     float t = s->color_temperature / 100.0f, m = s->color_tint / 100.0f;

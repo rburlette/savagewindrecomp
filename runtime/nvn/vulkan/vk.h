@@ -95,8 +95,8 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout);
 
 // ---- textures (textures.c)
 // Render-target scale groups (textures.c tex_scale_group): none, the 3D scene's (internal resolution), the final
-// image's (the window's resolution), shadow maps (Video > Shadow resolution)
-enum { RS_NONE = 0, RS_SCENE = 1, RS_OUT = 2, RS_SHADOW = 3 };
+// image's (the window's resolution), shadow maps (Video > Shadow resolution), Labo VR's eye targets (PC VR eye scale)
+enum { RS_NONE = 0, RS_SCENE = 1, RS_OUT = 2, RS_SHADOW = 3, RS_EYE = 4 };
 
 typedef struct TexBackend {
     VkImage image;
@@ -172,11 +172,13 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
 VkFormat vk_view_format(TexBackend *b, VkFormat want);  // want, or the image's own format where want is not listed
 void vk_texture_drop_format_list(NvnTexture *t);        // (textures.c) a feedback loop target: no format list
 VkImageView vk_dummy_view(int textype);
+VkImageView vk_black_view(void);
 void vk_block_flush(VkCommandBuffer cb, TexBackend *b);  // (outside a pass) b->block's texels into b's blocks
 VkSampler vk_sampler(NvnSamplerDesc *d, bool aniso_ok, float bias);  // (aniso_ok: Video > Anisotropic filtering may
                                                                      //  apply; bias: added to the LOD bias)
 VkSampler vk_default_sampler(bool linear);
 VkSampler vk_text_sampler(void);
+VkImageView vk_always_shadow_view(VkImageView view, bool shader_shadow, const NvnSamplerDesc *sampler);
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);
 // Destruction once every submission that may use the object has completed.
 void vk_defer_image(VkImage img, VmaAllocation mem);

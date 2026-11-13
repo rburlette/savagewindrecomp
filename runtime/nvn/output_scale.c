@@ -22,6 +22,7 @@
 
 #include "../framepace.h"
 #include "../hle.h"
+#include "../pc_vr.h"
 #include "../platform.h"
 #include "../settings.h"
 #include "output_scale.h"
@@ -114,12 +115,13 @@ void output_scale(double dw, double dh, bool reshape_allowed, OutScale *o) {
     // (#125); the HUD keeps its 16:9 layout in the middle either way. Taller title screens fill the window too.
     // Fit wider title/loading layouts to keep their artwork and text aligned (#98). Taller views keep their shape
     // through the loading overlay so the world doesn't change aspect while fading out or back in.
+    // PC VR never reshapes: the headset takes the halves of the 16:9 final image (vulkan/exec.c vr_capture_eyes).
     bool title_fit = framepace_title_ui();
 #ifndef __APPLE__
     title_fit = title_fit && shape >= 1;  // Vulkan cover-crops the artwork on taller title screens.
 #endif
     bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005 && !title_fit &&
-                   (shape < 1 || !framepace_loading_ui());
+                   (shape < 1 || !framepace_loading_ui()) && !pc_vr_enabled();
     if (!reshape) shape = 1.0;
     // render height in units of the Switch's 1080 lines: the window's (Metal: divided by the upscaler's factor)
 #ifdef __APPLE__
@@ -136,6 +138,15 @@ void output_scale(double dw, double dh, bool reshape_allowed, OutScale *o) {
     double h = forced > 0 ? forced : (reshape ? dh / 1080.0 : fit) / out_div * ss;
     h = fmax(h, 0.1);  // (a tiny window)
     double sx = h * shape, sy = h;
+    unsigned eye_w, eye_h;
+    bool exact_eyes = pc_vr_eye_size(&eye_w, &eye_h);
+    if (exact_eyes) {
+        // Same pixels in the original eye chain and the final image's two halves. Nonuniform raster scales do
+        // not change the native eye projections: those still use the latched OpenXR poses/FOV.
+        sx = 2.0 * eye_w / 1920.0;
+        sy = eye_h / 1080.0;
+        scene_div = 1.0;
+    }
     double cap = fmin(MAX_TEX / (1920.0 * sx), MAX_TEX / (1080.0 * sy));
     if (cap < 1.0) { sx *= cap; sy *= cap; }
     o->sx = sx; o->sy = sy; o->shape = shape;
@@ -148,7 +159,11 @@ void output_scale(double dw, double dh, bool reshape_allowed, OutScale *o) {
     // where the image goes in the window: fills it when reshaped, else a fitted 16:9 box
     if (reshape) { o->vw = dw; o->vh = dh; }
     else { o->vw = 1920.0 * fit; o->vh = 1080.0 * fit; }
-    if (wide_test > 0) {
+    if (exact_eyes) {
+        double eye_fit = fmin(dw / (2.0 * eye_w), dh / eye_h);
+        o->vw = 2.0 * eye_w * eye_fit;
+        o->vh = eye_h * eye_fit;
+    } else if (wide_test > 0) {
         double f2 = fmin(dw / (1920.0 * wide_test), dh / 1080.0);
         o->vw = 1920.0 * wide_test * f2; o->vh = 1080.0 * f2;
     }
@@ -167,9 +182,9 @@ void output_scale(double dw, double dh, bool reshape_allowed, OutScale *o) {
     // Pause pages keep their 16:9 layout centered while the wider or taller image remains visible around them.
     g_view_shape = (float)o->shape;
     // Video > Field of view: in play only (cutscenes and talks keep the game's framing), eased over about 1/4 s so
-    // that a talk's start and end don't jump
+    // that a talk's start and end don't jump. PC VR keeps the game's: each eye's field of view is the headset's.
     bool event = framepace_in_event();
-    float want = event ? 1.0f : g_settings.fov / 100.0f;
+    float want = event || pc_vr_enabled() ? 1.0f : g_settings.fov / 100.0f;
     static float logged = -1;
     static int log = -1;
     if (log < 0) log = getenv("SAVAGEWIND_LOG_PROJ") != NULL;
@@ -323,6 +338,14 @@ void rt_world_projection(float out[4]) {
     memcpy(out, u, sizeof u);
 }
 
+// A projection's dirty flag as its matrix getters read it (tools/patches.py _proj_update). Taken as always set, so
+// every matrix follows the window's shape and the field of view now. PC VR keeps the game's own flag: it uses
+// neither, and every rebuild re-runs the per-eye projection hooks (hle/pc_vr_projection_trace.c), which drop the
+// draw certificates a rebuild may have made stale.
+uint32_t rt_proj_dirty(uint64_t proj) {
+    return pc_vr_enabled() ? *(const uint8_t *)(uintptr_t)(proj + 8) : 1;
+}
+
 // The game's frustum views (tools/patches.py _frustum_load: sead's FrustumProjection; left, right at +0xa8 / +0xac,
 // top, bottom at +0xa0 / +0xa4): f = {left, right, top, bottom}, a 16:9 one widened to the window's shape as rt_persp
 // does (some of the HUD's layers are these: the menus' cursor).
@@ -385,6 +408,7 @@ int rt_antialias(void) {
     uint64_t frame = n ? renderer_present_count() : 0;
     for (int i = 0; i < n; i++)
         if (frame >= at[i]) r = mode[i];
+    if (r == AA_TAA && pc_vr_enabled()) r = AA_SMAA;  // (PC VR: one temporal history would serve both eyes)
     return r;
 }
 

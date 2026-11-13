@@ -1,9 +1,15 @@
 // NVN command buffers: commands are recorded as CmdRec records in host memory; the guest-provided command
 // memory still drives the game's own memory management and out-of-memory callbacks (see below).
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "../gamelib.h"
+#include "../hle/pc_vr_render_trace.h"
+#include "../pc_vr.h"
+#include "../pc_vr_hud.h"
+#include "live_list.h"
 #include "ksync.h"
 #include "nvn.h"
 
@@ -34,7 +40,7 @@ static uint32_t cmd_cost(uint32_t op, uint32_t extra) { (void)op; return 8 + ((e
 
 typedef struct { uint8_t *mem; uint64_t size; uint64_t frame; } HBlock;
 typedef struct Shadow {
-    uint64_t lo, hi;  // the guest memory it stands for (written so far); lo == hi == 0: none
+    uint64_t lo, hi;  // the guest memory it stands for (written so far); lo == hi == 0: none (first: a LiveRange)
     uint64_t win;     // end of the memory the game added there (0: none)
     uint64_t free_to; // claims below this go over no other live shadow (shadow_claim takes no lock)
     HBlock *blocks;
@@ -43,14 +49,16 @@ typedef struct Shadow {
     bool dead;        // overlapped: out of the live list (freed when its last user leaves)
 } Shadow;
 
-static Shadow **g_live;  // shadows of guest memory, sorted by lo, never overlapping
-static int g_nlive, g_caplive;
+static LiveList g_live;  // shadows of guest memory, sorted by lo, never overlapping (live_list.h)
+#define LIVE(position) ((Shadow *)live_get(&g_live, (position)))
 static HBlock *g_free;   // blocks ready for reuse
 static int g_nfree, g_capfree;
 static uint64_t g_free_bytes;
 #define FREE_BUDGET (64ull << 20)  // dead blocks past this go back to the C heap
 static HBlock *g_grave;  // dead blocks, oldest first, until three frames have passed
 static int g_ngrave, g_capgrave;
+// (SAVAGEWIND_CMD_STATS) live list changes since the last stats line: inserts, removals (g_live.shifted: entries moved)
+static uint64_t g_stat_inserts, g_stat_removals;
 static KMutex g_shadow_lock = KMUTEX_INIT;
 static NvnCmdBuf *g_command_buffers;
 uint64_t renderer_present_count(void);
@@ -75,11 +83,16 @@ static HBlock block_get(uint64_t want) {  // (lock held) a free block that fits 
     if (stats < 0) stats = getenv("SAVAGEWIND_CMD_STATS") != NULL;
     if (stats && now >= stats_at) {  // (test) what the command records hold, every 600 frames
         uint64_t live = 0;
-        for (int i = 0; i < g_nlive; i++)
-            for (int j = 0; j < g_live[i]->nblocks; j++) live += g_live[i]->blocks[j].size;
-        LOG("[cmdbuf] frame %llu: %d lists' shadows, %llu MB of records; %d free blocks, %llu MB\n",
-            (unsigned long long)now, g_nlive, (unsigned long long)(live >> 20), g_nfree,
-            (unsigned long long)(g_free_bytes >> 20));
+        for (LivePos position = live_next(&g_live, (LivePos){-1, 0}); LIVE(position);
+             position = live_next(&g_live, position)) {
+            for (int j = 0; j < LIVE(position)->nblocks; j++) live += LIVE(position)->blocks[j].size;
+        }
+        LOG("[cmdbuf] frame %llu: %d lists' shadows, %llu MB of records; %d free blocks, %llu MB; since the last line "
+            "%llu inserts, %llu removals, %llu entries shifted\n",
+            (unsigned long long)now, g_live.count, (unsigned long long)(live >> 20), g_nfree,
+            (unsigned long long)(g_free_bytes >> 20), (unsigned long long)g_stat_inserts,
+            (unsigned long long)g_stat_removals, (unsigned long long)g_live.shifted);
+        g_stat_inserts = g_stat_removals = g_live.shifted = 0;
         stats_at = now + 600;
     }
     int k = 0;
@@ -113,14 +126,6 @@ static void shadow_unuse(Shadow *sh) {  // (lock held)
     if (!--sh->users && sh->dead) { free(sh->blocks); free(sh); }
 }
 
-static int live_index(uint64_t lo) {  // (lock held) the first live shadow not wholly before lo
-    int a = 0, b = g_nlive;
-    while (a < b) {
-        int m = (a + b) / 2;
-        if (g_live[m]->hi <= lo && g_live[m]->lo < lo) a = m + 1; else b = m;
-    }
-    return a;
-}
 
 // A command buffer moves from shadow `old` (NULL: none yet), having used `used` guest bytes there, to the shadow
 // for guest memory [lo, hi): the same one when the game adds exactly that range again, unless that is the one
@@ -132,25 +137,23 @@ static Shadow *shadow_switch(Shadow *old, uint64_t used, bool recording, uint64_
     if (old && !old->dead && old->lo < old->hi && old->lo + used < old->hi) old->hi = old->lo + used;
     Shadow *sh = NULL;
     if (lo < hi) {
-        int a = live_index(lo);
-        Shadow *same = a < g_nlive && g_live[a]->lo == lo && g_live[a]->win == hi ? g_live[a] : NULL;
+        LivePos first = live_find(&g_live, lo);  // (the first live shadow not wholly before lo)
+        Shadow *same = LIVE(first) && LIVE(first)->lo == lo && LIVE(first)->win == hi ? LIVE(first) : NULL;
         if (same && (same->users == (same == old)) && !(recording && same == old)) sh = same;
         else {
-            int end = a;
-            while (end < g_nlive && g_live[end]->lo <= lo) end++;
-            for (int i = a; i < end; i++) shadow_kill(g_live[i]);
-            if (g_nlive - (end - a) + 1 > g_caplive) {
-                g_caplive = g_caplive ? g_caplive * 2 : 1024;
-                g_live = realloc(g_live, g_caplive * sizeof *g_live);
-            }
-            memmove(g_live + a + 1, g_live + end, (g_nlive - end) * sizeof *g_live);
-            g_nlive += 1 - (end - a);
+            int dead = 0;
+            for (LivePos at = first; LIVE(at) && LIVE(at)->lo <= lo; at = live_next(&g_live, at), dead++)
+                shadow_kill(LIVE(at));
+            first = live_remove(&g_live, first, dead);
+            g_stat_inserts++;
+            g_stat_removals += dead;
             sh = calloc(1, sizeof *sh);
             sh->lo = sh->hi = lo;
             sh->win = hi;
-            sh->free_to = a + 1 < g_nlive && g_live[a + 1]->lo < hi ? g_live[a + 1]->lo : hi;
-            g_live[a] = sh;
-            if (a > 0 && g_live[a - 1]->free_to > lo) g_live[a - 1]->free_to = lo;
+            first = live_insert(&g_live, first, (LiveRange *)sh);
+            Shadow *next = LIVE(live_next(&g_live, first)), *prev = LIVE(live_prev(&g_live, first));
+            sh->free_to = next && next->lo < hi ? next->lo : hi;
+            if (prev && prev->free_to > lo) prev->free_to = lo;
         }
     } else {
         sh = calloc(1, sizeof *sh);
@@ -168,16 +171,17 @@ static void shadow_claim(Shadow *sh, uint64_t end) {
     if (end <= sh->free_to) { sh->hi = end; return; }
     kmutex_lock(&g_shadow_lock);
     if (!sh->dead) {
-        int i = live_index(sh->lo);
-        while (i < g_nlive && g_live[i] != sh) i++;
-        if (i < g_nlive) {
-            int last = i + 1;
-            while (last < g_nlive && g_live[last]->lo < end) last++;
-            for (int k = i + 1; k < last; k++) shadow_kill(g_live[k]);
-            memmove(g_live + i + 1, g_live + last, (g_nlive - last) * sizeof *g_live);
-            g_nlive -= last - (i + 1);
+        LivePos position = live_find(&g_live, sh->lo);
+        while (LIVE(position) && LIVE(position) != sh) position = live_next(&g_live, position);
+        if (LIVE(position)) {
+            LivePos first = live_next(&g_live, position);
+            int dead = 0;
+            for (LivePos at = first; LIVE(at) && LIVE(at)->lo < end; at = live_next(&g_live, at), dead++)
+                shadow_kill(LIVE(at));
+            Shadow *next = LIVE(live_remove(&g_live, first, dead));
+            g_stat_removals += dead;
             sh->hi = end;
-            sh->free_to = i + 1 < g_nlive && g_live[i + 1]->lo < sh->win ? g_live[i + 1]->lo : sh->win;
+            sh->free_to = next && next->lo < sh->win ? next->lo : sh->win;
         }
     }
     kmutex_unlock(&g_shadow_lock);
@@ -193,11 +197,11 @@ static void shadow_leave(Shadow *sh, uint64_t used) {  // (a command buffer is f
 // A memory pool is finalized: the lists recorded in its memory [lo, hi) are dead.
 void cmdbuf_pool_gone(uint64_t lo, uint64_t hi) {
     kmutex_lock(&g_shadow_lock);
-    int a = live_index(lo), end = a;
-    while (end < g_nlive && g_live[end]->lo < hi) end++;
-    for (int i = a; i < end; i++) shadow_kill(g_live[i]);
-    memmove(g_live + a, g_live + end, (g_nlive - end) * sizeof *g_live);
-    g_nlive -= end - a;
+    LivePos first = live_find(&g_live, lo);
+    int dead = 0;
+    for (LivePos at = first; LIVE(at) && LIVE(at)->lo < hi; at = live_next(&g_live, at), dead++) shadow_kill(LIVE(at));
+    live_remove(&g_live, first, dead);
+    g_stat_removals += dead;
     kmutex_unlock(&g_shadow_lock);
 }
 
@@ -228,12 +232,14 @@ RT_ON_RESET(cmdbuf_shadow_reset) {  // (reboot: every list is dead; command buff
         g_command_buffers = cb->registry_next;
         free(cb);
     }
-    for (int i = 0; i < g_nlive; i++) {
-        for (int k = 0; k < g_live[i]->nblocks; k++) free(g_live[i]->blocks[k].mem);
-        free(g_live[i]->blocks);
-        free(g_live[i]);
+    for (LivePos position = live_next(&g_live, (LivePos){-1, 0}); LIVE(position);
+         position = live_next(&g_live, position)) {
+        Shadow *sh = LIVE(position);
+        for (int k = 0; k < sh->nblocks; k++) free(sh->blocks[k].mem);
+        free(sh->blocks);
+        free(sh);
     }
-    g_nlive = 0;
+    live_clear(&g_live);
     for (int i = 0; i < g_ngrave; i++) free(g_grave[i].mem);
     g_ngrave = 0;
     kmutex_unlock(&g_shadow_lock);
@@ -397,9 +403,25 @@ static Snap snap(Cpu *c) {
     return s;
 }
 static CmdRec *record(Cpu *c, uint32_t op, uint32_t extra, Snap *s) {
+    const uint64_t certificate = nvn_direct_integer_draw(op) && pc_vr_render_trace_enabled()
+        ? pc_vr_render_trace_record(s->x[0]) : 0;
     CmdRec *r = rec(c, cb_of(s->x[0]), op, extra);
     memcpy(r->x, s->x + 1, sizeof r->x);
     memcpy(r->f, s->f, sizeof r->f);
+    // This ID belongs to this command's original recording scope. Child lists
+    // keep their own IDs when called, including zero and historical IDs.
+    nvn_set_render_certificate(r, certificate);
+    // D088: the game UI screen being drawn on this thread, if any, and the marker its pane belongs to (runtime/pc_vr_hud.c).
+    if (nvn_direct_integer_draw(op)) {
+        const uint32_t screen = pc_vr_screen_drawing();
+        // (and what the draw is to the eye-image producer, when the game is finishing a render layer)
+        nvn_set_screen_tag(r, screen | (screen ? (uint32_t)pc_vr_pane_role(screen) << 16 : 0) |
+                                  pc_vr_layer_draw_recording() << 24);
+        uint32_t marker = screen ? pc_vr_marker_drawing(screen) : 0;
+        // [pc-vr-audit] SAVAGEWIND_LOG_PANES: a draw without a marker link carries its pane's number instead.
+        if (!marker && screen && pc_vr_pane_log_on()) marker = PC_VR_PANE_LOG_TAG | pc_vr_pane_log_drawing(screen);
+        nvn_set_marker_tag(r, marker);
+    }
     return r;
 }
 // record with a copy of `len` bytes from the guest pointer in argument `arg`
@@ -640,6 +662,7 @@ NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; }
 // ---- draws (all integer arguments fit in x1..x7)
 NVN(nvnCommandBufferDrawArrays) { Snap s = snap(c); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
 NVN(nvnCommandBufferDrawArraysInstanced) { Snap s = snap(c); record(c, CMD_DRAW_ARRAYS, 0, &s); }
+
 // Debug: SAVAGEWIND_TRACE_COUNT=<n> logs the guest call chain of indexed draws with n indices.
 static void trace_draw(Cpu *c, uint64_t count) {
     static long want = -2;

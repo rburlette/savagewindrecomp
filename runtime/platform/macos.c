@@ -28,6 +28,9 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     return mach_vm_allocate(mach_task_self(), &a, hi - lo, VM_FLAGS_FIXED) == KERN_SUCCESS;
 }
 
+long plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, size_t max) { return -1; }  // (not tracked)
+int plat_any_written(uint64_t addr, uint64_t size) { return -1; }
+
 // Fresh zero pages over the whole window (the old ones are released at once).
 long plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, size_t max) { return -1; }  // (not tracked)
 int plat_any_written(uint64_t addr, uint64_t size) { return -1; }

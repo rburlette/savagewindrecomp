@@ -32,6 +32,38 @@
     X(main_data)               /* main's .data (then .bss, up to main_end) */                                           \
     X(main_end)
 
+// PC VR's sites (tools/game_sites.py: one optional group): all of them, or all 0 and PC VR stays off (pc_vr_main_
+// compatible). Code addresses unless marked; "ret" / "caller": the return address after a call.
+#define GAME_SITES_PC_VR(X)                                                                                            \
+    X(pcvr_matrix_builder)      /* the camera matrix builder (head look composes the eye views into it) */            \
+    X(pcvr_base_caller)         /* its call for the base camera (ret) */                                               \
+    X(pcvr_layer_base_caller)   /* its call for a render layer's base camera (ret) */                                  \
+    X(pcvr_eye_caller)          /* its call for a Labo eye camera (ret) */                                             \
+    X(pcvr_proj_builder)        /* the projection builder */                                                           \
+    X(pcvr_proj_device)         /* the projection's device transform */                                                \
+    X(pcvr_proj_build_caller)   /* the projection update's call to the builder (ret) */                                \
+    X(pcvr_proj_device_caller)  /* its call to the device transform (ret) */                                           \
+    X(pcvr_proj_root_return)    /* the render tree's root traversal (ret) */                                           \
+    X(pcvr_proj_sibling_return) /* a sibling layer's traversal (ret) */                                                \
+    X(pcvr_render_begin)        /* a render layer's begin (its end follows it at +0x58) */            \
+    X(pcvr_render_begin_caller) /* the layer loop's call to begin (ret) */                                             \
+    X(labo_set_vr)              /* the Labo VR object's switch: (vr, on) */                                            \
+    X(labo_end_vr_call)         /* the transition's EndVrMode call (redirected to BeginVrMode) */                      \
+    X(labo_enable_rec_call)     /* its EnableRecording call (redirected to the SevenSix timestamp reset) */            \
+    X(labo_vr_notify_1)         /* the first manager the Options screen notifies after the switch */                  \
+    X(labo_vr_notify_2)         /* the second one */                                                                   \
+    X(labo_sensor_ret)          /* the Labo sensor read's return address */                                            \
+    X(labo_track_start_ret)     /* tracking start's StopSevenSixAxisSensor call (ret) */                               \
+    X(pcvr_cam_update_0)        /* the eight camera types' update entries (runtime/hle/pc_vr_camera_update.c) */       \
+    X(pcvr_cam_update_1) X(pcvr_cam_update_2) X(pcvr_cam_update_3) X(pcvr_cam_update_4)                                \
+    X(pcvr_cam_update_5) X(pcvr_cam_update_6) X(pcvr_cam_update_7)                                                     \
+    X(pcvr_actor_vtable)        /* data: the camera controller actor's vtable */                                       \
+    X(pcvr_eye_vtable)          /* data: the eye camera's vtable */                                                    \
+    X(pcvr_proj_vtable)         /* data: the projection's vtable */                                                    \
+    X(pcvr_base_vtable)         /* data: the base camera's vtable */                                                   \
+    X(labo_manager_slot)        /* data: the Labo manager's singleton slot (manager +0x380: the VR object) */          \
+    X(automation_screen_root)   /* data: the UI root slot automation reads (runtime/hle/framepace.c) */
+
 // Optional helpers are zero when their complete feature group was not found.
 #define GAME_SITES_OPTIONAL(X) \
     X(pouch_lock)             /* native recursive inventory mutex */ \
@@ -70,6 +102,7 @@
 typedef struct {
 #define GAME_SITE_FIELD(n) uint64_t n;
     GAME_SITES(GAME_SITE_FIELD)
+    GAME_SITES_PC_VR(GAME_SITE_FIELD)
     GAME_SITES_OPTIONAL(GAME_SITE_FIELD)
 #undef GAME_SITE_FIELD
 } GameSites;

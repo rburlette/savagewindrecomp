@@ -15,6 +15,9 @@
 #include "../../framepace.h"
 #include "../../imageload.h"
 #include "../../paths.h"
+#include "../../pc_vr.h"
+#include "../../xr/xr_runtime.h"
+#include "../../xr/xr_vulkan.h"
 #include "../../perfmon.h"
 #include "../../prof.h"
 #include "../../settings.h"
@@ -63,19 +66,36 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
                 (unsigned long long)renderer_present_count());
         return VK_FALSE;
     }
-    static int n;
-    if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT && n++ < 500) {
-        LOG("[vk] %s\n", d->pMessage);
+    static atomic_uint n;
+    if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT && atomic_fetch_add(&n, 1) < 500) {
+        LOG("[vk] id=%s xr-call=%s %s\n", d->pMessageIdName ? d->pMessageIdName : "unknown",
+            xr_runtime_current_call(), d->pMessage);
         // SAVAGEWIND_VK_VALIDATION_BT=1: the call stack of each error (with SAVAGEWIND_VK_RECORDER=0 it is the caller's)
         static int bt = -1;
         if (bt < 0) bt = getenv("SAVAGEWIND_VK_VALIDATION_BT") != NULL;
         if (bt && sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) plat_print_backtrace();
+    }
+    // Attribute one concrete pending-command-buffer error without a new crash
+    // handler or any resource/game payload capture. Existing native helper is
+    // bounded to 64 stack frames; enabled only for a requested validation run.
+    static atomic_bool submit_stack_reported;
+    const char *stacks = getenv("SAVAGEWIND_VK_ERROR_STACKS");
+    if (stacks && !strcmp(stacks, "1") && d->pMessageIdName &&
+        !strcmp(d->pMessageIdName, "VUID-vkQueueSubmit-pCommandBuffers-00071") &&
+        !atomic_exchange(&submit_stack_reported, true)) {
+        LOG("[vk-attribution] begin vuid=VUID-vkQueueSubmit-pCommandBuffers-00071 xr-call=%s max-frames=64\n",
+            xr_runtime_current_call());
+        plat_print_backtrace();
+        LOG("[vk-attribution] end\n");
+        fflush(stderr);
     }
     return VK_FALSE;
 }
 
 // SAVAGEWIND_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
+    if (pc_vr_enabled() && !xr_runtime_discover())
+        FATAL("PC VR OpenXR discovery failed; check Link/runtime availability and the PC VR build\n");
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
     const char *ext[28];
@@ -122,8 +142,10 @@ static void create_instance(void) {
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
-    VkResult r = vkCreateInstance(&ci, NULL, &g_vk.inst);
-    if (r != VK_SUCCESS && validate) {
+    VkResult r = pc_vr_enabled() ? xr_runtime_create_vulkan_instance(&ci, &g_vk.inst) : vkCreateInstance(&ci, NULL, &g_vk.inst);
+    // Validation requested in PC VR mode is part of its explicit admission;
+    // do not silently weaken that run when its layer is unavailable.
+    if (r != VK_SUCCESS && validate && !pc_vr_enabled()) {
         LOG("[vk] validation layer unavailable (%d); continuing without\n", r);
         ci.enabledLayerCount = 0;
         ci.enabledExtensionCount--;
@@ -153,6 +175,11 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
 
 // Discrete GPU first (SAVAGEWIND_GPU=<index> picks one), needs Vulkan 1.3 and a queue that can present.
 static void pick_device(void) {
+    VkPhysicalDevice xr_physical = VK_NULL_HANDLE;
+    if (pc_vr_enabled() && !xr_runtime_select_vulkan_device(g_vk.inst, &xr_physical))
+        FATAL("PC VR runtime did not select a Vulkan GPU\n");
+    if (pc_vr_enabled() && getenv("SAVAGEWIND_GPU"))
+        LOG("[pc-vr] SAVAGEWIND_GPU ignored: OpenXR selects the shared graphics device\n");
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
     if (!n) FATAL("no Vulkan device\n");
@@ -169,6 +196,7 @@ static void pick_device(void) {
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
+        if (pc_vr_enabled() && pd[i] != xr_physical) continue;
         // Check presentation before scoring: a headless adapter must not hide a usable GPU.
         uint32_t nq = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(pd[i], &nq, NULL);
@@ -188,7 +216,7 @@ static void pick_device(void) {
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
     }
-    if (best < 0) FATAL("no Vulkan 1.3 device with a graphics+compute+present queue\n");
+    if (best < 0) FATAL("no eligible Vulkan 1.3 device%s\n", pc_vr_enabled() ? " matching the OpenXR runtime selection" : "");
     if (want >= 0 && best != want)
         LOG("[vk] requested GPU %d unavailable or unsuitable; falling back to GPU %d\n", want, best);
     LOG("[vk] selected GPU %d (%s)\n", best, best == want ? "requested" : "automatic");
@@ -228,7 +256,8 @@ static void pick_device(void) {
         LOG("[vk] queue family %u: flags %#x, queues %u, present %s, sparse binding %s\n", i, qp[i].queueFlags,
             qp[i].queueCount, present ? "yes" : "no",
             (qp[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) ? "yes" : "no");
-        if ((qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && present) {
+        if ((qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && present &&
+            (!pc_vr_enabled() || qp[i].queueCount >= 2)) {
             g_vk.qfam = i;
             g_vk.qfam_count = qp[i].queueCount;
             g_vk.sparse_queue = (qp[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
@@ -236,7 +265,9 @@ static void pick_device(void) {
         }
     }
     free(qp);
-    if (g_vk.qfam == UINT32_MAX) FATAL("no graphics+present queue\n");
+    if (g_vk.qfam == UINT32_MAX)
+        FATAL("no graphics+compute+present queue family%s\n", pc_vr_enabled() ?
+              " with a spare OpenXR queue; shared-queue synchronization is not implemented" : "");
     LOG("[vk] using %s\n", g_vk.props.deviceName);
     // Colour images with a list of their view formats (textures.c create_image), on integrated GPUs by default: there
     // the memory traffic it saves pays (Radeon 660M; LAS Recomp 03ee802f measured an Intel UHD 770 faster and an
@@ -862,6 +893,15 @@ static void create_device(void) {
     if (g_vk.provoking_last) next_feature = &pv_on;
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = next_feature};
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
+    // Accepted P1 attributed the Meta runtime's own xrCreateSession shader use
+    // to this bit. Vulkan 1.3 supplies core timeline commands; the old Vulkan
+    // 1.0-only timeline-extension experiment is unnecessary here.
+    if (pc_vr_enabled()) {
+        if (!h->shaderStorageImageMultisample)
+            FATAL("PC VR runtime session requires unsupported shaderStorageImageMultisample\n");
+        b->shaderStorageImageMultisample = VK_TRUE;
+        LOG("[pc-vr] session compatibility shaderStorageImageMultisample supported=1 requested=1; core timeline via Vulkan 1.3\n");
+    }
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
     b->fillModeNonSolid = h->fillModeNonSolid;
@@ -998,7 +1038,7 @@ static void create_device(void) {
         LOG("[vk] AMD FSR 4 device features: %s%s integer dot product %s, subgroup size control %s\n", list, n_got ? "," : "none,",
             f13.shaderIntegerDotProduct ? "on" : "off", f13.subgroupSizeControl && f13.computeFullSubgroups ? "on" : "off");
     }
-    float prio[2] = {1.0f, 1.0f};
+    float prio[3] = {1.0f, 1.0f, 1.0f};
     // One queue: frames are presented on the game's own. A second one that presented (present thread below) went
     // wrong with others' code on it: NVIDIA's GPUs before Turing faulted writing to GPU address 0 within the first
     // frames (#36: GTX 1050 / 1050 Ti / 1050 Mobile, Quadro P1000), and OBS's Game Capture, which copies the image
@@ -1007,9 +1047,14 @@ static void create_device(void) {
     // fullscreen and windowed, at 120 fps with VSync and unlimited, the same or 1-3 fps more than with the second
     // queue. SAVAGEWIND_VK_PRESENT_THREAD=1: two queues and the present thread, as before (testing).
     const char *pt_env = getenv("SAVAGEWIND_VK_PRESENT_THREAD");
-    bool two_q = g_vk.qfam_count >= 2 && pt_env && strcmp(pt_env, "0") != 0;
+    // PC VR keeps the present thread by default (D064: measured that way, with the recorder): the desktop mirror's
+    // present (Optimus: a copy to the integrated GPU's display) stays off the game's queue.
+    bool two_q = g_vk.qfam_count >= (pc_vr_enabled() ? 3u : 2u) && (pt_env ? strcmp(pt_env, "0") != 0 : pc_vr_enabled());
+    // PC VR: one more queue after the game's, reserved for the OpenXR owner (xr_runtime_bind_vulkan below).
+    const uint32_t desktop_queues = two_q ? 2 : 1;
+    const uint32_t xr_queue_index = desktop_queues;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
-                                  .queueCount = two_q ? 2 : 1, .pQueuePriorities = prio};
+                                  .queueCount = desktop_queues + (pc_vr_enabled() ? 1 : 0), .pQueuePriorities = prio};
     {   // (each once: NGX's list, above, may name one the device enables for itself below)
         uint32_t k = 0;
         for (uint32_t i = 0; i < n_ext; i++) {
@@ -1021,12 +1066,15 @@ static void create_device(void) {
     }
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
-    VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    VK_CHECK(pc_vr_enabled() ? xr_runtime_create_vulkan_device(g_vk.phys, &di, &g_vk.dev) :
+                              vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     free(ep);  // (read up to here: extended dynamic state and the FSR 4 checks above, #488)
     fsr_api_probe(g_vk.dev, g_vk.phys);  // (logs what AMD's FSR DLLs offer this device; a no-op without them)
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
     g_vk.present_queue = g_vk.queue;
-    if (qi.queueCount == 2) vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 1, &g_vk.present_queue);
+    if (desktop_queues == 2) vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 1, &g_vk.present_queue);
+    if (pc_vr_enabled() && !xr_runtime_bind_vulkan(g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam, xr_queue_index))
+        FATAL("PC VR session creation failed on the game's Vulkan device\n");
     if (plat_guest_sparse_heap_enabled()) {
         sparse_host_import_probe();
     }
@@ -1771,7 +1819,9 @@ static void recreate_swapchain(void) {
     vk_present_idle();
     pt_retire();
     rec_drain();
+    xr_runtime_vulkan_idle_begin();
     vkDeviceWaitIdle(g_vk.dev);
+    xr_runtime_vulkan_idle_end();
     create_swapchain();
 }
 
@@ -2195,6 +2245,18 @@ void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) 
     else LOG("[vk] saving %s failed\n", path);
 }
 
+static void exit_after_screenshot(void) {
+    xr_runtime_shutdown();
+    fflush(stderr);
+#ifdef _WIN32
+    // Guest and driver threads are still running. Match quick_exit_handler's Windows termination path to
+    // bypass DLL teardown: the CRT _exit path stalled here after the screenshot and stderr flush completed.
+    plat_terminate();
+#else
+    _exit(0);
+#endif
+}
+
 // ================================================================== game presentation (metal.m backend_present)
 // Draws the game's image into the window with the widescreen crop, then the overlay menu.
 extern void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]);
@@ -2210,14 +2272,18 @@ static uint64_t presented_frames(void) { return total_frames; }
 uint64_t vk_frame_counter(void) { return g_frame_counter; }
 static float g_shot_crop[4] = {0, 0, 1, 1};
 static double last_fps_time;
-static NvnTexture *g_last_presented;
+static NvnPresent g_last_presented;
 
 const float *vk_shot_crop(void) { return g_shot_crop; }
 
-void backend_present(NvnTexture *t);
+void backend_present(const NvnPresent *present);
 void backend_represent(void) {
-    if (g_last_presented) backend_present(g_last_presented);
-    else SDL_Delay(16);
+    gpu_lock();
+    NvnPresent last = g_last_presented;
+    last.game_present_id = 0;  // UI replay is not a new game-produced present
+    if (last.texture) backend_present(&last);  // gpu_lock is recursive; keep the texture live across the replay
+    gpu_unlock();
+    if (!last.texture) SDL_Delay(16);
 }
 
 // ---- pipeline pre-warm (exec.c): the first frame that looks like gameplay waits until the pipelines of the list are
@@ -2288,6 +2354,7 @@ static bool fg_wanted(void) {
     static int forced = -2;
     if (forced == -2) forced = getenv("SAVAGEWIND_FG") ? atoi(getenv("SAVAGEWIND_FG")) : -1;
     if (!(forced >= 0 ? forced : g_settings.frame_gen)) return false;
+    if (pc_vr_enabled()) return false;  // (PC VR: the XR owner reprojects at the display's rate; no generated frames)
     static int log = -1;
     static uint64_t n;
     if (log < 0) log = getenv("SAVAGEWIND_FG_LOG") != NULL;
@@ -2422,11 +2489,15 @@ static bool boot_held(void) {  // (GPU lock held: present_locked)
     return boot_hold;
 }
 
-static void present_locked(NvnTexture *t) {
-    g_last_presented = t;
+static void present_locked(const NvnPresent *present) {
+    NvnTexture *t = present->texture;
+    g_last_presented = *present;
     TexBackend *b = vk_tex(t, true);
     ctl_present_tex = b;
     b->presented = true;
+    float crop[4];  // UV origin and size in the logical, unscaled texture
+    nvn_present_crop_uv(present, t->width, t->height, crop);
+    memcpy(g_shot_crop, crop, sizeof crop);
     uint64_t t0 = SDL_GetTicksNS();
     { SW_ZONE("present/end_pass"); vk_end_pass(); }
     g_present_split[1] += SDL_GetTicksNS() - t0;
@@ -2465,7 +2536,13 @@ static void present_locked(NvnTexture *t) {
             output_scale(dw, dh, g_settings.wide_view, &os);
         }
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
-        float crop[4] = {(float)os.crop[0], (float)os.crop[1], (float)os.crop[2], (float)os.crop[3]};  // (uv origin, size)
+        // within the game's crop of the presented image, the part drawn in the window (os.crop: its 16:9 middle in
+        // menus when the view is widened)
+        crop[0] += (float)os.crop[0] * crop[2];
+        crop[1] += (float)os.crop[1] * crop[3];
+        crop[2] *= (float)os.crop[2];
+        crop[3] *= (float)os.crop[3];
+        memcpy(g_shot_crop, crop, sizeof crop);
         renderer_set_scale((float)sx, (float)sy);
         renderer_set_scene_scale((float)os.scene_sx, (float)os.scene_sy);
         renderer_set_shadow_size(shadow_map_size(total_frames + 1));
@@ -2476,7 +2553,6 @@ static void present_locked(NvnTexture *t) {
         }
         VkCommandBuffer cb = vk_cmd();
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
-        memcpy(g_shot_crop, crop, sizeof crop);
         uint64_t td = SDL_GetTicksNS();
         if (gen) {  // the generated frame, as the game's are (crop, anti-aliasing, menu), then this one half a frame later
             vk_present_draw(cb, gen, (float)vx, (float)vy, (float)vw, (float)vh, pv);
@@ -2541,7 +2617,7 @@ static void present_locked(NvnTexture *t) {
         }
         vk_frame_end(shot ? "build/window.png" : wpath[0] ? wpath : fg_real_shot[0] ? fg_real_shot : NULL);
         fg_real_shot[0] = 0;
-        if (shot && getenv("SAVAGEWIND_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (shot && getenv("SAVAGEWIND_EXIT_AFTER_SHOT")) exit_after_screenshot();
     } else {
         renderer_submit();
     }
@@ -2747,7 +2823,7 @@ presented:
                  (unsigned long long)total_frames);
         renderer_save_texture_tex(b, path);
         // a series (SCREENSHOT_FROM) runs on until SAVAGEWIND_WINDOW_SHOT exits
-        if (getenv("SAVAGEWIND_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
+        if (getenv("SAVAGEWIND_EXIT_AFTER_SHOT") && !shot_from) exit_after_screenshot();
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
@@ -2788,14 +2864,17 @@ void vk_shaders_init(void);
 // exit() from any thread: let the GPU finish, keep the pipeline cache, then end the process without the DLL
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
+    xr_runtime_shutdown();
     static int trace = -1;
     if (trace < 0) trace = getenv("SAVAGEWIND_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
     if (g_vk.dev) {
         vk_present_idle();
         rec_drain();
+        xr_runtime_vulkan_idle_begin();
         vkDeviceWaitIdle(g_vk.dev);
         vk_dlss_shutdown();
+        xr_runtime_vulkan_idle_end();
         if (trace) LOG("[vk] exit: saving the pipeline cache\n");
         vk_pipeline_cache_save();
         extern void vk_pso_flush(void);
@@ -2855,6 +2934,12 @@ void ui_window_init(void) {
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();
+    // Khronos' static loader initializes C++ singletons during discovery. Its
+    // destructors were registered after the early partial-init handler above.
+    // Run full shutdown before those destructors on exit from any thread; retain
+    // the upstream fast termination after cleanup while game threads are alive.
+    if (pc_vr_enabled() && atexit(quick_exit_handler) != 0)
+        FATAL("could not register PC VR shutdown before loader destruction\n");
 }
 
 SDL_Window *ui_window(void) { return window; }
@@ -2876,15 +2961,18 @@ void backend_init(void) {
 
 // ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
 void backend_reset(void) {
+    xr_runtime_reset_game();
     if (!g_vk.dev) return;
     vk_present_idle();
     rec_drain();
+    xr_runtime_vulkan_idle_begin();
     vkDeviceWaitIdle(g_vk.dev);
+    xr_runtime_vulkan_idle_end();
     extern void vk_textures_reset(void);
     extern void vk_exec_reset(void);
     vk_textures_reset();
     vk_exec_reset();
-    g_last_presented = NULL;
+    g_last_presented = (NvnPresent){0};
 }
 void backend_guest_memory_reset(void) {}  // (exec.c: the next SetHeapSize maps the heap again, or it is imported on first use)
 void backend_clear_window(void) {
@@ -2923,8 +3011,12 @@ int ui_run(void) {
         // waited for that until the next restart
         uint64_t t0 = SDL_GetTicks();
         while (SDL_GetTicks() - t0 < 16 && SDL_WaitEventTimeout(&e, 16)) {
+            // Opt-in test key holds must expire/cancel even when the host menu consumes this event.
+            extern void input_min_hold_maintenance(void);
+            input_min_hold_maintenance();
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
+                xr_runtime_shutdown(); // Still outside C/C++ atexit destruction.
                 exit(0);
             }
             window_event_log(&e);
@@ -2939,8 +3031,10 @@ int ui_run(void) {
 }
 
 // (game threads present while others submit; the window loop re-presents)
-void backend_present(NvnTexture *t) {
+void vk_vr_present(uint64_t game_present_id);  // exec.c (D048: the PC VR eye images)
+void backend_present(const NvnPresent *present) {
     gpu_lock();
-    present_locked(t);
+    present_locked(present);
+    vk_vr_present(present->game_present_id);
     gpu_unlock();
 }

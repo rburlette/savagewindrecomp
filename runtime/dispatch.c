@@ -1,6 +1,7 @@
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -9,6 +10,7 @@
 #include "gamelib.h"
 #include "hle.h"
 #include "kernel.h"
+#include "pc_vr.h"
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
 static FnTable tables[MAX_MODULES];  // one per module of the game code (runtime/gamelib.h)
@@ -38,9 +40,19 @@ __attribute__((section(".hle$a"), used)) static const HleImpl __start_hle_impls[
 __attribute__((section(".hle$z"), used)) static const HleImpl __stop_hle_impls[1];
 #endif
 
+// PC VR answers the game's motion imports (runtime/hle/pc_vr_motion_contract.c); ordinary imports, and every import
+// outside PC VR, retain their original resolution.
+HostFn pc_vr_motion_contract_lookup(const char *name);
+
 HostFn hle_lookup_impl(const char *name) {
     const char *skip = getenv("SAVAGEWIND_HLE_SKIP");  // debugging: disable HLE for names containing this
     if (skip && strstr(name, skip)) return NULL;
+    HostFn vr_lifecycle = pc_vr_lifecycle_lookup(name);
+    if (vr_lifecycle) return vr_lifecycle;
+    if (pc_vr_enabled()) {
+        HostFn motion_contract = pc_vr_motion_contract_lookup(name);
+        if (motion_contract) return motion_contract;
+    }
     const HleImpl *start = __start_hle_impls, *stop = __stop_hle_impls;
     __asm__("" : "+r"(start), "+r"(stop));  // separate objects: keep the compiler from reasoning about them
     for (const HleImpl *p = start; p < stop; p++)
@@ -398,6 +410,87 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
     }
     plat_protect(page, PLAT_PAGE, PLAT_PROT_RW);
     return true;
+}
+
+// [pc-vr-audit] A CPU data breakpoint's access (runtime/platform/windows.c plat_data_watch): the first one from each
+// slot, host pc and guest call site (lr) is logged with its guest call chain; hits per slot and per site each second.
+void rt_data_watch_hit(unsigned slot, uint64_t pc, const uint64_t regs[4]) {
+    static atomic_flag lock = ATOMIC_FLAG_INIT;
+    static struct { uint64_t pc, lr, hits; unsigned slot; } sites[256];
+    static int nsites;
+    static uint64_t window_ns, window_hits[4];
+    const Cpu *cpu = kernel_current_cpu();
+    const uint64_t lr = cpu ? cpu->x[30] : 0, now = plat_now_ns();
+    while (atomic_flag_test_and_set_explicit(&lock, memory_order_acquire)) {}
+    window_hits[slot & 3]++;
+    int i = 0;
+    while (i < nsites && !(sites[i].pc == pc && sites[i].lr == lr && sites[i].slot == slot)) i++;
+    if (i == nsites && nsites < 256) {
+        sites[nsites].pc = pc;
+        sites[nsites].lr = lr;
+        sites[nsites++].slot = slot;
+        uint64_t offset = 0;
+        const char *name = rt_host_fn_name(pc, &offset);
+        if (!name) name = plat_symbol(pc, &offset);
+        if (!name) name = "savagewind rt_fault_watch", offset = pc - (uint64_t)(uintptr_t)&rt_fault_watch;
+        extern uint64_t renderer_present_count(void);
+        fprintf(stderr, "[pc-vr-audit] watch site=%d slot=%u by %s+%llx present=%llu (thread %x) guest x0-x2 %llx %llx "
+                "%llx host rax rcx rdx r8 %llx %llx %llx %llx\n", i, slot, name, (unsigned long long)offset,
+                (unsigned long long)renderer_present_count(), kernel_current_thread_handle(),
+                (unsigned long long)(cpu ? cpu->x[0] : 0), (unsigned long long)(cpu ? cpu->x[1] : 0),
+                (unsigned long long)(cpu ? cpu->x[2] : 0), (unsigned long long)regs[0], (unsigned long long)regs[1],
+                (unsigned long long)regs[2], (unsigned long long)regs[3]);
+        extern void kernel_log_guest_chain(void);
+        kernel_log_guest_chain();
+    }
+    if (i < nsites) sites[i].hits++;
+    if (!window_ns) window_ns = now;
+    if (now - window_ns >= 1000000000ull) {
+        extern uint64_t renderer_present_count(void);
+        fprintf(stderr, "[pc-vr-audit] watch window present=%llu hits=%llu,%llu,%llu,%llu sites",
+                (unsigned long long)renderer_present_count(), (unsigned long long)window_hits[0],
+                (unsigned long long)window_hits[1], (unsigned long long)window_hits[2],
+                (unsigned long long)window_hits[3]);
+        for (int k = 0; k < nsites; k++)
+            if (sites[k].hits) fprintf(stderr, " %d:%llu", k, (unsigned long long)sites[k].hits), sites[k].hits = 0;
+        fprintf(stderr, "\n");
+        memset(window_hits, 0, sizeof window_hits);
+        window_ns = now;
+    }
+    atomic_flag_clear_explicit(&lock, memory_order_release);
+}
+
+// [pc-vr-audit] The control endpoint's `watch <address> [<address> ...]` (developer mode, Windows): CPU data breakpoints
+// on up to four 8-byte guest words; every read or write of one is reported by rt_data_watch_hit above. `watch` with new
+// addresses replaces the earlier ones. Threads started after the command are not covered.
+#include "control.h"
+static void cmd_watch(int argc, char **argv, ControlReply *reply) {
+#ifdef _WIN32
+    extern bool plat_data_watch(const uint64_t addr[4]);
+    uint64_t addresses[4] = {0};
+    if (argc < 2 || argc > 5) {
+        control_fail(reply, "Usage: watch <address> [<address> ...] (at most four)");
+        return;
+    }
+    for (int i = 1; i < argc; i++) {
+        char *end = NULL;
+        addresses[i - 1] = strtoull(argv[i], &end, 0);
+        if (!end || *end || addresses[i - 1] < GUEST_LO || addresses[i - 1] >= GUEST_HI) {
+            control_fail(reply, "watch: %s is not a guest address", argv[i]);
+            return;
+        }
+    }
+    control_field_bool(reply, "armed", plat_data_watch(addresses));
+#else
+    (void)argc, (void)argv;
+    control_fail(reply, "watch: Windows only");
+#endif
+}
+
+void rt_data_watch_control_init(void) {
+    static const ControlCmd commands[] = {
+        {"watch", "<address> [<address> ...]", "Log the code that reads or writes up to four guest words", cmd_watch}};
+    control_register(commands, 1);
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {

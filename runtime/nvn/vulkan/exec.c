@@ -25,13 +25,20 @@
 #include "vk.h"
 #include "bloom_scale.h"
 #include "vram.h"
+#include "empty_draw.h"
 #include "fsr3.h"
 #include "fsr_api.h"
 #include "mvec.h"
 #include "../output_scale.h"
 #include "record.h"
 #include "../renderer.h"
+#include "../output_scale.h"
+#include "../labo_premask_capture.h"
+#include "../../hle/pc_vr_render_trace.h"
+#include "../../xr/xr_vulkan.h"
 #include "../../settings.h"
+#include "../../pc_vr.h"
+#include "../../pc_vr_hud.h"
 #include "../../color_grade.h"
 #include "../output_scale.h"
 #include "framegen.h"
@@ -45,11 +52,12 @@
 
 static uint64_t stat_build_waits;  // draws that waited for their pipeline (draw_must_happen)
 static uint64_t stat_links_now;    // pipelines linked on the render thread within the frame's budget (link_now)
+static uint64_t stat_stereo_holds; // PC VR draws skipped for the rest of a frame after a build landed mid-frame (stereo_hold)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t draws_total;  // (every draw since the start, never reset: vk_draw_total)
 uint64_t vk_draw_total(void) { return draws_total; }  // (device.c boot_held: how much the game draws a frame)
 static uint64_t stat_gw_waits, stat_gw_holds;  // draws / dispatches that waited for a storing shader; lists held (gw_check)
-static uint64_t stat_uub, stat_uub_same, stat_gcopy_hit, stat_gcopy_miss, stat_gcopy_bytes;  // UpdateUniformBuffer; guest_copy cache
+static uint64_t stat_uub, stat_uub_same, stat_gcopy_hit, stat_gcopy_miss, stat_gcopy_bytes, stat_gcopy_epoch_reject;  // UpdateUniformBuffer; guest_copy cache
 static uint64_t stat_ubo_direct, stat_chain_barriers;  // constant buffers bound in place (ubo_direct)
 static void ubo_check_done(bool report);
 static void vdyn_check(uint64_t seq);
@@ -82,7 +90,7 @@ static VkQueryPool prof_qp;
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
 static uint64_t cum_xwait;  // (profiling) the part of cum_wait spent inside backend_execute
 static __thread bool in_execute;  // (this thread is in backend_execute)
-static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
+static uint32_t prof_end_line[16384];  // passes ended, by the exec.c line that ended them (0: submit / present)
 uint64_t prof_views_created;  // textures.c vk_image_view cache misses
 uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
@@ -777,11 +785,15 @@ void vk_translator_setup(void) {
         maxwell_gmem_snap ? "through copies" : "in place");
 }
 
+// PC VR: off unless SAVAGEWIND_GPU_OVERLAP=1. Each image reaches the headset up to a frame later, and head
+// translation is not reprojected: the user preferred it off despite about 10% more frames (D058).
 static bool gpu_overlap(void) {
     static int on = -1;
     if (on < 0) {
-        on = !getenv("SAVAGEWIND_GPU_OVERLAP") || atoi(getenv("SAVAGEWIND_GPU_OVERLAP"));
-        LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; SAVAGEWIND_GPU_OVERLAP=0: off)\n", on ? "on" : "off");
+        const char *option = getenv("SAVAGEWIND_GPU_OVERLAP");
+        on = option ? atoi(option) != 0 : !pc_vr_enabled();
+        LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; SAVAGEWIND_GPU_OVERLAP=0/1: off/on, PC VR default off)\n",
+            on ? "on" : "off");
     }
     return on;
 }
@@ -921,7 +933,7 @@ static VkDescriptorSet vk_alloc_set_one(VkDescriptorSetLayout layout, int count,
 // 64 MB host-visible chunks (device-local when the GPU exposes resizable BAR); a chunk is reused once every
 // submission that allocated from it has completed.
 #define CHUNK_SIZE (64ull << 20)
-typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
+typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq, epoch; } Chunk;
 static Chunk *chunks;
 static int nchunks, active = -1;
 
@@ -964,6 +976,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
         if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
     if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
     active = pick;
+    chunks[pick].epoch++;  // invalidate cached spans from an earlier use of this chunk
     chunks[pick].used = size;
     chunks[pick].seq = pending;
     stat_upload_bytes += size;
@@ -1031,7 +1044,7 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 // a frame in the open world.)
 #define GCOPY_TAB 4096
 #define UUB_MAX 64
-static struct { uint64_t addr, size, gen, serial, mask; int chunk; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, gen, serial, mask, epoch; int chunk; VkSpan span; } gcopy[GCOPY_TAB];
 static uint64_t gcopy_gen = 1;
 static struct { uint64_t lo, hi, serial; } uubt[UUB_MAX];  // ranges UpdateUniformBuffer wrote, with the last update's count
 static int nuub;
@@ -1064,10 +1077,13 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
         bool stale = false;
         for (uint64_t m = e->mask; m && !stale; m &= m - 1) stale = uubt[__builtin_ctzll(m)].serial > e->serial;
         if (!stale) {
-            uint64_t pending = vk_pending_seq();
-            if (chunks[e->chunk].seq < pending) chunks[e->chunk].seq = pending;
-            stat_gcopy_hit++;
-            return e->span;
+            if (e->epoch == chunks[e->chunk].epoch) {
+                uint64_t pending = vk_pending_seq();
+                if (chunks[e->chunk].seq < pending) chunks[e->chunk].seq = pending;
+                stat_gcopy_hit++;
+                return e->span;
+            }
+            stat_gcopy_epoch_reject++;
         }
     }
     stat_gcopy_miss++;
@@ -1076,7 +1092,8 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     uint64_t mask = 0;
     for (int i = 0; i < nuub; i++)
         if (addr < uubt[i].hi && uubt[i].lo < addr + size) mask |= 1ull << i;
-    e->addr = addr; e->size = size; e->gen = gen; e->serial = uub_serial; e->mask = mask; e->chunk = active; e->span = s;
+    e->addr = addr; e->size = size; e->gen = gen; e->serial = uub_serial; e->mask = mask;
+    e->chunk = active; e->epoch = chunks[active].epoch; e->span = s;
     return s;
 }
 
@@ -1282,9 +1299,9 @@ const char *renderer_stats(void) {
                  (unsigned long long)stat_sets, (unsigned long long)stat_sets_reused, (unsigned long long)stat_feedback_loops,
                  (unsigned long long)stat_feedback_barriers, (unsigned long long)stat_gw_waits, (unsigned long long)stat_gw_holds);
         n = strlen(stats_text);
-        snprintf(stats_text + n, sizeof stats_text - n, ", uub %llu (%llu same), gcopy %llu hit %llu miss (%.1f MB)",
+        snprintf(stats_text + n, sizeof stats_text - n, ", uub %llu (%llu same), gcopy %llu hit %llu miss %llu epoch-reject (%.1f MB)",
                  (unsigned long long)stat_uub, (unsigned long long)stat_uub_same, (unsigned long long)stat_gcopy_hit,
-                 (unsigned long long)stat_gcopy_miss, stat_gcopy_bytes / 1048576.0);
+                 (unsigned long long)stat_gcopy_miss, (unsigned long long)stat_gcopy_epoch_reject, stat_gcopy_bytes / 1048576.0);
         n = strlen(stats_text);
         if (stat_ubo_direct) snprintf(stats_text + n, sizeof stats_text - n, ", cbuf in place %llu", (unsigned long long)stat_ubo_direct);
         n = strlen(stats_text);
@@ -1295,7 +1312,11 @@ const char *renderer_stats(void) {
         n = strlen(stats_text);
         if (stat_links_now) snprintf(stats_text + n, sizeof stats_text - n, ", links now %llu", (unsigned long long)stat_links_now);
         stat_links_now = 0;
-        stat_uub = stat_uub_same = stat_gcopy_hit = stat_gcopy_miss = stat_gcopy_bytes = stat_ubo_direct = stat_chain_barriers = 0;
+        n = strlen(stats_text);
+        if (stat_stereo_holds) snprintf(stats_text + n, sizeof stats_text - n, ", stereo holds %llu", (unsigned long long)stat_stereo_holds);
+        stat_stereo_holds = 0;
+        stat_uub = stat_uub_same = stat_gcopy_hit = stat_gcopy_miss = stat_gcopy_epoch_reject = stat_gcopy_bytes = 0;
+        stat_ubo_direct = stat_chain_barriers = 0;
         ubo_check_done(true);
         stat_gw_waits = stat_gw_holds = 0;
         stat_sets = stat_sets_reused = 0;
@@ -1329,7 +1350,7 @@ const char *renderer_stats(void) {
                  prof_heap_range_check_ns / 1e6);
         n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, " | pass ends:");
-        for (int l = 0; l < 4096; l++)
+        for (int l = 0; l < 16384; l++)
             if (prof_end_line[l] > 20) { n = strlen(stats_text); snprintf(stats_text + n, sizeof stats_text - n, " %d:%u", l, prof_end_line[l]); }
         memset(prof_end_line, 0, sizeof prof_end_line);
         RecStats rs;  // (record.c: the recorder thread's work and every wait on it, this interval)
@@ -2039,7 +2060,7 @@ void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
-    if (prof && line < 4096) prof_end_line[line]++;
+    if (prof && line < 16384) prof_end_line[line]++;
     if (prof_enabled() && line < 4096) {  // (the profiler) passes ended, by the line that ended them
         static ProfSite end_site[4096];
         if (!end_site[line].id) {
@@ -2090,9 +2111,80 @@ static void vk_end_pass_at(int line) {
 
 static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v : 1; }
 
+// PC VR, D057: the gameplay HUD's own image. The draws vr_is_hud_draw selects (the HUD's draws into the final
+// image) are drawn into it instead of the final image, so the HUD can go to the headset on its own panel. It has the
+// final image's size and holds premultiplied linear colour with coverage in alpha (vr_hud_blend).
+#define VR_HUD_IMAGE_FORMAT VK_FORMAT_R16G16B16A16_SFLOAT
+typedef struct {
+    int state;  // 0 not allocated, 1 ready, -1 off (allocation failed)
+    VkImage image;
+    VmaAllocation memory;
+    VkImageView view;
+    uint32_t width, height;
+    uint64_t drawn;  // renderer_present_count() + 1 of the frame that last drew it
+} VrHudImage;
+static VrHudImage vr_hud_image;
+// vr_draw_to_hud_image: the draw being recorded goes to the HUD image (set per draw by draw_'s routing, cleared after
+// its begin_pass), so begin_pass opens a pass into it. vr_pass_to_hud_image: the open pass draws into the HUD image
+// (set per pass by begin_pass; read by draw_ for the HUD's blend and by the split of long passes).
+static bool vr_draw_to_hud_image, vr_pass_to_hud_image;
+
+// The HUD image at final_image's size, (re)allocated in commands before a pass. Per pass into the HUD image
+// (begin_pass, for its first colour target). False: unavailable, draw as before.
+static bool vr_hud_image_target(const TexBackend *final_image, VkCommandBuffer commands) {
+    if (vr_hud_image.state < 0) return false;
+    if (vr_hud_image.image && vr_hud_image.width == final_image->width &&
+        vr_hud_image.height == final_image->height)
+        return true;
+    if (vr_hud_image.image) {  // (a window resize rescaled the final image)
+        vk_defer_view(vr_hud_image.view);
+        vk_defer_image(vr_hud_image.image, vr_hud_image.memory);
+    }
+    memset(&vr_hud_image, 0, sizeof vr_hud_image);
+    vr_hud_image.state = -1;
+    VkImageCreateInfo image_info = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                                    .imageType = VK_IMAGE_TYPE_2D,
+                                    .format = VR_HUD_IMAGE_FORMAT,
+                                    .extent = {final_image->width, final_image->height, 1},
+                                    .mipLevels = 1,
+                                    .arrayLayers = 1,
+                                    .samples = VK_SAMPLE_COUNT_1_BIT,
+                                    .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                    .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+    VmaAllocationCreateInfo memory_info = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VkImage image;
+    VmaAllocation memory;
+    if (vmaCreateImage(g_vk.vma, &image_info, &memory_info, &image, &memory, NULL) != VK_SUCCESS) {
+        LOG("[pc-vr-eyes] hud image allocation failed; the HUD stays in the eye images\n");
+        return false;
+    }
+    VkImageViewCreateInfo view_info = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VR_HUD_IMAGE_FORMAT,
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VkImageView view;
+    if (vkCreateImageView(g_vk.dev, &view_info, NULL, &view) != VK_SUCCESS) {
+        vmaDestroyImage(g_vk.vma, image, memory);  // (never recorded)
+        LOG("[pc-vr-eyes] hud image view failed; the HUD stays in the eye images\n");
+        return false;
+    }
+    vk_image_init_layout(commands, image, VK_IMAGE_ASPECT_COLOR_BIT);
+    vr_hud_image = (VrHudImage){.state = 1, .image = image, .memory = memory, .view = view,
+        .width = final_image->width, .height = final_image->height};
+    LOG("[pc-vr-eyes] hud image %ux%u format=R16G16B16A16_SFLOAT premultiplied\n", final_image->width, final_image->height);
+    return true;
+}
+
+// The draws between submissions at a pass boundary (SAVAGEWIND_VK_SUBMIT_DRAWS; 300). Per pass (begin_pass) and per
+// draw (the split of long passes at the end of draw_).
+static int submit_draw_count(void) {
+    static int count = -1;
+    if (count < 0) count = getenv("SAVAGEWIND_VK_SUBMIT_DRAWS") ? atoi(getenv("SAVAGEWIND_VK_SUBMIT_DRAWS")) : 300;
+    return count;
+}
+
 static void begin_pass(void) {
     after_dispatch = false;  // (dispatch_compute: a pass in between)
-    if (in_pass && !st.rt_dirty) return;
+    if (in_pass && !st.rt_dirty && vr_pass_to_hud_image == vr_draw_to_hud_image) return;
     uint64_t new_key = det_on() ? det_key() : 0;  // (the hash of st.rt: only where targets are left out, Mali)
     uint8_t new_detached = det_predict(new_key);
     det_no_next = false;
@@ -2100,6 +2192,7 @@ static void begin_pass(void) {
     pass_key = new_key;
     pass_detached = new_detached;
     pass_serial++;
+    vr_pass_to_hud_image = vr_draw_to_hud_image;
     if (det_on()) {
         static uint64_t passes, slots, t0;
         passes++;
@@ -2123,8 +2216,7 @@ static void begin_pass(void) {
     // (nvnSyncWait) before it goes on: the two times added up, a fifth of the frames ran over 31.7 ms, and the game
     // went to 20 fps. A submission at a pass boundary every ~300 draws lets the GPU work on the frame meanwhile.
     // SAVAGEWIND_VK_SUBMIT_DRAWS=<n> sets the count (0: one submission per command list, as before).
-    static int submit_draws = -1;
-    if (submit_draws < 0) submit_draws = getenv("SAVAGEWIND_VK_SUBMIT_DRAWS") ? atoi(getenv("SAVAGEWIND_VK_SUBMIT_DRAWS")) : 300;
+    const int submit_draws = submit_draw_count();
     // Not once the list has recorded a shader that stores to guest memory (global memory, the imported heap): run
     // on the GPU while the rest of the list is translated, it wrote memory this thread was copying for later draws and
     // dispatches (uniforms, vertices), they got half-written data, and the GPU faulted on a write (~1 world load in
@@ -2256,11 +2348,16 @@ static void begin_pass(void) {
                 continue;
             }
         }
-        ca[i].imageView = v;
+        if (i == 0 && vr_pass_to_hud_image && !vr_hud_image_target(b, cb)) vr_pass_to_hud_image = false;
+        const bool hud = i == 0 && vr_pass_to_hud_image;
+        ca[i].imageView = hud ? vr_hud_image.view : v;
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        if (b->feedback_seen && b->feedback_ok) {  // a target some draw samples while writing it (resolve_feedback)
+        if (hud) {  // D057: the HUD's own image instead of the final image, cleared to transparent by its first pass
+            if (vr_hud_image.drawn != renderer_present_count() + 1) ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            vr_hud_image.drawn = renderer_present_count() + 1;
+        } else if (b->feedback_seen && b->feedback_ok) {  // a target some draw samples while writing it (resolve_feedback)
             if (g_vk.feedback_layout) {
                 if (!b->in_feedback_layout && pass_nfbl < 8) {
                     feedback_layout_move(cb, b, true);
@@ -2276,12 +2373,13 @@ static void begin_pass(void) {
             }
             pass_feedback |= (uint8_t)(1u << i);
         }
-        bool fresh = (int)renderer_texture_level_fresh(t) | (int)renderer_texture_frame_fresh(t);  // both: each marks its state
-        if (renderer_texture_first_write(t) || fresh) {
+        bool fresh = !hud && ((int)renderer_texture_level_fresh(t) | (int)renderer_texture_frame_fresh(t));  // both: each marks its state
+        if (!hud && (renderer_texture_first_write(t) || fresh)) {
             ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             ca[i].clearValue.color.float32[3] = fresh ? 0.0f : 1.0f;
         }
-        pass_color[i] = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4) && vk_format(t->format) == b->format
+        pass_color[i] = hud ? VR_HUD_IMAGE_FORMAT :
+                        st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4) && vk_format(t->format) == b->format
                       ? vk_format(st.rt.cview[i].format) : b->format;
         pass_color[i] = vk_view_format(b, pass_color[i]);  // (g_vk.lean_usage: the format its view really has)
         // Drawn into through a view of a compressed image's blocks: the pipeline's format is the block image's, the one
@@ -2663,7 +2761,9 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
         VkImageAspectFlags dsa = (depth && pass_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (stencil && pass_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
         if (dsa) a[n++] = (VkClearAttachment){.aspectMask = dsa, .clearValue.depthStencil = {dval, sval}};
         VkClearRect cr = {rect, 0, 1};
-        if (n) rec_CmdClearAttachments(cb, n, a, 1, &cr);
+        if (n) {
+            rec_CmdClearAttachments(cb, n, a, 1, &cr);
+        }
         return;
     }
     VkPipeline p = clear_pipeline(index, kind, mask, depth, stencil);
@@ -2708,6 +2808,7 @@ typedef struct {
     bool vs_uses_vid;
     uint8_t fs_gather;  // (up_fix) the fragment stage's first gathered texture: 0 not looked yet, 1 none, 2 + its slot
     _Atomic int state;  // 0 building, 1 ready, 2 failed
+    uint64_t skipped_at;  // (stereo_hold) present count + 1 of the frame a draw skipped it while building; 0 none
 } Prog;
 
 // The push constants of a motion vector program (mvec.c MVEC_PUSH: the history offsets of the previous frame's
@@ -3442,7 +3543,7 @@ typedef struct {
 } PipeState;
 typedef struct { Prog *prog; PipeState s; } PipeKey;
 
-typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
+typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; uint64_t skipped_at; } Pipe;  // state: 0 building, 1 ready, 2 failed; skipped_at: stereo_hold
 #define PIPE_TAB 8192  // (the first size; grown at half load like prog_tab)
 typedef struct { uint64_t key; Pipe *pipe; } PipeSlot;
 static PipeSlot *pipe_tab;
@@ -4078,6 +4179,732 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
     }
     return d;
+}
+
+// =====================================================================================================================
+// PC VR (D048 onward): the renderer's side of third-person VR. It finds the two eye images the game draws in its Labo
+// VR mode, copies them for the headset, splits the HUD and menus off onto flat panels, draws the pieces the game ties
+// to the world at their 3D points, and keeps the desktop window showing the left eye. "Labo" is the game's Nintendo
+// Labo VR mode, whose two eye cameras PC VR reuses; the D numbers are decisions in the root repository's
+// docs/DECISIONS.md. The vr_ names are PC VR's (its play configuration, runtime/pc_vr_config.h; log lines [pc-vr-...]).
+//
+// The modules, beside this file in runtime/nvn/vulkan/:
+//  - vr_math.h        geometry on plain values: rotations, where an eye sees a point, the aim ray's hit, the letterbox;
+//  - vr_scene_depth.h each eye's scene depth target, as its scene-final draw attached it;
+//  - vr_frame.h       a frame's findings and its kind at the present (the per-frame result);
+//  - vr_draw_route.h  where each 2D draw into the final image goes (the per-draw result), and the held-scene decision;
+//  - vr_world_hud.h   the move of a world-tied HUD draw into its eye's half (markers, reticles, the fade);
+//  - vr_eyes.c        the eye images: slots, the per-frame copy, the offer to the XR owner, the game reset;
+//  - vr_aim.c         the crosshair's depth along the aim ray, sampled from the scene's depth;
+//  - vr_mirror.c      the desktop window's copy of the left eye (D085);
+//  - vr_shots.c       diagnostic PNG shots of the eye and HUD images.
+// The two results: the per-draw route (vr_draw_route.h), asked by draw_ for every HUD draw; and the per-frame kind
+// (vr_frame.h), decided by vr_eyes.c at each present from the findings the draws below set.
+//
+// What stays in this file, and why: the hubs that read the executor's private state (st, dc, the pass, the program
+// and its textures, the guest-to-device mapping) and hand the modules plain values; the code on the per-draw path
+// (the draw hooks, the route's hub, the world-tied HUD's hooks, the rune aim), which stays in this translation unit
+// because the play build has no link-time optimisation, with the state it reads defined here so that its reads stay
+// direct loads (vr_eyes.h says why); the HUD's own image and its pass (begin_pass, texture_info, vr_hud_blend); and
+// the executor's PC VR policy (stereo_hold, the split passes).
+//
+// The Labo frame, in guest (Switch) pixels. The game renders each eye's scene into an 800x900 image (an "eye-shaped"
+// image: aspect 0.87 to 0.91), then places both into the two 960x1080 halves of its 1920x1080 "final image", draws the
+// HUD and menus over them, and last runs its lens pass, which draws the final image to the window through the Labo
+// lens distortion. PC VR copies the two halves just before the lens pass (vr_capture_eyes).
+//
+// Upstream's short names, used throughout this file: st is the guest's current NVN state (render targets st.rt,
+// viewports, uniform buffers st.ubuf); dc is the Vulkan state of the draw being recorded; pr is the draw's program
+// (its shaders' interface: pr->fi is the fragment stage's, with its textures); r is the recorded command (CmdRec).
+// =====================================================================================================================
+
+// ------------------------------------------------------------------------------------------- diagnostic image shots
+// Saving GPU images of the PC VR path as PNGs (SAVAGEWIND_PC_VR_SHOT, SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS): vr_shots.c.
+// A shot needs no render pass open: after a draw, vr_shot_after_draw ends the pass first.
+#include "vr_shots.h"
+
+// ------------------------------------------------------------------------------------------------ VR eye images: state
+// D048 (part of the PC VR play configuration): the eye-image producer, vr_eyes.c. Its state is public
+// (vr_eyes.h) for the draw hooks below, which read it and set the frame's findings on the per-draw path, and is defined
+// here, in their translation unit, so that those accesses stay direct loads and stores (vr_eyes.h says why).
+#include "vr_eyes.h"
+VrEyes vr_eyes;
+
+// ----------------------------------------------------------------------------------------------- the crosshair's depth
+// D073: where the aim ray meets the scene, so the crosshair can be drawn at that depth (vr_world_hud_draw).
+//
+// An eye's scene depth is the depth target the game's finishing draw of the eye layer (its scene-final draw, known by
+// the game's tag) has attached (vr_scene_depth.h). The draw hooks below keep that state, vr_scene_depth, on the
+// per-draw path. At the lens pass the aim module samples
+// the last certified eye's scene depth along the aim ray and, a frame or two later, reads where the ray meets the
+// scene (vr_aim.c, vr_aim.h). Its result, vr_aim_result, is defined here for the reticle and the rune aim, which read it
+// on the draw and constant buffer paths: their reads stay direct (vr_eyes.h says why).
+// Each eye's scene depth target and the last eye drawn (VrSceneDepth).
+#include "vr_scene_depth.h"
+static VrSceneDepth vr_scene_depth = {.last_eye = -1};
+#include "vr_aim.h"
+VrAimResult vr_aim_result;
+
+// D073, D088: the world-tied HUD. When the HUD draw being recorded is a marker's, a reticle's or the fade's
+// (vr_world_hud_draw, vr_hud_fade), how to move it into its eye's half: the model, the move and its geometry are
+// vr_world_hud.h, the hub below (HUD markers in the world). The move is applied to the draw's vertices, in the
+// projection matrix of nn::ui2d's vertex constants (vr_world_hud_patch), so the GPU clips the moved draw against the
+// eye's half. (Moving the draw's viewport, as before, clipped it at the game's own screen edge, and could not turn it.)
+// Its state, who sets and resets what: vr_world_hud.h. Defined here, in the translation unit of the per-draw hooks that
+// read it, so those reads stay direct loads (vr_eyes.h says why).
+#include "vr_world_hud.h"
+static VrWorldHud vr_world_hud;
+
+// The draw's tags, what the game said about the draw when it was recorded (runtime/nvn/nvn.h), set for every executed
+// draw by draw() before draw_ runs, and read by the hooks of that draw.
+// D088: the game UI screen that recorded the draw being executed (its tag, runtime/pc_vr_hud.c; 0: none). A draw goes
+// into the world through its own pane's marker (vr_world_hud_draw), so a popup's text beside a marker stays with
+// its box on the panel.
+static uint32_t vr_draw_screen;
+// D088: the marker report bound to the draw's pane, or to its nearest parent with a binding (runtime/pc_vr_hud.c
+// pc_vr_marker_drawing); PC_VR_MARKER_FLAT: the game gave the piece a fixed HUD place; 0: no world point known.
+static uint32_t vr_draw_marker;
+// What the UI pane that recorded the draw is (runtime/pc_vr_hud.c pc_vr_pane_role): a reticle, the fade, a backdrop.
+static PcVrPaneRole vr_draw_role;
+// The draw's own render certificate (0: none): the eye layer it was recorded in, with that frame's pose.
+static uint64_t vr_draw_certificate;
+// [pc-vr-audit] SAVAGEWIND_LOG_PANES: the number of the UI pane that recorded the draw (0: none, or logging off).
+static uint32_t vr_draw_pane;
+
+// vr_rotate: the pose maths the aim ray, the world-tied HUD markers and the rune aim share.
+#include "vr_math.h"
+
+// ------------------------------------------------------------------------- VR eye images: shots over the held scene
+// This frame's world-tied HUD draws left out over the held scene (draw_), for the log line of the quick menu shots
+// (SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS, vr_shots.c vr_quick_menu_shot). Counted here, a plain increment on the draw path;
+// cleared at each present (vk_vr_present).
+static unsigned vr_frame_world_left_out;
+
+// ----------------------------------------------------------------- VR eye images: world pieces without a marker link
+// A world screen's HUD draw (pc_vr_screen_kind) without a marker link (marker 0: no pane up its parents has a binding,
+// or the game moved the piece without a known world point; a fixed HUD place's draws are drawn flat, not counted
+// here) is left out of the HUD's image (draw_): its
+// world point is not known, and on the panel it would be a flat copy at the wrong depth (the speech balloon flashed
+// flat as a quick menu closed; user, 2026-11-11). Each run of game presents with such draws outside a held scene is
+// logged once it ends, the first VR_UNLINKED_WORLD_LINES runs: how many draws over how many presents, the run's first
+// present, and how many presents after the last one over a held scene it began.
+#define VR_UNLINKED_WORLD_LINES 16
+static struct {
+    uint64_t frame_draws;        // this frame's such draws (draw_)
+    uint64_t run_draws, run_presents, run_first_present;  // the current run (run_presents 0: none)
+    uint64_t last_held_present;  // the last game present over a held scene (0: none yet)
+    unsigned lines;              // the runs logged
+} vr_unlinked_world;
+
+// At each game present (vk_vr_present), with whether its frame was over the held scene.
+static void vr_unlinked_world_present(uint64_t game_present_id, bool over_world) {
+    if (over_world) vr_unlinked_world.last_held_present = game_present_id;
+    const uint64_t draws = vr_unlinked_world.frame_draws;
+    vr_unlinked_world.frame_draws = 0;
+    if (draws) {
+        if (!vr_unlinked_world.run_presents) {
+            vr_unlinked_world.run_first_present = game_present_id;
+            vr_unlinked_world.run_draws = 0;
+        }
+        ++vr_unlinked_world.run_presents;
+        vr_unlinked_world.run_draws += draws;
+        return;
+    }
+    if (!vr_unlinked_world.run_presents) return;
+    if (vr_unlinked_world.lines < VR_UNLINKED_WORLD_LINES) {
+        ++vr_unlinked_world.lines;
+        char after_held[24] = "none";
+        if (vr_unlinked_world.last_held_present && vr_unlinked_world.last_held_present < vr_unlinked_world.run_first_present)
+            snprintf(after_held, sizeof after_held, "%llu", (unsigned long long)(vr_unlinked_world.run_first_present -
+                                                                                 vr_unlinked_world.last_held_present));
+        LOG("[pc-vr-eyes] world pieces without a marker link left out: draws=%llu presents=%llu first_present=%llu "
+            "presents_after_held_scene=%s (1: the first present after it; line %u of %u)\n",
+            (unsigned long long)vr_unlinked_world.run_draws, (unsigned long long)vr_unlinked_world.run_presents,
+            (unsigned long long)vr_unlinked_world.run_first_present, after_held, vr_unlinked_world.lines,
+            VR_UNLINKED_WORLD_LINES);
+    }
+    vr_unlinked_world.run_presents = 0;
+}
+
+// ----------------------------------------------------------------------------------- VR eye images: the per-frame copy
+// At the lens pass, which reads the finished final image (combined): copies both halves into a free slot's eye images,
+// and the HUD's own image into its HUD image, once per frame (vr_eyes.c), then the frame's shots and the crosshair's
+// depth sample. The copies complete at vr_eyes.ready_seq.
+static void vr_capture_eyes(TexBackend *combined) {
+    VrEyeSlot *slot = vr_eyes_capture_claim(combined);
+    if (!slot) return;
+    vk_end_pass();
+    if (!vr_eyes_capture_fill(slot, combined, vr_hud_image.image, vr_hud_image.drawn, vr_hud_image.width,
+                              vr_hud_image.height))
+        return;
+    const uint32_t half_width = combined->width / 2, height = combined->height;
+    // Shots of what the XR owner will copy (the final image itself, "combined", stops at 4096 wide). (No pass is open:
+    // ended above.)
+    vr_shot_slot_eyes(slot->image, half_width, height);
+    // D073: the crosshair's depth, from the last eye whose scene was drawn, when it is certified this frame (vr_aim.c).
+    // (A shot above submits the frame's commands and waits for the GPU, so the command buffer is asked for again:
+    // recording into the submitted one crashed in the driver on every shot frame.)
+    const int aim_eye = vr_scene_depth.last_eye >= 0 && (vr_eyes.frame.certified >> vr_scene_depth.last_eye & 1) ?
+        vr_scene_depth.last_eye : -1;
+    vr_aim_sample(vk_cmd(), aim_eye, aim_eye >= 0 ? &vr_eyes.frame.eyes[aim_eye] : NULL, vr_scene_depth.depth);
+    if (vr_shot_due("combined"))
+        LOG("[pc-vr-world-hud] shot frame: world draws %llu, aim distance %.2f from present %llu (now %llu), aim rays without a hit %llu\n",
+            (unsigned long long)vr_world_hud.frame_draws, vr_aim_result.distance, (unsigned long long)vr_aim_result.frame,
+            (unsigned long long)renderer_present_count(), (unsigned long long)vr_aim_result.misses);
+    vr_shot(combined, "combined", false);
+    if (slot->hud) vr_shot_slot_hud(slot->image, half_width, height);
+    if (slot->hud && vr_shot_due("hud-full"))  // (diagnostic: both halves, unflipped like the combined shot)
+        vr_shot_hud_full(vr_hud_image.image, combined);
+    vr_quick_menu_shot(slot->image, vr_eyes.frame.over_world, slot->hud, half_width, height,
+                       vr_frame_world_left_out);  // (SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS)
+    vr_eyes_capture_done();
+}
+
+// ---------------------------------------------------------------------------------- VR eye images: which draw is which
+// Whether a texture is this session's final image: the image the game places its eyes into, which the lens pass
+// samples (vr_eyes.final_backend, set by those draws: the eye placement's target, vr_after_draw, and what the game's
+// display draw samples, vr_display_draw_source). Per draw (vr_is_hud_draw), and for the diagnostic logs.
+static bool vr_is_final_image(const NvnTexture *texture) {
+    return texture && texture->backend && texture->backend == vr_eyes.final_backend;
+}
+
+// The quick menus over the world (D-pad: weapons, shields, bows, runes; D072). While one opens the game draws the
+// scene, then only its own picture of the world (vr_hud_backdrop_fate) with the menu. Those frames would go to the
+// headset as a menu panel (D056): a flat screen in place of the world. Instead, in a frame without a scene while the
+// game is in a quick menu (pause state 4), its 2D content goes into the HUD's image as in a scene frame, and the
+// headset shows it on the HUD's panel over the last scene pair, which the XR owner keeps showing (over_scene). Only
+// after an accepted scene pair (a menu panel pair replaces the eyes' images). The pause menu's pages stay menu
+// panels (D056, D068).
+// Decided at the frame's first draw into the final image, before any eye was certified (vr_frame_over_held_scene,
+// vr_draw_route.h), and latched here: asked per draw into the final image while the frame has placed no scene
+// (vr_is_hud_draw), it reads its inputs once a frame.
+#include "vr_draw_route.h"
+static bool vr_quick_menu_over_world(void) {
+    const bool scene_unseen =
+        !(vr_eyes.frame.scene_seen || vr_eyes.frame.placement_seen || vr_eyes.frame.certified);
+    if (!scene_unseen) return false;  // (the latch untouched)
+    if (!vr_eyes.frame.over_world_known) {
+        extern bool framepace_quick_ui(void);  // (pause state 4, hle/framepace.c)
+        vr_eyes.frame.over_world_known = true;
+        // (each input read only while the ones before it leave the answer open, in the decision's order; a shop's
+        // list is the same case as a quick menu, but leaves the pause state alone: by its screen, runtime/pc_vr_hud.c)
+        const bool scene_held = vr_eyes.scene_held != 0;
+        const bool hud_panel_on = scene_held && pc_vr_panel_depth(PC_VR_PANEL_HUD);
+        const bool quick_menu = hud_panel_on && framepace_quick_ui();
+        const bool shop_open = hud_panel_on && !quick_menu && pc_vr_shop_open();
+        vr_eyes.frame.over_world =
+            vr_frame_over_held_scene(scene_unseen, scene_held, hud_panel_on, quick_menu, shop_open);
+    }
+    return vr_eyes.frame.over_world;
+}
+
+// D057: whether this draw is the gameplay HUD and goes into the HUD's own image (begin_pass) instead of the final
+// image: a draw one of the game's UI screens recorded (vr_draw_screen, runtime/pc_vr_hud.c), in a frame whose scene
+// was placed into the final image or in a quick menu's frame over the held scene. The scene placement and the game's
+// own composites are no screen's draws and stay with the scene. Per draw (draw_): the cheap test that keeps every
+// other draw off the HUD's routing.
+static bool vr_is_hud_draw(void) {
+    if (vr_eyes.state <= 0 || vr_hud_image.state < 0 || st.rt.ncolor != 1 || !vr_is_final_image(st.rt.color[0]))
+        return false;
+    if (vr_eyes.frame.placement_seen ? !pc_vr_panel_depth(PC_VR_PANEL_HUD) : !vr_quick_menu_over_world()) return false;
+    return vr_draw_screen != 0;
+}
+
+// ---------------------------------------------------------------------------- VR eye images: HUD boxes over the screen
+// A HUD draw that shows the screen behind it: a dialog's box shows the world through itself that way, and a menu lays
+// the game's picture of the world behind itself. On the HUD's panel that is a flat picture of the eyes' views, out of
+// place against the world seen around and through the panel. The pane that draws it says what it is (vr_draw_role,
+// runtime/pc_vr_hud.c pc_vr_pane_role), for the draws of that pane that sample such a picture.
+
+// A texture a backdrop pane shows the screen through: a render target or a display image (flags & 9), which is
+// where the game keeps its pictures of the screen. The pane's own art is ordinary textures. (A rule by the texture's
+// flags, not by who drew it: backlog item 11.) Per texture of a backdrop's draw (vr_hud_backdrop_fate, texture_info).
+static bool vr_backdrop_source(const NvnTexture *texture) { return texture && (texture->flags & 9); }
+
+// What becomes of a HUD draw (VrBackdropFate, vr_draw_route.h), asked per HUD draw that goes to the HUD's image:
+//   0: no backdrop; drawn as it is.
+//   1: a box (PC_VR_PANE_BOX): drawn with opaque black in place of the screen (vr_backdrop_pictures_black, read where
+//      its textures are bound). The box keeps its own shading and translucency over the world seen through the panel,
+//      without the flat picture of the screen.
+//   2: the game's picture of the world behind a menu (PC_VR_PANE_WORLD_PICTURE): not drawn. The world itself shows
+//      there.
+//   3: a fade into the screen behind (PC_VR_PANE_EDGE_MASK: the ends of the quick menu's item row, which show the
+//      screen over the items scrolling out). Its picture of the screen is black too (vr_backdrop_pictures_black), and
+//      it erases the HUD under it by its alpha (vr_backdrop_erase, vr_hud_blend), so the items fade into the world
+//      seen through the panel instead of into a black box.
+// The role asks for the fate (vr_backdrop_fate_of_role); a draw that samples no picture of the screen keeps 0.
+// SAVAGEWIND_PC_VR_HUD_BACKDROP=1: drawn as the game draws it.
+// The two flags, set per HUD draw by its route (vr_route_hud_draw; cleared first for every draw): the draw samples its
+// pictures of the screen as opaque black (fates 1 and 3), and it erases the HUD under it (fate 3).
+static bool vr_backdrop_pictures_black, vr_backdrop_erase;
+static VrBackdropFate vr_hud_backdrop_fate(Prog *program) {
+    const VrBackdropFate fate = vr_backdrop_fate_of_role(vr_draw_role);
+    if (pc_vr_config()->play.hud_backdrop || !fate) return VR_BACKDROP_NONE;
+    for (int i = 0; i < program->fi->ntex; i++)
+        if (vr_backdrop_source(shader_texture_object(1, &program->fi->tex[i]))) return fate;
+    return VR_BACKDROP_NONE;
+}
+
+// D057: the HUD image keeps premultiplied colour with coverage in alpha, so the XR owner can lay it over the scene.
+// This adjusts the alpha blend of each draw into it (s->blend[0], NVN's codes: [1] colour source factor, [2] colour
+// destination factor, [3] alpha source, [4] alpha destination, [5] colour op, [6] alpha op; factors 1 ZERO, 2 ONE,
+// 6 ONE_MINUS_SRC_ALPHA, 9 DST_COLOR; op 1 ADD):
+//  - over-blending accumulates coverage: alpha ONE / ONE_MINUS_SRC_ALPHA;
+//  - additive blending (colour destination factor ONE) leaves coverage alone: alpha ZERO / ONE;
+//  - a multiplying draw (colour source factor DST_COLOR: a box that darkens what is under it) leaves coverage alone
+//    too. It scales the HUD drawn before it as on the screen, and over the image's empty parts, where the world shows
+//    through, it adds nothing. Over-blended, it was black there at its own alpha: the black rectangle over the button
+//    prompt during magnesis (D073). BetterVR's hook_FixUIBlending keeps the destination's alpha for this blend too;
+//  - a fade into the screen behind (vr_hud_backdrop_fate's 3) scales colour and coverage under it by one minus
+//    its alpha (ZERO / ONE_MINUS_SRC_ALPHA for both): where it is opaque the world shows through the panel;
+//  - unblended draws write the shader's alpha. Alpha is written wherever colour is.
+// Per draw in a pass into the HUD image, on its pipeline key (draw_).
+static void vr_hud_blend(PipeState *state) {
+    if (state->write_mask[0] & 7) state->write_mask[0] |= 8;
+    uint8_t *blend = state->blend[0];
+    if (vr_backdrop_erase && (state->write_mask[0] & 8)) {
+        state->blend_on |= 1;
+        blend[1] = blend[3] = 1;
+        blend[2] = blend[4] = 6;
+        blend[5] = blend[6] = 1;
+        return;
+    }
+    if (!(state->blend_on & 1)) return;
+    const bool additive = blend[2] == 2, multiply = blend[1] == 9;
+    if (multiply) {
+        static unsigned logged;
+        if (logged < 8) {
+            ++logged;
+            LOG("[pc-vr-hud-blend] present=%llu a multiplying HUD draw (colour %u/%u op %u, alpha %u/%u op %u) keeps the "
+                "coverage, fs=%llx\n", (unsigned long long)renderer_present_count(), blend[1], blend[2], blend[5],
+                blend[3], blend[4], blend[6], (unsigned long long)st.program->stages[1].code_addr);
+        }
+    }
+    blend[3] = additive || multiply ? 1 : 2;
+    blend[4] = additive || multiply ? 2 : 6;
+    blend[6] = 1;
+}
+
+// -------------------------------------------------------------------------------------- VR eye images: the layer draws
+// The eye's scene-final draw and its placement are known by the game code that issues them (nvn_layer_draw).
+// Whether a draw's tag (nvn_layer_draw) says it is this kind of draw of an eye's layer, or of a layer that may be one
+// (PC_VR_LAYER_DRAW_MAYBE_EYE: after a load, before any eye layer is known). Per draw (vr_after_draw).
+static bool vr_eye_layer_draw(uint32_t layer_draw, PcVrLayerDraw kind) {
+    return (layer_draw & PC_VR_LAYER_DRAW_KIND) == (uint32_t)kind &&
+        (layer_draw & (PC_VR_LAYER_DRAW_EYE | PC_VR_LAYER_DRAW_MAYBE_EYE));
+}
+
+// ----------------------------------------------------------------------------------- VR eye images: the display draw
+// The game's draw of its final image to the display, into the image it presents: Labo's lens pass, or its plain copy
+// before VR mode is on. Known by the game code that issues it (PC_VR_LAYER_DRAW_DISPLAY). Returns the final image:
+// the render target the draw samples (the lens pass also samples a lookup texture, which the game did not create
+// as a render target or display image: flags & 9). NULL: the draw is not that one. Per draw into one colour target:
+// before it is recorded (vr_window_mirror) and after (vr_after_draw's job 3).
+static NvnTexture *vr_display_draw_source(Prog *program, uint32_t layer_draw) {
+    NvnTexture *target = st.rt.ncolor == 1 ? st.rt.color[0] : NULL;
+    if ((layer_draw & PC_VR_LAYER_DRAW_KIND) != PC_VR_LAYER_DRAW_DISPLAY || !target ||
+        !renderer_texture_presented(target))
+        return NULL;
+    NvnTexture *source = NULL;
+    for (int i = 0; i < program->fi->ntex && !source; ++i) {
+        const NvnTexEntry *entry = shader_texture_entry(1, &program->fi->tex[i]);
+        NvnTexture *texture = entry ? entry->tex : NULL;
+        if (texture && texture != target && texture->backend && (texture->flags & 9)) source = texture;
+    }
+    static uint64_t draws;  // (the total, logged now and then)
+    if (source && ++draws % 4000 == 1)
+        LOG("[pc-vr-eyes] display draws by their game code: %llu\n", (unsigned long long)draws);
+    return source;
+}
+
+// -------------------------------------------------------------------------------------- VR eye images: after each draw
+// A shot taken after a draw (an eye's scene-final draw: vr_after_draw's job 1), while the draw's render pass is still
+// open. A shot needs no pass open (vr_shots.h), so the pass ends here, counted at this line in the pass-end
+// statistics, exactly when the shot will save an image: one is due for name and the image can be saved.
+static void vr_shot_after_draw(TexBackend *image, const char *name) {
+    if (vr_shot_due(name) && vr_shot_image_savable(image)) vk_end_pass();
+    vr_shot(image, name, false);
+}
+
+// Per draw, after it is recorded (draw_, unless an empty draw was omitted): the eye-image producer's three jobs, in
+// this order:
+//  1. an eye's scene-final draw records its certificate (which eye, which pose), its finished image and its scene
+//     depth target (D073: the depth target that draw has attached, vr_scene_depth.h);
+//  2. the placement of an eye's image into the final image: the frame's later 2D draws are its HUD, its target is
+//     the final image, and it is checked to show that eye's image in that eye's half;
+//  3. the game's first draw of its final image to the display (the lens pass, when it is drawn) starts the copy.
+// Only for a draw into one colour target with the eye images on, by what the game says the draw is (nvn_layer_draw,
+// with its own certificate).
+static void vr_after_draw(Prog *program, const CmdRec *command) {
+    // ---- jobs 1 to 3: what the game says the draw is
+    if (vr_eyes.state < 0 || !xr_runtime_eye_images_enabled() || st.rt.ncolor != 1 || !st.rt.color[0]) return;
+    NvnTexture *target = st.rt.color[0];
+    // What the game says this draw is (nvn_layer_draw): the finishing draw of an eye's layer, or the placement of an
+    // eye's finished image. Its eye and pose are its own certificate's.
+    const uint32_t layer_draw = nvn_layer_draw(command);
+    const bool eye_final = vr_eye_layer_draw(layer_draw, PC_VR_LAYER_DRAW_FINAL);
+    const bool eye_placement = vr_eye_layer_draw(layer_draw, PC_VR_LAYER_DRAW_PLACEMENT);
+    static uint64_t eye_finals, eye_placements;  // (the totals, logged now and then)
+    eye_finals += eye_final;
+    eye_placements += eye_placement;
+    if ((eye_final || eye_placement) && (eye_finals + eye_placements) % 2000 == 1)
+        LOG("[pc-vr-eyes] layer draws by their game code: %llu eye finals, %llu eye placements\n",
+            (unsigned long long)eye_finals, (unsigned long long)eye_placements);
+    PcVrRenderCertificate certificate;
+    const bool certified = (eye_final || eye_placement) && vr_draw_certificate &&
+        pc_vr_render_trace_resolve(vr_draw_certificate, &certificate) && certificate.id == vr_draw_certificate &&
+        certificate.native_index < 2;
+    // ---- job 1: an eye's scene-final draw
+    if (eye_final) {
+        vr_eyes.frame.scene_seen = true;
+        vr_eyes.frame.over_world = false;  // (a scene after all: vr_quick_menu_over_world)
+        // (for the shots: the image it writes, and the HDR scene it reads, the texture of the same size)
+        TexBackend *output = target->backend, *input = NULL;
+        for (int i = 0; i < program->fi->ntex && !input; ++i) {
+            const NvnTexEntry *entry = shader_texture_entry(1, &program->fi->tex[i]);
+            if (entry && entry->tex && entry->tex != target && entry->tex->width == target->width &&
+                entry->tex->height == target->height)
+                input = entry->tex->backend;
+        }
+        if (certified) {
+            const unsigned eye = certificate.native_index;
+            vr_eyes.frame.eyes[eye] = certificate;
+            vr_eyes.frame.scene_output[eye] = target->debug_id;
+            vr_eyes.frame.certified |= 1u << eye;
+            // (D073) The eye's scene depth: the depth target the game's finishing draw of the eye layer has attached.
+            vr_scene_depth.depth[eye] = st.rt.depth ? st.rt.depth->backend : NULL;
+            {  // (the target named whenever an eye's changes, the first 16 times: what the game's draw attached)
+                static const TexBackend *named_depth[2];
+                static unsigned depth_changes;
+                const TexBackend *depth_target = vr_scene_depth.depth[eye];
+                if (depth_target && depth_target != named_depth[eye]) {
+                    named_depth[eye] = depth_target;
+                    if (depth_changes < 16) {
+                        ++depth_changes;
+                        LOG("[pc-vr-eyes] eye %u scene depth target: %ux%u format %d present=%llu (change %u of at most 16 "
+                            "logged)\n", eye, depth_target->width, depth_target->height, (int)depth_target->format,
+                            (unsigned long long)renderer_present_count(), depth_changes);
+                    }
+                }
+            }
+            if (!vr_scene_depth.depth[eye]) {  // (the first 8 times)
+                static unsigned logged;
+                if (logged < 8) {
+                    ++logged;
+                    LOG("[pc-vr-eyes] eye %u scene-final draw has no depth target present=%llu (line %u of 8)\n", eye,
+                        (unsigned long long)renderer_present_count(), logged);
+                }
+            }
+            vr_scene_depth.last_eye = (int)eye;
+            if (input) vr_shot_after_draw(input, eye ? "hdr-eye1" : "hdr-eye0");
+            if (output) vr_shot_after_draw(output, eye ? "eye1" : "eye0");
+        } else if (output) {
+            // No certificate (the headset asleep or unavailable): the shots still work, naming the eyes only by
+            // the order of their outputs (vr_shot_scene_side). Nothing here counts as an eye's identity or admits an
+            // image.
+            const int side = vr_shot_scene_side(output->serial);
+            if (side >= 0) {
+                if (input) vr_shot_after_draw(input, side ? "hdr-scene1" : "hdr-scene0");
+                vr_shot_after_draw(output, side ? "scene1" : "scene0");
+            }
+        }
+        return;
+    }
+    // ---- job 2: the placement of an eye's image into the final image
+    if (eye_placement) {
+        vr_eyes.frame.placement_seen = true;  // (later 2D draws: D057's HUD)
+        // The image the game places its eyes into is its final image.
+        if (target->backend && target->backend != vr_eyes.final_backend) {
+            static unsigned logged;
+            if (logged < 8) {
+                ++logged;
+                LOG("[pc-vr-eyes] the final image is the eye placement's target (%ux%u, texture %llu), %s present=%llu\n",
+                    target->width, target->height, (unsigned long long)target->debug_id,
+                    vr_eyes.final_backend ? "not the image the lens pass showed" : "before any lens pass",
+                    (unsigned long long)renderer_present_count());
+            }
+            vr_eyes.final_backend = target->backend;
+        }
+        // Guards, for an eye certified this frame: the placement shows that eye's finished image, in that eye's half.
+        if (certified && (vr_eyes.frame.certified >> certificate.native_index & 1)) {
+            const unsigned eye = certificate.native_index, half = st.viewport[0][0] * 2 >= target->width ? 1 : 0;
+            const NvnTexEntry *entry = program->fi->ntex ? shader_texture_entry(1, &program->fi->tex[0]) : NULL;
+            if (entry && entry->tex && entry->tex->debug_id == vr_eyes.frame.scene_output[eye] && eye == half)
+                vr_eyes.frame.placed |= 1u << eye;
+            else vr_eyes.frame.misplaced = true;
+        }
+        return;
+    }
+    // ---- job 3: the display draw
+    // The lens pass (when it is drawn: vr_window_mirror): the game's first draw of its final image to the display.
+    if (vr_eyes.filling) return;
+    const NvnTexture *final_image = vr_display_draw_source(program, layer_draw);
+    if (final_image) {
+        vr_eyes.final_backend = final_image->backend;
+        vr_capture_eyes(final_image->backend);
+    }
+}
+
+// ----------------------------------------------------------------------------------- VR eye images: the desktop window
+// D085: the window shows the left eye, letterboxed, instead of the game's Labo lens pass (vr_mirror.c, vr_mirror.h).
+#include "vr_mirror.h"
+
+// Per draw, before it is recorded (draw_). The tests that find the display draw stay here, inline and in their order;
+// the mirror module is called only for that draw, which also starts the frame's copy of the eyes when the lens pass
+// is not drawn. True: the draw was the lens pass, and must not be recorded.
+static bool vr_window_mirror(Prog *program, uint32_t layer_draw) {
+    if (vr_eyes.state < 0 || !xr_runtime_eye_images_enabled() || st.rt.ncolor != 1 || !st.rt.color[0] ||
+        !program->fi->ntex)
+        return false;
+    NvnTexture *presented_texture = st.rt.color[0];
+    const NvnTexture *display_source = vr_display_draw_source(program, layer_draw);
+    TexBackend *presented = presented_texture->backend, *final_image = display_source ? display_source->backend : NULL;
+    if (!final_image || !presented || !presented->image || presented->samples != 1 ||
+        (presented->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return false;
+    if (!vr_mirror_takes(presented, final_image)) return false;
+    if (!vr_eyes.filling) {
+        vr_eyes.final_backend = final_image;
+        vr_capture_eyes(final_image);
+    }
+    VrLetterbox box;  // (where the left half goes in the presented image)
+    if (!vr_mirror_due(presented, final_image, &box)) return true;  // (copied this frame already, or nothing to copy)
+    vk_end_pass();
+    vr_mirror_copy(presented, final_image, &box);
+    return true;
+}
+
+// ----------------------------------------------------------------------------- VR eye images: HUD markers in the world
+// D073, D088: HUD content over the world, drawn into each eye where its marker's point is, instead of on the HUD's
+// panel. The model, the spaces and units, the move and its geometry: vr_world_hud.h. Here, the hub: what only the
+// executor knows (the draw's tags and constants blocks, the viewport, the scissor, the target, the eye certificates,
+// the marker reports, the aim result, the focus distance, the switches) goes in as values, the move comes back into
+// vr_world_hud, and the per-draw hooks below apply it (the constants c3, the scissor, the fragment position's scale).
+// SAVAGEWIND_PC_VR_WORLD_HUD=0: off.
+
+// For the vertex stage's constants c3 of a draw vr_world_hud moves (nn::ui2d's block: its first matrix gives the clip
+// position; rows 0 and 1 are x and y, row 3 is w): binds a copy with the move in that matrix (vr_hud_move_patch).
+// Per vertex constant buffer c3 bound (cbuf_info); the moved flag is tested first. False: not patched.
+static VkDescriptorBufferInfo ubo_span(VkSpan s, uint64_t size);
+static bool vr_world_hud_patch(uint64_t address, uint64_t size, VkDescriptorBufferInfo *out) {
+    if (!vr_world_hud.active || size < 64) return false;
+    static float block[0x10000 / 4];
+    const uint64_t copied = size > sizeof block ? sizeof block : size;
+    memcpy(block, (const void *)(uintptr_t)address, copied);
+    vr_hud_move_patch(&vr_world_hud.move, block);
+    *out = ubo_span(vk_transient_copy(block, copied, 256), copied);
+    return true;
+}
+
+// Before begin_pass, for a draw vr_is_hud_draw sent to the HUD's image: whether it is a marker's. If it is,
+// sets up vr_world_hud's move so the draw goes into its eye's half instead (vr_hud_marker_move: _patch, _scissor,
+// _rscale), and returns true.
+static bool vr_world_hud_draw(void) {
+    const PcVrConfig *config = pc_vr_config();
+    if (!config->play.world_hud || !st.rt.color[0]) return false;
+    // D088: where the draw goes. Exactly: the game stored a reported point into its pane, or one of its parents
+    // (vr_draw_marker, the binding: the helper's markers, the speech balloons), or its pane belongs to an aiming
+    // reticle (vr_draw_role). A piece at the game's own fixed HUD place (PC_VR_MARKER_FLAT) and everything else stay
+    // on the panel.
+    if (vr_draw_marker == PC_VR_MARKER_FLAT) return false;
+    if (!vr_draw_marker && vr_draw_role != PC_VR_PANE_RETICLE) return false;
+    const Range pane_constants = st.ubuf[0][0], offset_constants = st.ubuf[0][10];
+    if (!pane_constants.addr || pane_constants.size < 64 || !offset_constants.addr || offset_constants.size < 4 ||
+        st.ds[0])
+        return false;  // (no depth test: ui2d's)
+    // Only nn::ui2d's blocks, as hud_patch tells them, of a pane or a text small enough to be a marker's.
+    float origin[2];  // where the pane's (or the text's) origin is, in the layer's NDC before the Labo offset (the log)
+    if (!vr_hud_marker_block((const float *)(uintptr_t)pane_constants.addr, pane_constants.size, origin))
+        return false;
+    const float *viewport = st.viewport[0], half_width = st.rt.color[0]->width * 0.5f;
+    if (!vr_hud_one_half(viewport, half_width)) return false;  // (a draw over one half only)
+    const unsigned eye = vr_hud_eye_of_half(viewport, half_width);
+    if (!(vr_eyes.frame.certified >> eye & 1)) return false;
+    const PcVrRenderCertificate *cert = &vr_eyes.frame.eyes[eye];
+    const XrPoseSnapshot *pose = &cert->native_snapshot;
+    if (!(cert->units_per_meter > 0) || !pose->calibration.epoch) return false;
+
+    // Which point the draw belongs to (marker), and how it was found (how).
+    PcVrHudPoint linked;
+    const PcVrHudPoint *marker = NULL;
+    const char *how = "none";
+    if (vr_draw_marker && pc_vr_hud_point_by_seq(vr_draw_marker, &linked)) {
+        // Linked by pane: the report bound to it, however old (the binding keeps a copy when the ring has moved on),
+        // scaled to where the panes are drawn.
+        vr_hud_marker_on_layer(&linked);
+        marker = &linked;
+        how = "pane";
+        ++vr_world_hud.exact;
+    } else if (vr_draw_role == PC_VR_PANE_RETICLE && vr_aim_result.distance > 0 &&
+               vr_aim_result.frame + 8 >= renderer_present_count()) {
+        // A reticle's pane (the bow's, a rune's, a thrown weapon's): on the aim ray, at the depth the scene has there
+        // (vr_aim.c), about the layout's centre.
+        linked = vr_hud_reticle_point(vr_aim_result.distance);
+        marker = &linked;
+        how = "reticle";
+    }
+    if (!marker) {
+        ++vr_world_hud.unmatched;
+        return false;
+    }
+
+    // The marker's point in the eye's view, and where in its image.
+    VrHudMarkerView seen;
+    const VrHudSight sight = vr_hud_marker_view(marker, cert, eye, &seen);
+    if (sight == VR_HUD_BEHIND) {
+        ++vr_world_hud.behind;
+        return false;
+    }
+    if (sight != VR_HUD_SEEN) return false;  // (a FOV with no width or height)
+    const double labo_offset = ((const float *)(uintptr_t)offset_constants.addr)[0];  // (this half's Labo offset, NDC)
+    const double tan_per_pixel = VR_SCREEN_WIDTH / (2 * VR_SCREEN_HALF_W);  // (on the HUD panel)
+    // Link's distance (the stamina wheel's), at which a marker has the HUD panel's size.
+    const double focus = pc_vr_camera_focus_distance();
+    // The marker turns with the world's up as the eye sees it. SAVAGEWIND_PC_VR_WORLD_HUD_ROLL=0: upright in the image;
+    // another number: that many degrees clockwise more (a test of the turn with the headset level).
+    // The move: the whole marker scales and turns about its point, which lands where the eye sees it.
+    VrHudMarkerPlacement placed;
+    vr_hud_marker_move(&seen, marker, viewport, labo_offset, tan_per_pixel, focus, config->play.world_hud_upright,
+                       config->play.world_hud_test_turn, &vr_world_hud.move, &placed);
+    ++vr_world_hud.draws;
+    ++vr_world_hud.frame_draws;
+    if (vr_world_hud.logged < 16 || !(vr_world_hud.draws % 8192)) {
+        ++vr_world_hud.logged;
+        const char *screen = pc_vr_screen_name(vr_draw_screen);
+        LOG("[pc-vr-world-hud] draw=%llu screen=%s how=%s eye=%u pane=%.1f,%.1f marker=%.1f,%.1f offset=%.3f camera=%.2f,%.2f,%.2f depth_m=%.2f "
+            "anchor=%.1f,%.1f eye_at=%.1f,%.1f scale=%.3f,%.3f roll_deg=%.1f exact=%llu unmatched=%llu behind=%llu\n",
+            (unsigned long long)vr_world_hud.draws, screen ? screen : "-", how, eye, origin[0] * 640,
+            origin[1] * 360, marker->layout[0], marker->layout[1], marker->offset,
+            marker->camera[0], marker->camera[1], marker->camera[2], seen.depth / cert->units_per_meter,
+            placed.anchor[0], placed.anchor[1], placed.eye_at[0], placed.eye_at[1], placed.scale[0], placed.scale[1],
+            atan2(placed.image_up[0], -placed.image_up[1]) * (180.0 / 3.14159265358979323846),
+            (unsigned long long)vr_world_hud.exact, (unsigned long long)vr_world_hud.unmatched,
+            (unsigned long long)vr_world_hud.behind);
+    }
+    return true;
+}
+
+// A fade of the HUD's layout (a solid pane over all of it: the black that clears after a load) is drawn into each
+// eye's half of the final image, which is that eye's whole view, instead of into the HUD's image, whose panel shows
+// only the screen's rectangle. Enlarged about the half's centre so the Labo offset leaves no strip; solid, so nothing
+// else changes. Panes with a picture stay on the panel. Per HUD draw outside a held scene (vr_route_hud_draw), before
+// the marker's placement; sets vr_world_hud's move when it takes the draw.
+static bool vr_hud_fade(Prog *program) {
+    (void)program;
+    if (!st.rt.color[0] || vr_draw_role != PC_VR_PANE_FADE) return false;  // (the screen Fade's black pane)
+    const Range pane_constants = st.ubuf[0][0];
+    if (!pane_constants.addr || pane_constants.size < 34 * 16 || st.ds[0]) return false;
+    // A pane of the HUD's layer that covers all of it (vr_hud_fade_block).
+    if (!vr_hud_fade_block((const float *)(uintptr_t)pane_constants.addr)) return false;
+    const float *viewport = st.viewport[0], half_width = st.rt.color[0]->width * 0.5f;
+    if (!vr_hud_one_half(viewport, half_width)) return false;
+    const Range offset_constants = st.ubuf[0][10];  // (this half's Labo offset, as vr_world_hud_draw reads it)
+    const double labo_offset = offset_constants.addr && offset_constants.size >= 4 ?
+        ((const float *)(uintptr_t)offset_constants.addr)[0] : 0;
+    vr_hud_fade_move(&vr_world_hud.move, viewport, labo_offset);
+    static unsigned logged;
+    if (logged++ < 4)
+        LOG("[pc-vr-world-hud] fade over the HUD's layout drawn into eye %d's view\n", viewport[0] >= half_width * 0.5f);
+    return true;
+}
+
+// After apply_scissor, for a draw vr_world_hud moves: the eye's half. The draw's viewport stays the game's, the half's,
+// and its vertices are moved inside it. A scissor of the game's own smaller than that viewport (a clip of the pane's
+// contents) moves with the draw (vr_hud_move_scissor). Set only when it differs from the one set. Per draw (draw_);
+// the moved flag is tested first.
+static void vr_world_hud_scissor(void) {
+    if (!vr_world_hud.active || !dc.sc.extent.width || !dc.sc.extent.height) return;
+    int pixels[4];  // left, top, right, bottom, in the pass's device pixels
+    vr_hud_move_scissor(&vr_world_hud.move, st.viewport[0], st.scissor[0], st.rt.color[0]->height, vp_sx, vp_sy, vp_ox,
+                        vp_oy, pass_w, pass_h, pixels);
+    VkRect2D rect = {{pixels[0], pixels[1]}, {(uint32_t)(pixels[2] - pixels[0]), (uint32_t)(pixels[3] - pixels[1])}};
+    if (!memcmp(&dc.sc, &rect, sizeof rect)) return;
+    rec_CmdSetScissor(vk_cmd(), 0, 1, &rect);
+    dc.sc = rect;
+}
+
+// For shaders that read the fragment's position (rscale: {s_x, s_y, o_x, o_y}, the guest-to-device mapping): the move
+// without its turn folded in (vr_hud_move_rscale). Per draw (draw_, after the scissor); the moved flag is tested first.
+static void vr_world_hud_rscale(float rscale[4]) {
+    if (!vr_world_hud.active) return;
+    vr_hud_move_rscale(&vr_world_hud.move, rscale);
+}
+
+// --------------------------------------------------------------------------- VR eye images: where a HUD draw goes
+// D057, D072, D073, D088, D097: the route of a draw vr_is_hud_draw sent to the HUD's image (vr_draw_route.h: the
+// routes, what the player sees, the precedence). Per HUD draw, from draw_ before its pass begins. The hub: gathers the
+// draw's tags (its marker value, its pane's role, its screen's kind only when the route reads it) and the frame's
+// finding, asks the route, tries the placements and asks the backdrop's fate when the route so far needs them, in that
+// order, and applies the answer: vr_draw_to_hud_image, vr_world_hud.active, the backdrop flags, the counts of
+// left-out draws, the pane log. Returns the route; draw_ counts a left-out draw as skipped and returns.
+static VrDrawRoute vr_route_hud_draw(Prog *program) {
+    const bool over_held_scene = vr_eyes.frame.over_world;
+    const VrDrawLink link = vr_draw_link(vr_draw_marker);
+    const PcVrScreenKind screen_kind = vr_draw_route_reads_screen(over_held_scene, link, vr_draw_role) ?
+        pc_vr_screen_kind(vr_draw_screen) : PC_VR_SCREEN_NONE;
+    VrDrawRoute route = vr_draw_route_ask(&(VrDrawTags){over_held_scene, link, vr_draw_role, screen_kind});
+    if (route == VR_DRAW_LEFT_OUT_HELD_WORLD) {
+        vr_draw_to_hud_image = false;
+        ++vr_frame_world_left_out;  // (for SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS' log line)
+        // [pc-vr-audit] SAVAGEWIND_LOG_PANES: a draw without a marker link left out over the held scene, by its
+        // reticle's role or by its world screen (linked draws carry no pane number and are not logged)
+        if (vr_draw_pane)
+            pc_vr_pane_log_kind(vr_draw_pane, vr_draw_route_log_kind(route), vr_draw_route_log_name(route));
+        return route;
+    }
+    if (route == VR_DRAW_LEFT_OUT_UNLINKED_WORLD) {
+        vr_draw_to_hud_image = false;
+        ++vr_unlinked_world.frame_draws;  // (the guard's log: vr_unlinked_world_present)
+        if (vr_draw_pane)  // [pc-vr-audit]
+            pc_vr_pane_log_kind(vr_draw_pane, vr_draw_route_log_kind(route), vr_draw_route_log_name(route));
+        return route;
+    }
+    // Outside a held scene: into its eye's half when a placement takes it, the fade's first, then the marker's (each
+    // counts and logs its own, and sets the move; over the held scene the eye images are not shown).
+    const bool fade_placed = route == VR_DRAW_EYE_HALF && vr_hud_fade(program);
+    const bool marker_placed = !fade_placed && route == VR_DRAW_EYE_HALF && vr_world_hud_draw();
+    route = vr_draw_route_placed(route, fade_placed, marker_placed);
+    vr_world_hud.active = vr_draw_route_moved(route);
+    if (vr_draw_pane)  // [pc-vr-audit] SAVAGEWIND_LOG_PANES
+        pc_vr_pane_log_kind(vr_draw_pane, vr_draw_route_log_kind(route), vr_draw_route_log_name(route));
+    if (vr_world_hud.active) {
+        vr_draw_to_hud_image = false;  // (D073: into its eye's half, at its marker's point; or a fade)
+        return route;
+    }
+    // The HUD's image, by the backdrop's fate.
+    route = vr_draw_route_backdrop(route, vr_hud_backdrop_fate(program));
+    if (vr_draw_pane && route != VR_DRAW_HUD)  // [pc-vr-audit] SAVAGEWIND_LOG_PANES
+        pc_vr_pane_log_kind(vr_draw_pane, vr_draw_route_log_kind(route), vr_draw_route_log_name(route));
+    if (route == VR_DRAW_LEFT_OUT_BACKDROP) {  // (the game's picture of the world: left out)
+        vr_draw_to_hud_image = false;
+        return route;
+    }
+    vr_backdrop_pictures_black = vr_draw_route_over_black(route);  // (a fade's alpha, its ramp's, over opaque black)
+    vr_backdrop_erase = vr_draw_route_erases(route);
+    return route;
+}
+
+// ----------------------------------------------------------------------------- VR eye images: offering the frame to XR
+// Called from backend_present, under gpu_lock, after the present's submission (so this frame's draws come before
+// it in queue order). Takes this frame's findings, resets them for the next frame, classifies the frame
+// (vr_frame_classify, vr_frame.h) and offers the filled slot to the XR owner thread as one of:
+//   scene             both eyes certified by one camera traversal and each placed in its own half: the eye images,
+//                     with the pose they were rendered for;
+//   scene-hud         the same, with the HUD's image on its panel over them (D057);
+//   menu-panel        no scene: the left half on the menu panel, anchored at the calibration (D056);
+//   quick-over-scene  a quick menu over the held scene: the HUD's image on its panel over the last scene pair (D072).
+// Anything else (an uncertified or misplaced scene, no pose for a menu) is not offered, and the slot is released.
+// The producer's part is vr_eyes.c's (vr_eyes_present); around it this file resets its own per-frame VR state and
+// counts the presents over the held scene for the quick menu shots (vr_shots.c). None of this file's resets touches the
+// producer's state or submits, so they may come before the producer's call.
+void vk_vr_present(uint64_t game_present_id) {
+    pc_vr_screens_log();
+    const bool over_world = vr_eyes.frame.over_world;  // (this frame's, before vr_eyes_present resets the findings)
+    vr_frame_world_left_out = 0;
+    if (game_present_id) vr_unlinked_world_present(game_present_id, over_world);
+    vr_scene_depth_reset(&vr_scene_depth);
+    vr_world_hud.frame_draws = 0;
+    // (SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS: the game frames over the held scene in a row, vr_quick_menu_shot)
+    if (vr_eyes_present(game_present_id, submit_seq)) vr_quick_menu_shots_present(over_world);
 }
 
 // (debug frames) a depth image's depth values as a greyscale PGM, stretched over its own min..max
@@ -4984,6 +5811,85 @@ static bool fxaa_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out
     return true;
 }
 
+// ------------------------------------------------------------------------------------ PC VR: rune targets (D078)
+// Rune targets (magnesis, stasis) are picked on the GPU. One draw renders one pixel (a 4x4 target, a 1x1 viewport)
+// from an eye's scene, at the screen position in the first two floats of a 32-byte fragment constant buffer (in Labo
+// mode 0.5625, 0.5: about the image's centre; BetterVR moves the same position). Each eye's image follows the head,
+// so the target did too, away from the crosshair, which is on the game camera's aim ray (D073). So the position is
+// replaced by where that ray meets the scene (vr_aim.c's vr_aim_result) in the image of the eye whose scene the draw
+// samples: in play, the frame's first eye (0), drawn just before the test into the scene targets both eyes share.
+// The test's draw is known by its constants block: the game's own setup of the test reports the block it fills
+// (runtime/pc_vr_hud.c rt_rune_test, called from a patch in the game's code).
+// SAVAGEWIND_PC_VR_RUNE_AIM=0: off; =flip: the position's y counted from the bottom.
+
+// For each fragment constant buffer about to be bound (cbuf_info, per draw): when it is the rune target test's, sets
+// *out to a copy with the position moved onto the aim ray, and returns true. False: bind the game's buffer as it is.
+static bool vr_rune_aim_patch(Range buffer, VkDescriptorBufferInfo *out) {
+    // (the test's constants: the block the game's own setup of the test reported, two vectors of four floats; these
+    // cheap checks first, as this runs for every fragment constant buffer)
+    if (buffer.size < 32 || !pc_vr_rune_test_constants(buffer.addr) || !st.tpool) return false;
+    const PcVrRuneAim mode = pc_vr_config()->play.rune_aim;
+    if (mode == PC_VR_RUNE_AIM_OFF) return false;
+    const float *constants = (const float *)(uintptr_t)buffer.addr;
+    // The test's draw is recorded inside an eye's layer and carries that eye's certificate: which eye's scene it
+    // samples and the pose that scene was drawn with, this frame's. Without one the test stays as the game set it.
+    PcVrRenderCertificate own;
+    if (!vr_draw_certificate || !pc_vr_render_trace_resolve(vr_draw_certificate, &own) ||
+        own.id != vr_draw_certificate || own.native_index >= 2) {
+        static uint64_t uncertified;
+        if (uncertified++ % 300 == 0)
+            LOG("[pc-vr-rune-aim] test at %.4f %.4f left as it is: its draw carries no eye's certificate (%llu times) "
+                "present %llu\n", constants[0], constants[1], (unsigned long long)uncertified,
+                (unsigned long long)renderer_present_count());
+        return false;
+    }
+    const int eye = (int)own.native_index;
+    const PcVrRenderCertificate *cert = &own;
+    const XrPoseSnapshot *pose = &cert->native_snapshot;
+    const XrEyeSnapshot *eye_pose = &pose->eyes[eye];
+    const double units_per_meter = cert->units_per_meter;
+    if (!pose->calibration.epoch || !(units_per_meter > 0)) return false;
+    // The game camera's forward in the calibrated space, from its origin, to the aim depth (D073; the farthest
+    // crosshair depth until the first read).
+    const double aim =
+        vr_aim_result.distance > 0 ? vr_aim_result.distance : VR_AIM_MAX_M * units_per_meter;
+    const double heading[4] = {pose->calibration.heading_xyzw[0], pose->calibration.heading_xyzw[1],
+                               pose->calibration.heading_xyzw[2], pose->calibration.heading_xyzw[3]};
+    const double ahead[3] = {0, 0, -1};
+    double direction[3], from_eye[3], view[3], image[2];
+    vr_rotate(heading, ahead, direction);
+    vr_aim_ray_point_from_eye(pose->calibration.origin_xyz, direction, aim, units_per_meter, eye_pose->position_xyz,
+                              from_eye);
+    // Where the eye sees the aim point, 0 to 1 across its image (vr_math.h).
+    const double left = tan(eye_pose->fov_left_right_up_down[0]), right = tan(eye_pose->fov_left_right_up_down[1]);
+    const double up = tan(eye_pose->fov_left_right_up_down[2]), down = tan(eye_pose->fov_left_right_up_down[3]);
+    if (!vr_eye_image_position(from_eye, eye_pose->orientation_xyzw, (const double[4]){left, right, up, down}, 1e-6,
+                               view, image))
+        return false;  // (behind this eye: the game's own position)
+    const double image_x = image[0], image_y = image[1];
+    if (!(image_x >= 0 && image_x <= 1 && image_y >= 0 && image_y <= 1)) {  // (off this eye's image)
+        static unsigned off_image;
+        if (off_image++ % 300 == 0)
+            LOG("[pc-vr-rune-aim] aim point off eye %d's image (%.3f %.3f): test left at %.4f %.4f (%u times)\n", eye, image_x,
+                image_y, constants[0], constants[1], off_image);
+        return false;
+    }
+    float patched[8];
+    memcpy(patched, constants, sizeof patched);
+    patched[0] = (float)image_x;
+    patched[1] = (float)(mode == PC_VR_RUNE_AIM_FLIP ? 1 - image_y : image_y);
+    static uint64_t logged;
+    if (logged < 12 || !(logged % 600)) {
+        LOG("[pc-vr-rune-aim] eye %d (its own draw's certificate) test %.4f %.4f -> %.4f %.4f (aim %.1f game units) "
+            "constants at %llx present %llu (%llu moved)\n", eye, constants[0], constants[1], patched[0], patched[1],
+            aim, (unsigned long long)buffer.addr, (unsigned long long)renderer_present_count(),
+            (unsigned long long)logged + 1);
+    }
+    ++logged;
+    *out = ubo_span(vk_transient_copy(patched, sizeof patched, 256), sizeof patched);
+    return true;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
@@ -5021,7 +5927,10 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     int idx = k - 3;  // cbuf_base
     Range r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
     uint64_t size = si->cbuf_size[k] ? si->cbuf_size[k] : 256;
-    if (!r.addr) return ubo_span(vk_transient_copy(zeros, size, 256), size);
+    if (!r.addr) {
+        VkDescriptorBufferInfo info = ubo_span(vk_transient_copy(zeros, size, 256), size);
+        return info;
+    }
     if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
     if (size > r.size && r.size) size = r.size;
     if (size < 16) size = 16;
@@ -5035,17 +5944,22 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         return ubo_span(vk_transient_copy(zeros, size, 256), size);
     }
     VkDescriptorBufferInfo direct;
+    if (stage == 1 && vr_rune_aim_patch(r, &direct)) return direct;  // (the rune target's test position)
     if (stage == 1 && k == 3 && fxaa_off && fxaa_patch(r.addr, size, &direct)) return direct;  // (see fxaa_patch)
     if (gw_ubo_direct(r.addr, size, &direct)) return direct;  // (written by a storing shader: read in place, see gw_note)
     if (stage == 1 && sdw_fix.s > 1 && sdw_patch(r.addr, size, &direct)) return direct;  // (texel size: see sdw_fix)
     if (stage == 0 && up_fix.sx > 0 && up_patch(r.addr, size, &direct)) return direct;  // (up_fix: texel grid)
     if (stage == 1 && up_fix.sx > 0 && up_patch_frag(r.addr, size, &direct)) return direct;  // (up_fix: texel step)
+    // (PC VR: a world-tied HUD draw's move, in its projection matrix)
+    if (stage == 0 && k == 3 && vr_world_hud_patch(r.addr, size, &direct)) return direct;
     if (stage == 0 && k == 3 && hud_patch(r.addr, size, &direct)) return direct;  // (a 16:9 HUD layer: see hud_patch)
     if (ubo_direct(r.addr, size, &direct)) return direct;  // (an integrated GPU reads the game's memory itself)
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
-    return ubo_span(guest_copy(r.addr, size), size);
+    VkSpan span = guest_copy(r.addr, size);
+    VkDescriptorBufferInfo info = ubo_span(span, size);
+    return info;
 }
 
 // Global memory (shader LDG/STG, maxwell_gmem_base = HEAP_BASE): on Windows, sparse-bind committed guest pages
@@ -5744,8 +6658,8 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
 // was submitted. The list goes on to the GPU in pieces. A storing shader without storage buffers (it writes through
 // other pointers), or a full set, holds the rest of its list as before.
 // SAVAGEWIND_VK_GMEM_HOLD=1: hold after every storing shader (as before).
-#define GW_MAX 4096
-static struct { uint64_t lo, hi; } gw[GW_MAX];  // sorted, disjoint, not touching
+#define VK_GW_MAX 4096
+static struct { uint64_t lo, hi; } gw[VK_GW_MAX];  // sorted, disjoint, not touching
 static int ngw;
 static uint64_t gw_lo = ~0ull, gw_hi;  // (bounds of the set: most reads are nowhere near it)
 
@@ -5782,7 +6696,7 @@ static bool gw_add(uint64_t lo, uint64_t hi) {  // false: no room
     if (i > 0 && gw[i - 1].hi == lo) i--;  // (touching on the left: merge)
     int j = i;
     while (j < ngw && gw[j].lo <= hi) j++;  // [i, j): overlapping or touching
-    if (j == i && ngw == GW_MAX) return false;
+    if (j == i && ngw == VK_GW_MAX) return false;
     if (j > i) {
         if (gw[i].lo < lo) lo = gw[i].lo;
         if (gw[j - 1].hi > hi) hi = gw[j - 1].hi;
@@ -6522,6 +7436,12 @@ void vk_exec_reset(void) {
     hud_event_dialogue = false;
     hud_scope = (HudScope){0};
     hud_frame = UINT64_MAX; hud_quick_ns = 0; hud_quick = false;
+    // PC VR: forget the frame in progress and the previous frame's eyes (vr_eyes.c). (Pairs the XR owner accepted come
+    // back through its release callback.)
+    vr_eyes_game_reset();
+    vr_scene_depth_reset(&vr_scene_depth);
+    vr_aim_game_reset();
+    vr_world_hud.frame_draws = 0;
     map_background_target = NULL;
     map_background_frame = map_background_main_frame = UINT64_MAX;
     map_chrome_frame = UINT64_MAX;
@@ -6584,6 +7504,7 @@ static bool aniso_all(void) {
 // luminance for the exposure, probes) at exact levels, and a level off there lit every surface white. Nor the vertex
 // stage's terrain and grass lookups, shadows, the HUD.
 static float scene_mip_bias;
+
 static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *out, float sc[2], uint32_t wh[2]);
 // The whole answer for a texture handle, kept for the rest of the frame: a draw's textures are mostly the last draws'
 // (materials, the G-buffer), and each lookup hashed its view, probed the view memo and the sampler table (~5 % of the
@@ -6601,7 +7522,9 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     uint32_t tic = h & 0xFFFFF;
     NvnTexEntry *te = st.tpool && tic < (uint32_t)st.tpool->count ? &((NvnTexEntry *)st.tpool->entries)[tic] : NULL;
     TexBackend *tb = te && te->tex ? (TexBackend *)te->tex->backend : NULL;
-    if (nomemo || !h || !te || !te->tex || st_->shadow || nfeedback || scene_up.t || (tb && tb->in_feedback_layout)) {
+    // (PC VR: nor a HUD draw whose screen captures are drawn black, which only it sees)
+    if (nomemo || !h || !te || !te->tex || st_->shadow || nfeedback || scene_up.t || (tb && tb->in_feedback_layout) ||
+        vr_backdrop_pictures_black) {
         texture_info_(stage, si, i, out, sc, wh);
         return;
     }
@@ -6641,6 +7564,7 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
     uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
     VkImageView view = VK_NULL_HANDLE;
     VkSampler smp = VK_NULL_HANDLE;
+    const NvnSamplerDesc *sampler_desc = NULL;
     VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL;
     uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
     // (vk_sampler's Video > Anisotropic filtering: not for textures with one mip level - the render targets BOTW reads
@@ -6692,6 +7616,10 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
                     layout = VK_IMAGE_LAYOUT_GENERAL;
                     if (st_->type == TEXTYPE_2D_ARRAY) view = vk_dummy_view(TEXTYPE_2D_ARRAY);  // (2D snapshot as array: rare)
                 }
+            if (vr_backdrop_pictures_black && stage == 1 && vr_backdrop_source(et)) {
+                view = vk_black_view();  // (PC VR: a popup's screen capture, on the HUD panel: drawn over black)
+                layout = VK_IMAGE_LAYOUT_GENERAL;
+            }
             NvnTexture *cascades = st_->shadow ? shadow_copy_source(et) : NULL;  // (the copy's readers: the cascades)
             if (cascades) {
                 VkImageView v = vk_view(cascades, &e->view, e->has_view, false, st_->type);
@@ -6705,8 +7633,11 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
         }
     }
     float bias = material && stage == 1 && pass_mvec >= 0 && rt_jitter_on() ? scene_mip_bias : 0;
-    if (h && st.spool && tsc < (uint32_t)st.spool->count)
-        smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc], aniso_ok, bias);
+    if (h && st.spool && tsc < (uint32_t)st.spool->count) {
+        NvnSamplerDesc *desc = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+        sampler_desc = desc;
+        smp = vk_sampler(desc, aniso_ok, bias);
+    }
     if (menu_tex && h && st.spool && tsc < (uint32_t)st.spool->count) {
         // Sharper menus: the game's own sampler, as some of these textures tile, but filtering between the mip levels
         // the enlarged image has and the game doesn't know of
@@ -6716,6 +7647,8 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
     } else if (text_sheet) smp = vk_text_sampler();
     if (!view) view = vk_dummy_view(st_->type), layout = VK_IMAGE_LAYOUT_GENERAL;
     if (!smp) smp = vk_default_sampler(true);
+    if (stage == 5)  // (compute: an R32 view sampled with comparison ALWAYS gets a legal depth view, always_shadow.h)
+        view = vk_always_shadow_view(view, st_->shadow, sampler_desc);
     *out = (VkDescriptorImageInfo){smp, view, layout};
 }
 
@@ -7795,6 +8728,48 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 }
 
 // ================================================================== draws
+// Empty draws (empty_draw.h). A draw whose pass has no attachment format at all (no colour, depth or stencil) can
+// only have an effect through shader stores or queries. empty_draw_prepare collects facts about such a draw before it
+// is recorded, and vk_empty_draw_no_effect omits the one measured case (a BC4 volume draw) from the GPU, keeping the
+// command's bookkeeping. The facts of the draw being recorded, per thread.
+static _Thread_local VkEmptyDrawFacts empty_draw_facts;
+
+// Collects the facts for the draw about to be recorded. False: it is not an empty draw (nothing kept).
+static bool empty_draw_prepare(Prog *program, bool query_active) {
+    bool empty = pass_depth == VK_FORMAT_UNDEFINED && pass_stencil == VK_FORMAT_UNDEFINED;
+    for (unsigned i = 0; i < pass_ncolor; ++i) {
+        if (pass_color[i] != VK_FORMAT_UNDEFINED) empty = false;
+    }
+    if (!empty) return false;
+    memset(&empty_draw_facts, 0, sizeof empty_draw_facts);
+    VkEmptyDrawFacts *facts = &empty_draw_facts;
+    facts->vertex = vk_translate_id(program->vi);
+    facts->fragment = vk_translate_id(program->fi);
+    facts->stage_mask = st.program->stage_mask;
+    facts->storage_flags = program->vi->uses_gmem | program->vi->writes_gmem << 1 |
+        program->fi->uses_gmem << 2 | program->fi->writes_gmem << 3;
+    const ShaderInfo *shaders[2] = {program->vi, program->fi};
+    for (unsigned stage = 0; stage < 2; ++stage)
+        for (int i = 0; i < shaders[stage]->ntex; ++i)
+            if (shaders[stage]->tex[i].is_image || shaders[stage]->tex[i].bindless)
+                ++facts->uncertain_textures;
+    facts->query_counting = oq_counting;
+    facts->query_active = query_active;
+    facts->colors = pass_ncolor < 8 ? pass_ncolor : 8;
+    facts->depth = pass_depth;
+    facts->stencil = pass_stencil;
+    for (unsigned i = 0; i < facts->colors; ++i) {
+        facts->color[i] = pass_color[i];
+        const NvnTexture *texture = st.rt.color[i];
+        if (texture)
+            memcpy(facts->target[i],
+                   (const uint32_t[]){texture->format, texture->target, texture->width, texture->height, texture->depth,
+                                      texture->samples},
+                   sizeof facts->target[i]);
+    }
+    return true;
+}
+
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 
 // (debugging) SAVAGEWIND_DEBUG_PICK=<x>,<y>[;<x>,<y>...] (up to 4 points, first-target pixels): in a debug frame each
@@ -7907,6 +8882,7 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
     }
 }
 
+static void draw_(CmdRec *r, bool indexed);
 static int lst_on = -1;  // (SAVAGEWIND_VK_LIST_STATS, see exec_list)
 static void lst_draw(Prog *pr);
 // With "Asynchronous shaders" on, a draw whose program or pipeline is still being built is skipped. That is fine for
@@ -7923,7 +8899,6 @@ static bool draw_must_happen(void) {
     }
     return false;
 }
-static void draw_(CmdRec *r, bool indexed);
 static uint64_t stat_discarded;
 static void draw(CmdRec *r, bool indexed) {
     // Rasterizer discard: the primitives stop before rasterization, so nothing reaches the targets, depth, stencil or
@@ -7932,6 +8907,15 @@ static void draw(CmdRec *r, bool indexed) {
     if (st.rasterizer_discard) { stat_discarded++; return; }
     PROFD_T0();
     SW_ACC("exec/draw");
+    vr_draw_screen = nvn_screen_tag(r);  // (D088: the UI screen that recorded it, and its pane's marker)
+    vr_draw_role = (PcVrPaneRole)nvn_pane_role(r);
+    vr_draw_certificate = nvn_render_certificate(r);
+    vr_draw_marker = nvn_marker_tag(r);
+    vr_draw_pane = 0;
+    if (vr_draw_marker & PC_VR_PANE_LOG_TAG) {  // [pc-vr-audit] SAVAGEWIND_LOG_PANES: the pane's number, no marker
+        vr_draw_pane = vr_draw_marker & ~PC_VR_PANE_LOG_TAG;
+        vr_draw_marker = 0;
+    }
     draw_(r, indexed);
     PROFD_ADD(prof_draw);
 }
@@ -8008,6 +8992,31 @@ static void wait_built(_Atomic int *state) {  // (0 building: until built or fai
     perfcount_add(PC_BUILD_WAIT_NS, SDL_GetTicksNS() - t0);
 }
 
+// PC VR: the game draws both eyes between two presents, the left eye's passes first, with the same programs and
+// pipelines. A build that lands between the two (a link handed to a worker once link_now's budget is spent takes
+// about a millisecond) would leave a skipped object in the right eye only. So a program or pipeline a draw skipped
+// while it was building stays skipped for the rest of that frame: missing from both eyes for one frame, not from one.
+// Draws that must happen (one_shot_target, draw_must_happen) are never held. state: the one the caller acts on.
+// Returns true when the draw must be skipped (held). skipped_at: the object's mark, renderer_present_count() + 1 of
+// the frame a draw skipped it while it was building (0: none). Per draw, for its program and for its pipeline (draw_).
+static bool stereo_hold(uint64_t *skipped_at, int state) {
+    if (state == 1 && !*skipped_at) return false;  // (the usual case: never skipped)
+    if (!pc_vr_enabled()) return false;
+    uint64_t mark = renderer_present_count() + 1;
+    if (state == 0) {  // (still building: the caller skips this draw itself; remember the frame)
+        *skipped_at = mark;
+        return false;
+    }
+    if (state != 1) return false;
+    if (*skipped_at != mark) {  // (skipped in an earlier frame only: drawn from now on)
+        *skipped_at = 0;
+        return false;
+    }
+    if (one_shot_target() || draw_must_happen()) return false;
+    stat_stereo_holds++;
+    return true;
+}
+
 static void draw_(CmdRec *r, bool indexed) {
     if (profd) prof_tp_ = SDL_GetTicksNS();
     ProfZone pz0 = PZ_NOW();
@@ -8035,9 +9044,11 @@ static void draw_(CmdRec *r, bool indexed) {
         pm.gen = key_gen; pm.np = st.program; pm.origin = origin; pm.dmode = dmode; pm.pr = pr; pm.points = points;
     }
     if (pr && atomic_load(&pr->state) == 0 && (one_shot_target() || draw_must_happen())) wait_built(&pr->state);
-    if (!pr || atomic_load(&pr->state) != 1) {
+    int program_state = pr ? atomic_load(&pr->state) : 2;
+    if ((pr && stereo_hold(&pr->skipped_at, program_state)) || program_state != 1) {
         if (st.rt.ncolor && vk_trace_tex(st.rt.color[0]))
-            vk_trace_event(st.rt.color[0], 2, NULL, 0, "draw skipped: program %s", pr ? "not compiled yet" : "missing");
+            vk_trace_event(st.rt.color[0], 2, NULL, 0, "draw skipped: program %s",
+                           !pr ? "missing" : program_state == 1 ? "held for both eyes" : "not compiled yet");
         stat_skipped++;
         return;
     }
@@ -8237,7 +9248,73 @@ static void draw_(CmdRec *r, bool indexed) {
         prof_gw_check += now - prof_stage_start;
         prof_stage_start = now;
     }
+    // PC VR: where a 2D draw into the final image goes (vr_draw_route.h). A draw that is not the HUD's (vr_is_hud_draw)
+    // is drawn where the game draws it and moves nothing. The HUD's draws go into the HUD's own image
+    // (vr_draw_to_hud_image: begin_pass switches the pass to it), into their eye's half of the final image, moved (a
+    // marker's or a reticle's at its point, a fade over the whole view: vr_world_hud), over black or erasing (a
+    // backdrop), or are left out (a piece tied to the world over the held scene, a world screen's piece without a
+    // marker link, the game's picture of the world): vr_route_hud_draw.
+    vr_backdrop_pictures_black = vr_backdrop_erase = false;
+    vr_draw_to_hud_image = vr_is_hud_draw();
+    if (!vr_draw_to_hud_image) {
+        vr_world_hud.active = false;  // (VR_DRAW_FINAL_IMAGE)
+    } else if (vr_draw_route_left_out(vr_route_hud_draw(pr))) {
+        stat_skipped++;
+        return;
+    }
+    // [pc-vr-audit] Once for each UI pane: one that reaches past the screen's own edge in the HUD's layer (0.92 of its
+    // NDC; past 1 the GPU clips it), with the lens shift its draw carries (vertex constants c13); and each texture of
+    // the game's own a UI pane draws into, with that shift.
+    if (vr_draw_screen && st.ubuf[0][10].addr && st.ubuf[0][10].size >= 4 && st.rt.ncolor >= 1 && st.rt.color[0]) {
+        const float lens_shift = ((const float *)(uintptr_t)st.ubuf[0][10].addr)[0];
+        static struct { uint32_t screen, pane, width; bool own; } seen[96];
+        static unsigned seen_count;
+        const bool own_texture =
+            !vr_draw_to_hud_image && !vr_world_hud.active && !vr_is_final_image(st.rt.color[0]);
+        float min_x = 0, max_x = 0;
+        bool reaches = false;
+        if (vr_draw_to_hud_image && st.ubuf[0][0].addr && st.ubuf[0][0].size >= 34 * 16) {
+            const float *block = (const float *)(uintptr_t)st.ubuf[0][0].addr, *model_view = block + 16,
+                        *rect = block + 33 * 4;
+            if (block[0] > 0 && block[14] == -1 && block[15] == 0 && rect[0] > 0 && rect[1] > 0) {
+                min_x = 1e9f, max_x = -1e9f;
+                bool ahead = true;
+                for (int corner = 0; corner < 4 && ahead; corner++) {
+                    const float corner_x = (corner & 1) * rect[0] + rect[2],
+                                corner_y = rect[3] - (corner >> 1) * rect[1];
+                    const float corner_depth = -(model_view[8] * corner_x + model_view[9] * corner_y + model_view[11]);
+                    ahead = corner_depth > 0;
+                    if (!ahead) break;
+                    const float ndc_x =
+                        block[0] * (model_view[0] * corner_x + model_view[1] * corner_y + model_view[3]) / corner_depth;
+                    min_x = fminf(min_x, ndc_x);
+                    max_x = fmaxf(max_x, ndc_x);
+                }
+                reaches = ahead && (max_x + lens_shift > 0.93f || min_x + lens_shift < -0.93f) && max_x - min_x < 1.8f;
+            }
+        }
+        if ((reaches || own_texture) && pc_vr_pane_log_on()) {
+            unsigned k = 0;
+            while (k < seen_count && !(seen[k].screen == vr_draw_screen && seen[k].pane == vr_draw_pane &&
+                                       seen[k].width == st.rt.color[0]->width && seen[k].own == own_texture))
+                ++k;
+            if (k == seen_count && seen_count < 96) {
+                seen[seen_count++] = (__typeof__(seen[0])){vr_draw_screen, vr_draw_pane, st.rt.color[0]->width,
+                                                           own_texture};
+                const char *screen = pc_vr_screen_name(vr_draw_screen);
+                if (own_texture)
+                    LOG("[pc-vr-ui] screen=%s pane=%s draws into its own %ux%u texture with a lens shift of %.4f\n",
+                        screen ? screen : "-", pc_vr_pane_log_name(vr_draw_pane), st.rt.color[0]->width,
+                        st.rt.color[0]->height, lens_shift);
+                else
+                    LOG("[pc-vr-ui] screen=%s pane=%s reaches from %.3f to %.3f of the HUD's layer with its lens shift of "
+                        "%.4f (the screen's edge is 0.92, the layer's 1)\n", screen ? screen : "-",
+                        pc_vr_pane_log_name(vr_draw_pane), min_x + lens_shift, max_x + lens_shift, lens_shift);
+            }
+        }
+    }
     begin_pass();
+    vr_draw_to_hud_image = false;
     if (pass_void) { stat_skipped++; return; }
     // ---- motion vectors (mvec.c): an opaque draw of a pass with the motion target is recorded (its identity and the
     // vertex shader's inputs, for the next frame); matched with one of the previous frame, it is drawn with its motion
@@ -8399,6 +9476,11 @@ static void draw_(CmdRec *r, bool indexed) {
     k.s.a2c = st.ms[0xC] != 0;
     k.s.topo_class = cls;
     k.s.poly_fill = st.poly[2] != 1;
+    // (a HUD draw that reads the final image samples it: the HUD image is the pass's only attachment)
+    if (vr_pass_to_hud_image) {
+        vr_hud_blend(&k.s);
+        k.s.feedback = 0;
+    }
     pp = pipe_memo.pp;
     if (!pp || memcmp(&pipe_memo.k, &k, sizeof k)) {
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
@@ -8428,9 +9510,11 @@ static void draw_(CmdRec *r, bool indexed) {
     }
 have_pipe:
     if (atomic_load(&pp->state) == 0 && (one_shot_target() || draw_must_happen())) wait_built(&pp->state);
-    if (atomic_load(&pp->state) != 1) {
+    int pipeline_state = atomic_load(&pp->state);
+    if (stereo_hold(&pp->skipped_at, pipeline_state) || pipeline_state != 1) {
         if (st.rt.ncolor && vk_trace_tex(st.rt.color[0]))
-            vk_trace_event(st.rt.color[0], 3, NULL, 0, "draw skipped: pipeline %s", pp->state ? "failed" : "compiling");
+            vk_trace_event(st.rt.color[0], 3, NULL, 0, "draw skipped: pipeline %s",
+                           pipeline_state == 1 ? "held for both eyes" : pipeline_state ? "failed" : "compiling");
         stat_skipped++;
         return;
     }
@@ -8583,13 +9667,13 @@ have_pipe:
             up_fix.sx = (float)gb->width / (float)gt->width, up_fix.sy = (float)gb->height / (float)gt->height;
             up_fix.tw = gt->width, up_fix.th = gt->height, up_fix.aw = gb->width, up_fix.ah = gb->height;
             ndyn = 0;  // (the vertex set again, with its constants: the first of the draw's dynamic offsets)
-            vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn);
+            vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn);  // (traced above)
         }
     }
     if (profd) prof_tex += SDL_GetTicksNS() - prof_tx_;
     ProfZone pz5 = PZ_NOW();
     PZ_SPAN("exec/draw/tex", pz4, pz5);
-    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
+    if (output_ui_needs_centering(pass_sx, pass_sy, pc_vr_enabled()) && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
         bool reads_scene = false;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)
@@ -8655,6 +9739,8 @@ have_pipe:
     }
     {
         float k = 1.0f;  // (horizontal stretch of a camera-attached effect: none, the view keeps its 16:9 shape)
+        // (in guest pixels. PC VR moves a world-tied HUD draw onto its marker's point in its vertices:
+        // vr_world_hud_patch)
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
         set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
         if (g_debug_frame) {
@@ -8666,7 +9752,9 @@ have_pipe:
         }
     }
     apply_scissor();
+    vr_world_hud_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
+    vr_world_hud_rscale(rs0);
     uint64_t prof_t1_ = profd ? SDL_GetTicksNS() : 0;
     ProfZone pz6 = PZ_NOW();
     fxaa_off = !g_settings.game_fxaa && fxaa_shader(g_cur_fs_hash);  // (Video > Game's FXAA: fxaa_patch)
@@ -8809,6 +9897,8 @@ have_pipe:
     if (profd) prof_vtx += SDL_GetTicksNS() - prof_t2_;
     PZ_SPAN("exec/draw/vtx", pz7, PZ_NOW());
     // ---- draw (inside an occlusion query while SAMPLES_PASSED counts)
+    // (D085: the game's Labo lens pass; the window shows the left eye instead)
+    if (vr_window_mirror(pr, nvn_layer_draw(r))) return;
     int oq = -1;
     if (oq_counting && oq_nrun < OQ_RUN && oq_on()) {
         uint32_t i = oq_next++ % OQ_SLOTS;
@@ -8822,9 +9912,21 @@ have_pipe:
             oq = (int)i;
         }
     }
-    if (!use_index) rec_CmdDraw(cb, count, inst, first, base_inst);
-    else rec_CmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    const bool empty_draw = empty_draw_prepare(pr, oq >= 0);
+    const bool omit_empty = empty_draw && vk_empty_draw_no_effect(&empty_draw_facts);
+    if (omit_empty) {
+        static bool reported;
+        if (!reported) {
+            reported = true;
+            LOG("[vk-empty-draw] omitted measured BC4 volume GPU draw; command bookkeeping retained\n");
+        }
+    }
+    if (!omit_empty) {
+        if (!use_index) rec_CmdDraw(cb, count, inst, first, base_inst);
+        else rec_CmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    }
     if (oq >= 0) rec_CmdEndQuery(cb, oq_pool, (uint32_t)oq);
+    if (!omit_empty) vr_after_draw(pr, r);
     stat_draws++;
     draws_total++;
     chunk_draws++;
@@ -8850,6 +9952,28 @@ have_pipe:
     {   // (the profiler) a draw in the GPU row now open
         GpSub *g = &gp_sub[cur_sub];
         if (g->started && g->n && g->gen == prof_generation() && prof_enabled()) g->draws[g->n - 1]++;
+    }
+    // Split passes (D063; the PC VR default; SAVAGEWIND_VK_SPLIT_PASSES=0/1: off/on): a pass also goes to the GPU in
+    // pieces of SAVAGEWIND_VK_SUBMIT_DRAWS draws while the GPU has nothing left to do. In PC VR each eye's G-buffer is
+    // one pass of about 1,800 draws, and the GPU waited about 5 ms a frame for the first eye's to be translated before
+    // it started the frame (begin_pass submits only at pass boundaries). Seams cost GPU time (about 0.15 ms each at
+    // the D054 preset: a barrier, reloaded attachments), so a busy GPU gets none (checked every 64 draws: the timeline
+    // query is not free on NVIDIA either).
+    // The pass ends here and the next draw begins it again (attachments loaded, a full barrier at the seam), where
+    // begin_pass submits. The G-buffer pass is a feedback loop (terrain reads target 0 where it writes): the seam's full
+    // barrier covers what the in-pass barrier would. Not in the HUD's pass, a multisampled or linear target, a debug
+    // frame or after a shader that stores to guest memory (chunk_hold). Its pass ends show up in the stats line under
+    // this line number.
+    static int split = -1;
+    if (split < 0) {
+        const char *option = getenv("SAVAGEWIND_VK_SPLIT_PASSES");
+        split = option ? atoi(option) != 0 : pc_vr_enabled();
+    }
+    if (split && in_pass && submit_draw_count() > 0 && chunk_draws >= (uint32_t)submit_draw_count() && !chunk_hold &&
+        !vr_pass_to_hud_image && pass_samples == 1 && !pass_nlinear && !g_debug_frame && !(chunk_draws & 63) &&
+        vk_completed_seq() >= submit_seq) {
+        vk_end_pass();
+        st.rt_dirty = true;
     }
 }
 
@@ -9807,12 +10931,31 @@ static bool grade_wanted(VkImageView *lut, float pc[16]) {
 // Colour grading (Video > Colour) comes first, at the scene's own size (FSR 3 and DLSS start from the graded scene):
 // the HUD is drawn after the composite and keeps its colours; frame generation's HUD-less copy and HDR10's output
 // (device.c) both start from the graded image.
+// PC VR's composite is the game's Labo placement of each eye's scene into its half of the final image (D049: the eye's
+// scene-final, an eye-shaped target, drawn by a 48-index mesh into one 960x1080 half), once per eye, so colour grading
+// and sharpening reach the headset's eye images too. The eye is at its size in the half or larger: no FSR 1 there.
+// Returns the eye image the draw places, when the draw is such a placement; NULL otherwise. Per draw in PC VR
+// (scene_composite). Known by the game's tag on the draw (the eye placement, PC_VR_LAYER_DRAW_PLACEMENT, as
+// vr_after_draw knows it): its one sampled texture is the eye's finished image, checked only for being a usable 2D
+// colour image (no size, aspect, format or viewport test).
+static NvnTexture *pc_vr_scene_placement(Prog *program, const CmdRec *command) {
+    if (!vr_eye_layer_draw(nvn_layer_draw(command), PC_VR_LAYER_DRAW_PLACEMENT) || st.rt.ncolor != 1 ||
+        !st.rt.color[0] || program->fi->ntex != 1)
+        return NULL;
+    NvnTexture *eye = shader_texture_object(1, &program->fi->tex[0]);
+    if (!eye || eye->target != 1) return NULL;
+    TexBackend *backend = vk_tex(eye, false);
+    return backend && backend->image && backend->layers == 1 && backend->samples == 1 && backend->depth == 1 &&
+        !(backend->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT) ? eye : NULL;
+}
+
 // The draw is the scene -> final image composite: a few vertices into the final image (RS_OUT) over most of it,
 // sampling a full-size scene target (not one of its reduced steps: bloom, blur). Its scene texture, or NULL.
 static NvnTexture *scene_composite(Prog *pr, CmdRec *r) {
     // BOTW draws its quick selector menus' (weapons, runes, shields) blurred scene capture quad
     // (1280x720, HoldShortCutBg) with UI shader d4fa32dabc35066c; that UI pass is not the 3D scene composite.
     if (g_cur_fs_hash == 0xd4fa32dabc35066cull) return NULL;
+    if (pc_vr_enabled()) return pc_vr_scene_placement(pr, r);
     NvnTexture *rt = st.rt.ncolor ? st.rt.color[0] : NULL;
     if (!rt || r->x[2] > 6 || !pr->fi->ntex || vk_texture_scale_group(rt) != RS_OUT) return NULL;
     const float *vp = st.viewport[0];
@@ -11064,12 +12207,14 @@ static void exec_list(uint64_t handle, int depth) {
                     st.rt.depth != NULL, fb_draws);
             break;
         }
-        case CMD_SET_VIEWPORTS:
+        case CMD_SET_VIEWPORTS: {
             for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(st.viewport[r->x[0] + i], (uint8_t *)x + i * 16, 16);
             break;
-        case CMD_SET_SCISSORS:
+        }
+        case CMD_SET_SCISSORS: {
             for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(st.scissor[r->x[0] + i], (uint8_t *)x + i * 16, 16);
             break;
+        }
         case CMD_SET_DEPTH_RANGES:
             for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(st.depth_range[r->x[0] + i], (uint8_t *)x + i * 8, 8);
             break;
@@ -11151,7 +12296,9 @@ static void exec_list(uint64_t handle, int depth) {
                 clear(-1, 0, NULL, 0, r->x[0] != 0, r->f[0], has_stencil && r->x[2] != 0, (uint32_t)r->x[1], (uint32_t)r->x[2]);
             }
             break;
-        case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
+        case CMD_DISPATCH:
+            dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]);
+            break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
@@ -11224,8 +12371,12 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_RESET_COUNTER:
             if (r->x[0] == 1) { oq_counting = true; oq_nrun = 0; }  // SAMPLES_PASSED
             break;
-        case CMD_COPY_TEXTURE_TO_TEXTURE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], r->x[6]); break; }
-        case CMD_DOWNSAMPLE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], 1); break; }
+        case CMD_COPY_TEXTURE_TO_TEXTURE:
+        case CMD_DOWNSAMPLE: {
+            const TexRefRec *refs = x;  // (the source and the destination)
+            copy_texture(&refs[0], &refs[1], r->op == CMD_DOWNSAMPLE ? 1 : r->x[6]);
+            break;
+        }
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
         case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:

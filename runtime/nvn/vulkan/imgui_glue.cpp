@@ -7,6 +7,7 @@
 
 extern "C" {
 #include "vk.h"
+#include "../../xr/xr_runtime.h"
 #include "record.h"
 }
 
@@ -49,7 +50,9 @@ extern "C" void vk_imgui_backend_shutdown(void) {
     if (!ImGui::GetIO().BackendRendererUserData) return;
     vk_present_idle();
     rec_drain();
+    xr_runtime_vulkan_idle_begin();
     vkDeviceWaitIdle(g_vk.dev);
+    xr_runtime_vulkan_idle_end();
     ImGui_ImplVulkan_Shutdown();
 }
 
@@ -99,7 +102,9 @@ extern "C" void vk_imgui_texture_free(uint64_t id) {
     for (size_t i = 0; i < g_textures.size(); i++) {
         if (g_textures[i].id != id) continue;
         rec_drain();
+        xr_runtime_vulkan_idle_begin();
         vkDeviceWaitIdle(g_vk.dev);  // (a frame in flight may still draw it)
+        xr_runtime_vulkan_idle_end();
         ImGui_ImplVulkan_RemoveTexture((VkDescriptorSet)id);
         vkDestroyImageView(g_vk.dev, g_textures[i].view, NULL);
         vmaDestroyImage(g_vk.vma, g_textures[i].img, g_textures[i].mem);

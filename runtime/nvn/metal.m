@@ -573,7 +573,7 @@ void backend_init(void) {
 id<MTLCommandQueue> renderer_queue(void) { return queue; }
 
 // ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
-static NvnTexture *g_last_presented;
+static NvnPresent g_last_presented;
 // Every game texture goes (the NvnTexture structs themselves are leaked: guest memory pointed at them), the
 // renderer drops what is keyed by guest addresses / objects, and the heap wrapper is let go: guest memory is
 // about to be replaced (backend_guest_memory_reset wraps the new pages).
@@ -585,7 +585,7 @@ void backend_reset(void) {
     int n = g_reg_n;
     while (g_reg_n > 0) backend_texture_destroyed(g_reg[g_reg_n - 1]);
     renderer_reset();
-    g_last_presented = NULL;
+    g_last_presented = (NvnPresent){0};
     g_guest_buffer = nil;
     LOG("[metal] reboot: %d textures released (%d left alive, %.0f MB)\n", n, g_tex_live, g_tex_live_bytes / 1048576.0);
 }
@@ -922,16 +922,19 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
 
 static double last_fps_time;
 
-void backend_present(NvnTexture *t);
+void backend_present(const NvnPresent *present);
 // Present the last frame again (the game thread waits in a host dialog, e.g. the software keyboard): the overlay
 // keeps drawing and taking input.
 void backend_represent(void) {
-    if (g_last_presented) backend_present(g_last_presented);
+    NvnPresent last = g_last_presented;
+    last.game_present_id = 0;  // UI replay is not a new game-produced present
+    if (last.texture) backend_present(&last);
     else SDL_Delay(16);
 }
 
-void backend_present(NvnTexture *t) {
-    g_last_presented = t;
+void backend_present(const NvnPresent *present) {
+    NvnTexture *t = present->texture;
+    g_last_presented = *present;
     extern void renderer_submit(void);
     renderer_submit();  // same queue: the present pass runs after the frame's work
     TexBackend *b = t->backend;
@@ -967,7 +970,8 @@ void backend_present(NvnTexture *t) {
         }
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         bool reshape = shape != 1.0;
-        float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
+        float crop[4];  // UV origin and size in the logical, unscaled texture
+        nvn_present_crop_uv(present, t->width, t->height, crop);
         {   // (diagnostics) log output scale / drawable changes
             static double psx, psy, pdw, pdh;
             static int nlog;

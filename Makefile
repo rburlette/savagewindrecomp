@@ -52,10 +52,10 @@ GEN_SRC  := $(wildcard $(GEN)/*.c) $(wildcard $(GEN)/*/*.c)
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/tools/gamelib_entry.o
 RT_SRC   := $(filter-out runtime/control.c runtime/control_game.c,$(wildcard runtime/*.c)) \
             runtime/control.c runtime/control_game.c $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
-            $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
+            $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) $(wildcard runtime/xr/*.c) runtime/platform/$(PLATFORM).c
 RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/platform/*.h) $(wildcard runtime/nvn/*.h) \
             $(wildcard runtime/nvn/maxwell/*.h) $(wildcard runtime/nvn/vulkan/*.h) $(wildcard runtime/ui/*.h) \
-            $(wildcard runtime/services/*.h)
+            $(wildcard runtime/services/*.h) $(wildcard runtime/hle/*.h) $(wildcard runtime/xr/*.h)
 UI_SRC   := $(wildcard runtime/ui/*.mm)
 UI_OBJ   := $(patsubst runtime/%.mm,$(B)/rt/%.o,$(UI_SRC))
 IMGUI_OBJ := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.o $(B)/imgui/imgui_widgets.o \
@@ -193,6 +193,13 @@ SW_SOURCE := $(or $(shell git log -1 --format='commit %h, tree %t' 2>/dev/null),
 $(shell mkdir -p $(B) && [ "$$(cat $(B)/source_id 2>/dev/null)" = '$(SW_SOURCE)' ] || echo '$(SW_SOURCE)' > $(B)/source_id)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
+# Compiler depfiles track actual, transitive headers for runtime sources. Objects
+# made before depfiles were introduced need one rebuild to establish that record.
+# windres's Windows resource object does not use the C/C++ compiler.
+RT_DEP_OBJS := $(filter-out $(B)/rt/platform/windows_rc.o,$(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ))
+RT_DEPFILES := $(RT_DEP_OBJS:.o=.d)
+RT_MISSING_DEPS := $(filter-out $(patsubst %.d,%.o,$(wildcard $(RT_DEPFILES))),$(RT_DEP_OBJS))
+RT_DEPFLAGS = -MMD -MP -MF $(@:.o=.d).tmp -MT $@
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -isystem third_party -isystem third_party/stb $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -isystem third_party -Ithird_party/stb $(DEPINC)
 
@@ -255,8 +262,35 @@ $(B)/ffx/%.o: $(FFX)/sdk/src/%.cpp $(FFX)/ffx_compat.h
 # sizes, and a context smaller than the SDK's own code writes overran the next one in memory)
 $(B)/rt/nvn/vulkan/framegen.o: CXXFLAGS := -include $(FFX)/ffx_compat.h $(FFX_INC) -I$(FFX)/spirv $(CXXFLAGS)
 $(B)/rt/nvn/vulkan/framegen.o: $(FFX)/spirv/ffx_shaders_vk.h $(FFX)/spirv/ffx_fsr3upscaler_vk.h $(FFX)/ffx_compat.h
+# Explicit build variant; use a separate B directory so desktop objects cannot
+# be reused with different feature flags. Khronos headers/loader are external
+# build dependencies, never fetched or installed by this Makefile.
+ifeq ($(OPENXR),1)
+ifeq ($(PLATFORM),macos)
+$(error OPENXR=1 currently requires the Vulkan backend)
+endif
+ifeq ($(strip $(OPENXR_CFLAGS)),)
+$(error OPENXR=1 requires OPENXR_CFLAGS pointing to official Khronos headers)
+endif
+ifeq ($(strip $(OPENXR_LIBS)),)
+$(error OPENXR=1 requires OPENXR_LIBS for the official Khronos loader)
+endif
+RTFLAGS += -DSAVAGEWIND_WITH_OPENXR=1 $(OPENXR_CFLAGS)
+LDFLAGS += $(OPENXR_LIBS)
+endif
+# PROFILE_PDB=1 (Windows): CodeView debug information and a PDB beside the executable, for profilers that read PDB
+# rather than DWARF (Nsight Systems, Windows Performance Analyzer). Its own build folder (B=...): the objects differ.
+ifeq ($(PROFILE_PDB),1)
+RTFLAGS += -gcodeview
+CXXFLAGS += -gcodeview
+LDFLAGS += -Wl,--pdb=$(B)/savagewind.pdb
+endif
 
 all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (GEN_SRC is a space when there is no generated/)
+
+-include $(wildcard $(RT_DEPFILES))
+.PHONY: force-rt-deps
+$(RT_MISSING_DEPS): force-rt-deps
 
 $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h  # (cpu.h includes them)
 	@mkdir -p $(dir $@)
@@ -287,7 +321,8 @@ $(B)/rt/control_places.o: runtime/control_places_data.inc  # (the generated tabl
 
 $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -c $< -o $@
+	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 # SMAA (third_party/smaa, MIT): the reference shader as a C string for runtime/nvn/smaa_data.c (both backends build
 # their passes from it); the non-ASCII bytes in its comments become '?', and its CRLF line ends plain LF (a CR left in
@@ -298,13 +333,15 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
 
-$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(OSFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(OSFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
-$(B)/rt/%.o: runtime/%.m $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.m
 	@mkdir -p $(dir $@)
-	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -fobjc-arc -c $< -o $@
+	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -fobjc-arc $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
 # place gets running copies killed by macOS (code signature of the changed pages). The temp file keeps the real name
@@ -321,9 +358,10 @@ $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	echo $(GAMELIB_ID) > $@.id
 
 $(B)/rt/ui/i18n.o: $(wildcard runtime/ui/i18n/*.inc) runtime/ui/i18n.h
-$(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
+$(B)/rt/ui/%.o: runtime/ui/%.mm
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(UIFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(UIFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 ifneq ($(wildcard $(DLSS_DLL)),)
 $(DLSS_IMPORT): $(DLSS_DLL) tools/make_dlss_import.py
