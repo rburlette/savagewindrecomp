@@ -225,6 +225,7 @@ static struct {
     XrCalibration calibration;
     uint32_t max_eye_width, max_eye_height; // the runtime's per-view maximum (0: unknown)
     uint32_t recommended_eye_width, recommended_eye_height; // the runtime's per-view recommendation (0: unknown)
+    PFN_xrGetVisibilityMaskKHR GetVisibilityMaskKHR;        // XR_KHR_visibility_mask, when the runtime offers it
     // SAVAGEWIND_PC_VR_BENCH_HEAD=<game present>: benchmark head script start (0: off) and the latest present seen.
     uint64_t bench_head_start, bench_last_present;
     pthread_t thread;
@@ -378,22 +379,32 @@ bool xr_runtime_discover(void) {
     if (!extensions) return false;
     for (uint32_t i = 0; i < count; ++i) extensions[i].type = XR_TYPE_EXTENSION_PROPERTIES;
     XrResult result = xrEnumerateInstanceExtensionProperties(NULL, count, &count, extensions);
-    bool enable2 = false;
-    if (XR_SUCCEEDED(result)) for (uint32_t i = 0; i < count; ++i)
+    bool enable2 = false, visibility_mask = false;
+    if (XR_SUCCEEDED(result)) for (uint32_t i = 0; i < count; ++i) {
         if (!strcmp(extensions[i].extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME)) enable2 = true;
+        if (!strcmp(extensions[i].extensionName, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME)) visibility_mask = true;
+    }
     free(extensions);
     if (!xr_ok(result, "enumerate extension data") || !enable2) {
         XRLOG("XR_KHR_vulkan_enable2 required; desktop fallback is disabled in PC VR mode\n");
         return false;
     }
-    const char *enabled[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
+    // XR_KHR_visibility_mask (optional): the runtime's mesh of each eye's pixels the lenses do not show
+    // (xr_visibility_mask_fetch).
+    const char *enabled[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME};
     XrInstanceCreateInfo info = {.type = XR_TYPE_INSTANCE_CREATE_INFO,
         .applicationInfo = {.applicationName = "Savage Wind PC VR", .applicationVersion = 1,
                             .engineName = "Savage Wind", .engineVersion = 1,
                             .apiVersion = XR_MAKE_VERSION(1, 0, 0)},
-        .enabledExtensionCount = 1, .enabledExtensionNames = enabled};
+        .enabledExtensionCount = visibility_mask ? 2 : 1, .enabledExtensionNames = enabled};
     if (!xr_ok(xrCreateInstance(&info, &xr.instance), "xrCreateInstance")) return false;
     if (!load_instance_functions()) goto fail;
+    if (visibility_mask) {
+        PFN_xrVoidFunction proc = NULL;
+        if (XR_SUCCEEDED(xrGetInstanceProcAddr(xr.instance, "xrGetVisibilityMaskKHR", &proc)) && proc)
+            xr.GetVisibilityMaskKHR = (PFN_xrGetVisibilityMaskKHR)proc;
+    }
+    XRLOG("visibility mask extension=%s\n", xr.GetVisibilityMaskKHR ? "enabled" : "not offered");
     XrInstanceProperties props = {.type = XR_TYPE_INSTANCE_PROPERTIES};
     if (!xr_ok(xr.GetInstanceProperties(xr.instance, &props), "xrGetInstanceProperties")) goto fail;
     XRLOG("runtime=%s version=%u.%u.%u\n", props.runtimeName,
@@ -544,6 +555,8 @@ VkResult xr_runtime_create_vulkan_device(VkPhysicalDevice physical, const VkDevi
 }
 
 // Called only by the owner (and during its final shutdown), under Vulkan lock.
+static void visibility_masks_fetch(void);  // (below, with the visibility meshes)
+
 static void poll_events(void) {
     for (unsigned event = 0; event < 64; ++event) {
         XrEventDataBuffer event = {.type = XR_TYPE_EVENT_DATA_BUFFER};
@@ -566,6 +579,9 @@ static void poll_events(void) {
             }
         } else if (event.type == XR_TYPE_EVENT_DATA_EVENTS_LOST) {
             invalidate_pose("events lost", true);
+        } else if (event.type == XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR) {
+            XRLOG("visibility mask changed: fetching again\n");
+            visibility_masks_fetch();
         } else if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             const XrEventDataSessionStateChanged *change = (const void *)&event;
             if (change->session != xr.session) continue;
@@ -926,6 +942,106 @@ static void *frame_owner(void *unused) {
     return NULL;
 }
 
+// XR_KHR_visibility_mask: each eye's visible and hidden triangle meshes, as the runtime gives them (x, y: tangents of
+// the view's angles, on its z = -1 plane; triangles counter-clockwise). Fetched once the session exists; the runtime
+// may announce a change (XrEventDataVisibilityMaskChangedKHR). Empty when the runtime does not offer the extension.
+typedef struct {
+    uint32_t vertex_count, index_count;
+    XrVector2f *vertices;
+    uint32_t *indices;
+} XrVisibilityMesh;
+enum { XR_MASK_VISIBLE, XR_MASK_HIDDEN, XR_MASK_KINDS };
+static XrVisibilityMesh visibility_meshes[2][XR_MASK_KINDS];
+
+static double visibility_mesh_area(const XrVisibilityMesh *mesh) {
+    double area = 0;
+    for (uint32_t i = 0; i + 2 < mesh->index_count; i += 3) {
+        const XrVector2f a = mesh->vertices[mesh->indices[i]], b = mesh->vertices[mesh->indices[i + 1]],
+                         c = mesh->vertices[mesh->indices[i + 2]];
+        area += 0.5 * fabs((double)(b.x - a.x) * (c.y - a.y) - (double)(c.x - a.x) * (b.y - a.y));
+    }
+    return area;
+}
+
+static bool visibility_mesh_fetch(uint32_t eye, unsigned kind, XrVisibilityMesh *out) {
+    const XrVisibilityMaskTypeKHR type = kind == XR_MASK_VISIBLE ? XR_VISIBILITY_MASK_TYPE_VISIBLE_TRIANGLE_MESH_KHR
+                                                                 : XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR;
+    XrVisibilityMaskKHR mask = {.type = XR_TYPE_VISIBILITY_MASK_KHR};
+    if (!xr_ok(xr.GetVisibilityMaskKHR(xr.session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye, type, &mask),
+               "visibility mask sizes")) return false;
+    // (bounded: a mask is a few hundred vertices at most in practice; the bound only guards the allocation)
+    if (mask.vertexCountOutput > 65536 || mask.indexCountOutput > 3 * 65536 || mask.indexCountOutput % 3) return false;
+    XrVector2f *vertices = calloc(mask.vertexCountOutput ? mask.vertexCountOutput : 1, sizeof *vertices);
+    uint32_t *indices = calloc(mask.indexCountOutput ? mask.indexCountOutput : 1, sizeof *indices);
+    if (!vertices || !indices) { free(vertices); free(indices); return false; }
+    mask.vertexCapacityInput = mask.vertexCountOutput;
+    mask.indexCapacityInput = mask.indexCountOutput;
+    mask.vertices = vertices;
+    mask.indices = indices;
+    if (!xr_ok(xr.GetVisibilityMaskKHR(xr.session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye, type, &mask),
+               "visibility mask data")) { free(vertices); free(indices); return false; }
+    for (uint32_t i = 0; i < mask.indexCountOutput; ++i)
+        if (indices[i] >= mask.vertexCountOutput) { free(vertices); free(indices); return false; }
+    free(out->vertices);
+    free(out->indices);
+    *out = (XrVisibilityMesh){mask.vertexCountOutput, mask.indexCountOutput, vertices, indices};
+    return true;
+}
+
+// The visible areas the renderer reads (xr_runtime_visible_area): published copies, never freed (a change of mask is
+// rare: one copy per eye per change).
+static _Atomic(const XrVisibleArea *) visible_areas[2];
+
+static void visible_area_publish(uint32_t eye, const XrVisibilityMesh *mesh) {
+    XrVisibleArea *area = calloc(1, sizeof *area);
+    float *tangents = calloc(mesh->vertex_count ? 2 * mesh->vertex_count : 1, sizeof *tangents);
+    uint32_t *indices = calloc(mesh->index_count ? mesh->index_count : 1, sizeof *indices);
+    if (!area || !tangents || !indices) { free(area); free(tangents); free(indices); return; }
+    for (uint32_t i = 0; i < mesh->vertex_count; ++i) {
+        tangents[2 * i] = mesh->vertices[i].x;
+        tangents[2 * i + 1] = mesh->vertices[i].y;
+    }
+    memcpy(indices, mesh->indices, mesh->index_count * sizeof *indices);
+    *area = (XrVisibleArea){mesh->vertex_count, mesh->index_count, tangents, indices};
+    atomic_store(&visible_areas[eye], area);
+}
+
+const XrVisibleArea *xr_runtime_visible_area(unsigned eye) {
+    return eye < 2 ? atomic_load(&visible_areas[eye]) : NULL;
+}
+
+// Fetches both eyes' meshes, publishes the visible areas, and logs their sizes and the share of each eye's FOV
+// rectangle the hidden mesh covers (the rectangle: the bounds of both meshes' vertices together).
+static void visibility_masks_fetch(void) {
+    if (!xr.GetVisibilityMaskKHR || !xr.session) return;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        bool fetched = true;
+        for (unsigned kind = 0; kind < XR_MASK_KINDS; ++kind)
+            fetched = visibility_mesh_fetch(eye, kind, &visibility_meshes[eye][kind]) && fetched;
+        if (fetched && visibility_meshes[eye][XR_MASK_VISIBLE].index_count >= 3)
+            visible_area_publish(eye, &visibility_meshes[eye][XR_MASK_VISIBLE]);
+        const XrVisibilityMesh *visible = &visibility_meshes[eye][XR_MASK_VISIBLE];
+        const XrVisibilityMesh *hidden = &visibility_meshes[eye][XR_MASK_HIDDEN];
+        float bounds[4] = {INFINITY, -INFINITY, INFINITY, -INFINITY};  // left, right, down, up (tangents)
+        for (unsigned kind = 0; kind < XR_MASK_KINDS; ++kind) {
+            const XrVisibilityMesh *mesh = &visibility_meshes[eye][kind];
+            for (uint32_t i = 0; i < mesh->vertex_count; ++i) {
+                bounds[0] = fminf(bounds[0], mesh->vertices[i].x);
+                bounds[1] = fmaxf(bounds[1], mesh->vertices[i].x);
+                bounds[2] = fminf(bounds[2], mesh->vertices[i].y);
+                bounds[3] = fmaxf(bounds[3], mesh->vertices[i].y);
+            }
+        }
+        const double rectangle = (double)(bounds[1] - bounds[0]) * (bounds[3] - bounds[2]);
+        XRLOG("visibility mask eye=%u fetched=%d visible=%u vertices/%u triangles hidden=%u vertices/%u triangles "
+              "tan_lrdu=%.4f,%.4f,%.4f,%.4f hidden_share=%.4f visible_share=%.4f\n", eye, fetched,
+              visible->vertex_count, visible->index_count / 3, hidden->vertex_count, hidden->index_count / 3,
+              bounds[0], bounds[1], bounds[2], bounds[3],
+              rectangle > 0 ? visibility_mesh_area(hidden) / rectangle : 0.0,
+              rectangle > 0 ? visibility_mesh_area(visible) / rectangle : 0.0);
+    }
+}
+
 bool xr_runtime_bind_vulkan(VkInstance instance, VkPhysicalDevice physical,
                             VkDevice device, uint32_t queue_family, uint32_t queue_index) {
     if (!xr.instance || !device || xr.session || xr.teardown_pending) return false;
@@ -948,6 +1064,7 @@ bool xr_runtime_bind_vulkan(VkInstance instance, VkPhysicalDevice physical,
     xr.local_epoch = ++local_definitions;
     space.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     if (!xr_ok(xr.CreateReferenceSpace(xr.session, &space, &xr.view), "create VIEW space")) goto fail;
+    visibility_masks_fetch();
     atomic_store(&stop_requested, false);
     atomic_store(&accepting, true);
     if (pthread_create(&xr.thread, NULL, frame_owner, NULL) != 0) {
@@ -1110,6 +1227,7 @@ bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) {
     *width = *height = 0;
     return false;
 }
+const XrVisibleArea *xr_runtime_visible_area(unsigned eye) { (void)eye; return NULL; }
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
     if (out) memset(out, 0, sizeof *out);
     return XR_POSE_UNAVAILABLE;

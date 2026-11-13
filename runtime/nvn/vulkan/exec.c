@@ -4781,6 +4781,7 @@ static void vr_after_draw(Prog *program, const CmdRec *command) {
 // ----------------------------------------------------------------------------------- VR eye images: the desktop window
 // D085: the window shows the left eye, letterboxed, instead of the game's Labo lens pass (vr_mirror.c, vr_mirror.h).
 #include "vr_mirror.h"
+#include "vr_lens_mask.h"  // (D114: the lens polygon as the headset's visible area, in draw)
 
 // Per draw, before it is recorded (draw_). The tests that find the display draw stay here, inline and in their order;
 // the mirror module is called only for that draw, which also starts the frame's copy of the eyes when the lens pass
@@ -10177,8 +10178,12 @@ have_pipe:
     uint64_t prof_t2_ = profd ? SDL_GetTicksNS() : 0;
     ProfZone pz7 = PZ_NOW();
     uint64_t prof_index_start = prof_t2_;
+    // PC VR (D114): the eye scenes' lens polygon is drawn as the headset's visible area (vr_lens_mask.h): its indices
+    // and its stream 0 vertices in place of the game's
+    VrLensDraw lens;
+    const bool lens_draw = indexed && native && vr_lens_draw(nvn_layer_draw(r), vr_draw_certificate, &lens);
     // ---- indices (copied; the largest index bounds the vertex data copied below)
-    uint32_t first = 0, count = (uint32_t)r->x[2], inst, base_inst, max_index = 0;
+    uint32_t first = 0, count = lens_draw ? lens.index_count : (uint32_t)r->x[2], inst, base_inst, max_index = 0;
     int32_t base_vertex = 0;
     VkSpan ib = {0};
     VkIndexType itype_vk = VK_INDEX_TYPE_UINT32;
@@ -10195,8 +10200,8 @@ have_pipe:
             free(e);
         }
     } else {
-        uint32_t itype = (uint32_t)r->x[1];
-        uint64_t iaddr = r->x[3];
+        uint32_t itype = lens_draw ? 1u : (uint32_t)r->x[1];  // (1: 16-bit)
+        uint64_t iaddr = lens_draw ? (uint64_t)(uintptr_t)lens.indices : r->x[3];
         base_vertex = (int32_t)r->x[4];
         base_inst = (uint32_t)r->x[5];
         inst = (uint32_t)r->x[6] ? (uint32_t)r->x[6] : 1;
@@ -10254,7 +10259,7 @@ have_pipe:
             static const float zero[4] = {0, 0, 0, 1};
             sp = vk_transient_copy(zero, 16, 16);
         } else {
-            Range v = st.vbuf[s];
+            Range v = lens_draw && s == 0 ? (Range){lens.vertex_address, lens.vertex_size} : st.vbuf[s];
             VkBuffer dbuf;
             VkDeviceSize doff;
             if (v.addr && v.size && guest_fetch(v.addr, v.size, &dbuf, &doff)) {

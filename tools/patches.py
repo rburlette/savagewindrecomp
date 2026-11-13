@@ -1108,16 +1108,18 @@ def _marker_wheel_flag(site_number, follows):
     return patch
 
 
-# PC VR's rectangular eye images, a switch (D086): the Labo display draws its scene passes with a lens-shaped polygon
-# while the flag at the graphics object + 0x35d8 is set, its full-screen triangle while it is clear. The flag's setter
-# stores it once a frame; with SAVAGEWIND_PC_VR_LABO_MASK_OFF=1 the runtime has it stored clear in PC VR
-# (runtime/pc_vr.c rt_pcvr_labo_mask), so the game itself covers each eye's whole rectangle. Otherwise it stores the
-# game's value.
-def _labo_mask(gen, address):
-    assert _word(gen, address) == 0x38296ae8, hex(_word(gen, address))  # strb w8, [x23, x9]
-    return ('{ extern uint32_t rt_pcvr_labo_mask(uint32_t); '
-            'ST8(c->x[23] + c->x[9], rt_pcvr_labo_mask((uint32_t)c->x[8])); }'
-            f'  /* {address:#x}: strb w8, [x23, x9] (the Labo display mask flag) */')
+# PC VR's eye masks from the headset (D114): while the Labo display's mask flag is set, the eye scenes' screen-quad
+# draw covers only Labo's lens-shaped polygon. The runtime notes the call while it runs, so the draw recorded meanwhile
+# carries the lens flag (runtime/hle/pc_vr_render_trace.h PC_VR_LAYER_DRAW_LENS), and the renderer draws the
+# headset's visible area there instead (runtime/nvn/vulkan/vr_lens_mask.h).
+def _lens_draw(gen, address):
+    word = _word(gen, address)
+    assert word >> 26 == 0x25, hex(word)  # bl
+    target = address + sext(word & 0x3ffffff, 26) * 4
+    return (f'{{ extern void f_{target:x}(Cpu *); extern uint32_t rt_lens_draw_begin(void); '
+            'extern void rt_layer_draw_end(uint32_t); uint32_t prev = rt_lens_draw_begin(); '
+            f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); rt_layer_draw_end(prev); }}'
+            f'  /* {address:#x}: bl (the eye scenes\' screen-quad draw: Labo\'s lens polygon) */')
 
 
 # PC VR's UI without Labo's screen parallax (runtime/pc_vr_hud.c rt_ui_parallax). In its VR mode the game shifts its
@@ -1209,7 +1211,7 @@ PATCHES = {
     'pcvr_marker_wheel_flat': _marker_wheel_flag(11, False),
     'pcvr_rune_test': _rune_test,
     'pcvr_ui_parallax': _ui_parallax,
-    'pcvr_labo_mask': _labo_mask,
+    'pcvr_lens_draw': _lens_draw,
     'pcvr_layer_final_draw': _layer_draw(1, "a render layer's finished image"),
     'pcvr_layer_placement_draw': _layer_draw(2, "a render layer's image placed in the final image"),
     'pcvr_display_lens_draw': _layer_draw(3, "the final image to the display: Labo's lens pass"),
