@@ -264,3 +264,17 @@ double pc_vr_hud_distance(double depth, double focus_m, double previous_m, doubl
     const double eased = 1 - exp(-dt_s / 0.25);
     return exp(log(previous_m) + eased * (log(target) - log(previous_m)));
 }
+
+// D086: the game code's store of the Labo display's mask flag (tools/patches.py _labo_mask), once a frame on the game
+// thread. With SAVAGEWIND_PC_VR_LABO_MASK_OFF=1 the flag is stored clear in PC VR, so the scene passes draw their
+// full-screen triangle, not Labo's lens-shaped polygon, and the eye images cover their whole rectangle (about 1.1 to
+// 1.4 ms more GPU a frame). Off by default: the game's own value is stored.
+uint32_t rt_pcvr_labo_mask(uint32_t set) {
+    if (!pc_vr_enabled() || !pc_vr_config()->play.labo_mask_off) return set;
+    static bool logged;
+    if (set && !logged) {
+        logged = true;
+        LOG("[pc-vr] Labo display mask kept off: the scene passes draw full-screen\n");
+    }
+    return 0;
+}

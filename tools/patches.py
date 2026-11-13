@@ -1051,6 +1051,18 @@ def _marker_wheel_flag(site_number, follows):
     return patch
 
 
+# PC VR's rectangular eye images, a switch (D086): the Labo display draws its scene passes with a lens-shaped polygon
+# while the flag at the graphics object + 0x35d8 is set, its full-screen triangle while it is clear. The flag's setter
+# stores it once a frame; with SAVAGEWIND_PC_VR_LABO_MASK_OFF=1 the runtime has it stored clear in PC VR
+# (runtime/pc_vr.c rt_pcvr_labo_mask), so the game itself covers each eye's whole rectangle. Otherwise it stores the
+# game's value.
+def _labo_mask(gen, address):
+    assert _word(gen, address) == 0x38296ae8, hex(_word(gen, address))  # strb w8, [x23, x9]
+    return ('{ extern uint32_t rt_pcvr_labo_mask(uint32_t); '
+            'ST8(c->x[23] + c->x[9], rt_pcvr_labo_mask((uint32_t)c->x[8])); }'
+            f'  /* {address:#x}: strb w8, [x23, x9] (the Labo display mask flag) */')
+
+
 # PC VR's UI without Labo's screen parallax (runtime/pc_vr_hud.c rt_ui_parallax). In its VR mode the game shifts its
 # whole UI toward the nose in each eye, for the goggles' lenses. The Labo display's setup stores the amount in its UI
 # views each frame through one setter (1.9.0 0x7000eeee50: view + 0x404, then the views chained at + 0x208), and the
@@ -1140,6 +1152,7 @@ PATCHES = {
     'pcvr_marker_wheel_flat': _marker_wheel_flag(11, False),
     'pcvr_rune_test': _rune_test,
     'pcvr_ui_parallax': _ui_parallax,
+    'pcvr_labo_mask': _labo_mask,
     'pcvr_layer_final_draw': _layer_draw(1, "a render layer's finished image"),
     'pcvr_layer_placement_draw': _layer_draw(2, "a render layer's image placed in the final image"),
     'pcvr_display_lens_draw': _layer_draw(3, "the final image to the display: Labo's lens pass"),

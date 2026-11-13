@@ -58,6 +58,7 @@ typedef struct {
         bool display_rate_tracking;  // DISPLAY_RATE_TRACKING=1
         bool ui_parallax;         // UI_PARALLAX=1: the game's own UI screen parallax kept
         bool hud_backdrop;        // HUD_BACKDROP=1: the HUD's backdrops drawn as the game draws them
+        bool labo_mask_off;       // LABO_MASK_OFF=1: Labo's lens-shaped mask kept off, rectangular eye images (D086)
         bool world_hud;           // WORLD_HUD: the world-tied HUD, on unless exactly 0
         bool world_hud_upright;   // WORLD_HUD_ROLL=0: markers upright in the image, not turned with the world's up
         double world_hud_test_turn;  // WORLD_HUD_ROLL=<degrees>: that much more clockwise, here in radians; 0: none

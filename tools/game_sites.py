@@ -382,6 +382,11 @@ SITES = [
     # PC VR's world-tied HUD (tools/patches.py _hud_point; runtime/pc_vr_hud.c): the HUD's world-to-screen helper's last
     # call, to the Labo VR object's adjustment of the position it writes
     Site('pcvr_hud_point', 'code', 'f941c100 94000000/fc000000 fd4013e8 a9454ff4 a94457f6 a9437bfd 910183ff d65f03c0', 1),
+    # PC VR's rectangular eye images, a switch (tools/patches.py _labo_mask; runtime/pc_vr.c rt_pcvr_labo_mask): the
+    # store of the Labo display's mask flag (the graphics object + 0x35d8; with it set the scene passes draw a
+    # lens-shaped 48-index polygon, clear their full-screen triangle), once a frame in the Labo render setup
+    Site('pcvr_labo_mask', 'code', 'f9400368 39472908 360000c8 aa1603e0 94000000/fc000000 37000060 395002a8 340004a8 '
+         '2a1f03e8 5286bb09 6d4123e9 38296ae8 f9401bfb', 11),
     # PC VR's HUD by screen (tools/patches.py _screen_draw; runtime/pc_vr_hud.c): the UI screen manager's draw loop calls
     # each screen of a draw unit through its vtable (+0x58): the blr, with x0 the screen and w22 its id
     Site('pcvr_screen_draw', 'code', 'd63f0100 910006e8 110006d6 92407d17 6b0802bf 54000001/ff00001f a9444ff4 f9400bf9', 0),
@@ -526,6 +531,7 @@ OPTIONAL_GROUPS = [
     ('pcvr_matrix_builder', 'pcvr_base_caller', 'pcvr_layer_base_caller', 'pcvr_eye_caller', 'pcvr_proj_builder', 'pcvr_proj_device', 'pcvr_proj_build_caller', 'pcvr_proj_device_caller', 'pcvr_proj_root_return', 'pcvr_proj_sibling_return', 'pcvr_render_begin', 'pcvr_render_begin_caller', 'labo_set_vr', 'labo_end_vr_call', 'labo_enable_rec_call', 'labo_vr_notify_1', 'labo_vr_notify_2', 'labo_sensor_ret', 'labo_track_start_ret', 'pcvr_cam_update_0', 'pcvr_cam_update_1', 'pcvr_cam_update_2', 'pcvr_cam_update_3', 'pcvr_cam_update_4', 'pcvr_cam_update_5', 'pcvr_cam_update_6', 'pcvr_cam_update_7', 'pcvr_actor_vtable', 'pcvr_eye_vtable', 'pcvr_proj_vtable', 'pcvr_base_vtable', 'labo_manager_slot', 'automation_screen_root',),
     ('gyro_scene_actor',),
     ('pcvr_hud_point',),
+    ('pcvr_labo_mask',),
     ('pcvr_screen_draw', 'pcvr_pane_draw', 'pcvr_pane_child_draw'),
     ('pcvr_balloon_point',),
     ('pcvr_marker_store_1', 'pcvr_marker_store_2', 'pcvr_marker_store_3', 'pcvr_marker_store_4', 'pcvr_marker_store_5',
@@ -763,6 +769,7 @@ KNOWN = {
         'labo_manager_slot': 0x7001d66c98,
         'automation_screen_root': 0x7001d66d58,
         'pcvr_hud_point': 0x7000e1dec0,
+        'pcvr_labo_mask': 0x7001260724,
         'pcvr_screen_draw': 0x7000f714c0,
         'pcvr_pane_draw': 0x7000027d80,
         'pcvr_pane_child_draw': 0x7000027dc8,

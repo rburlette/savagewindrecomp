@@ -98,6 +98,7 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
     out->play.display_rate_tracking = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING"));
     out->play.ui_parallax = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_UI_PARALLAX"));
     out->play.hud_backdrop = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_HUD_BACKDROP"));
+    out->play.labo_mask_off = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_LABO_MASK_OFF"));
     value = lookup(context, "SAVAGEWIND_PC_VR_WORLD_HUD");
     out->play.world_hud = !(value && !strcmp(value, "0"));
     value = lookup(context, "SAVAGEWIND_PC_VR_WORLD_HUD_ROLL");
@@ -166,8 +167,9 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
     if (config->play.eye_width)
         describe_append(&line, " EYE_SIZE=%ux%u", config->play.eye_width, config->play.eye_height);
     else describe_append(&line, " EYE_SIZE=none");
-    describe_append(&line, " DISPLAY_RATE_TRACKING=%d UI_PARALLAX=%d HUD_BACKDROP=%d",
-        config->play.display_rate_tracking, config->play.ui_parallax, config->play.hud_backdrop);
+    describe_append(&line, " DISPLAY_RATE_TRACKING=%d UI_PARALLAX=%d HUD_BACKDROP=%d LABO_MASK_OFF=%d",
+        config->play.display_rate_tracking, config->play.ui_parallax, config->play.hud_backdrop,
+        config->play.labo_mask_off);
     describe_append(&line, " WORLD_HUD=%d", config->play.world_hud);
     if (config->play.world_hud_upright) describe_append(&line, " WORLD_HUD_ROLL=0");
     else if (config->play.world_hud_test_turn != 0)
