@@ -197,6 +197,39 @@ def main():
             check(False, f'{name}: mismatched opcode accepted')
         except AssertionError:
             check(True, f'{name}: mismatched opcode refused')
+    # A marker pane store (patches._marker_store): `bl helper; ldp s0, s1, [sp, #0x30]; str wzr, [x20, #0x38]` keeps
+    # the game's store and binds x20 to the buffer at sp + 0x30; another load before it, a store through sp, or a call
+    # of another function than the one holding pcvr_hud_point (under 0x100 bytes after the target) is refused.
+    for load, store, report, accepted in [(0x2d4607e0, 0xb9003a9f, 0xe0, True),
+                                          (0x2d460500, 0xb9003a9f, 0xe0, False),
+                                          (0x2d4607e0, 0xb9003bff, 0xe0, False),
+                                          (0x2d4607e0, 0xb9003a9f, 0x100, False)]:
+        code_words = struct.pack('<3I', bl(BASE, BASE + 0x100), load, store)
+        g = SimpleNamespace(base=BASE, nso=SimpleNamespace(image=code_words),
+                            sites={'pcvr_hud_point': BASE + 0x100 + report})
+        try:
+            code = patches.PATCHES['pcvr_marker_store_3'](g, BASE + 8)
+            check(accepted and 'ST32(c->x[20] + 0x38, 0);' in code and
+                  'rt_marker_pane_bind(c->x[20], c->sp + 0x30, 3);' in code,
+                  f'marker store {load:#x} {store:#x}: {code}')
+        except AssertionError:
+            check(not accepted, f'marker store {load:#x} {store:#x} (report {report:#x} after the call): refused')
+    # The component call (patches._marker_component_call): binds the component's pane (x0, from the buffer in x1), then
+    # calls; a callee that does not start with the two loads of [[component + 8] + 0x18] is refused.
+    for second_load, accepted in [(0xf9400d08, True), (0xf9401108, False)]:
+        code_words = struct.pack('<4I', bl(BASE, BASE + 4), 0xf9400408, 0xb4000108, second_load)
+        g = SimpleNamespace(base=BASE, nso=SimpleNamespace(image=code_words))
+        try:
+            code = patches.PATCHES['pcvr_marker_component_call'](g, BASE)
+            check(accepted and f'rt_marker_component_bind(c->x[0], c->x[1], 9); c->x[30] = {BASE + 4:#x}ull; '
+                  f'f_{BASE + 4:x}(c);' in code, f'marker component call: {code}')
+        except AssertionError:
+            check(not accepted, f'marker component call to a function loading {second_load:#x}: refused')
+    g = SimpleNamespace(base=BASE, nso=SimpleNamespace(image=struct.pack('<2I', 0x2a1f03f9, 0x52800039)))
+    check('c->x[25] = 0; rt_marker_component_bind(c->x[20], c->sp + 0x18, 10);' in
+          patches.PATCHES['pcvr_marker_wheel_follow'](g, BASE), 'marker wheel follows: the flag, then the bind')
+    check('c->x[25] = 1; rt_marker_component_release(c->x[20], 11);' in
+          patches.PATCHES['pcvr_marker_wheel_flat'](g, BASE + 4), 'marker wheel flat: the flag, then the release')
     print(f'ok: {checks} checks')
 
 

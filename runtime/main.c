@@ -177,6 +177,8 @@ static void boot(const char *root) {
     kernel_init();
     dispatch_init();
     { extern void rupees_start(void); rupees_start(); }  // (Cheats > Infinite rupees, `rupees`: runtime/rupees.c)
+    { extern void pc_vr_head_look_init(void); pc_vr_head_look_init(); }
+    { extern void pc_vr_camera_update_init(void); pc_vr_camera_update_init(); }
     { extern void jpeg_debug_init(void); jpeg_debug_init(); }
 
     uint32_t stack_size = 0x100000;
