@@ -87,7 +87,7 @@ static void test_defaults(void) {
     CHECK(config.play.menu_distance == 0.77 && config.play.hud_depth == 0.9);
     CHECK(config.play.eye_images_flip == -1 && config.play.eye_scale == 1.0);
     CHECK(!config.play.eye_width && !config.play.eye_height && !config.play.eye_size_malformed);
-    CHECK(!config.play.display_rate_tracking && !config.play.ui_parallax);
+    CHECK(!config.play.display_rate_tracking && !config.play.ui_parallax && !config.play.labo_mask_off);
     CHECK(!config.play.hud_backdrop && config.play.world_hud && !config.play.world_hud_upright);
     CHECK(config.play.world_hud_test_turn == 0 && config.play.rune_aim == PC_VR_RUNE_AIM_ON);
     const PcVrConfig empty = {0};
@@ -196,6 +196,8 @@ static void test_play_settings(void) {
     CHECK(!with_setting("SAVAGEWIND_PC_VR_UI_PARALLAX", "0").play.ui_parallax);
     CHECK(with_setting("SAVAGEWIND_PC_VR_HUD_BACKDROP", "1").play.hud_backdrop);
     CHECK(!with_setting("SAVAGEWIND_PC_VR_HUD_BACKDROP", "01").play.hud_backdrop);
+    CHECK(with_setting("SAVAGEWIND_PC_VR_LABO_MASK_OFF", "1").play.labo_mask_off);
+    CHECK(!with_setting("SAVAGEWIND_PC_VR_LABO_MASK_OFF", "yes").play.labo_mask_off);
     // WORLD_HUD: only exactly 0 is off (an empty value is a real one here, unlike Windows' environment).
     const struct { const char *value; bool on; } world[] = {
         {NULL, true}, {"0", false}, {"1", true}, {"00", true}, {"0 ", true}, {"", true}};
@@ -271,7 +273,7 @@ static void test_describe(void) {
         &config);
     char text[1024];
     const char *play = "NATIVE_VIEW_UNITS_PER_METER=14.53 MENU_DISTANCE=0.77 HUD_DEPTH=0.9 EYE_IMAGES_FLIP=auto "
-        "EYE_SCALE=3 EYE_SIZE=none DISPLAY_RATE_TRACKING=0 UI_PARALLAX=0 HUD_BACKDROP=0 "
+        "EYE_SCALE=3 EYE_SIZE=none DISPLAY_RATE_TRACKING=0 UI_PARALLAX=0 HUD_BACKDROP=0 LABO_MASK_OFF=0 "
         "WORLD_HUD=1 WORLD_HUD_ROLL=world RUNE_AIM=1; diagnostics: LOG_SCREENS; aliases: HEAD_LOOK PROJECTION_TRACE "
         "NATIVE_FOV_TRACE NATIVE_FOV_EXPERIMENT NATIVE_VIEW_EXPERIMENT NATIVE_RENDER_TRACE EYE_IMAGES FIRST_LIGHT; "
         "ignored: none";
