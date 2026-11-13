@@ -228,7 +228,7 @@ static void process_configuration_read(void) {
     pc_vr_config_parse(environment_setting, NULL, &process_configuration);
     if (process_configuration.enabled) {
         if (process_configuration.play.eye_size_malformed)
-            FATAL("SAVAGEWIND_PC_VR_EYE_SIZE requires WxH, each axis 128..4096 and a multiple of 16\n");
+            FATAL("SAVAGEWIND_PC_VR_EYE_SIZE requires WxH, each axis 128..4096\n");
         char text[1024];
         pc_vr_config_describe(&process_configuration, text, sizeof text);
         LOG("[pc-vr] configuration: %s\n", text);

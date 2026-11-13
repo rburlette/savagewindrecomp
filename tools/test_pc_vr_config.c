@@ -35,6 +35,13 @@ uint64_t plat_now_ns(void) { return 1000000000ull; }
 bool labo_motion_active(void) { abort(); }
 void rt_fatal_trace(void) { abort(); }
 void pc_vr_motion_contract_timestamp_reset(void) { abort(); }
+// The OpenXR runtime's recommended eye size (0: discovery has not run), as xr_runtime.c reports it.
+static unsigned mock_view_width, mock_view_height;
+bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) {
+    *width = mock_view_width;
+    *height = mock_view_height;
+    return mock_view_width && mock_view_height;
+}
 
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { \
@@ -183,7 +190,7 @@ static void test_play_settings(void) {
     CHECK(config.play.eye_width == 2064 && config.play.eye_height == 2208 && !config.play.eye_size_malformed);
     config = with_setting("SAVAGEWIND_PC_VR_EYE_SIZE", "");
     CHECK(!config.play.eye_width && !config.play.eye_height && !config.play.eye_size_malformed);
-    const char *bad_sizes[] = {"0x2208", "2064x0", "2064", "2064X2208", " 2064x2208", "2065x2208", "112x2208",
+    const char *bad_sizes[] = {"0x2208", "2064x0", "2064", "2064X2208", " 2064x2208", "112x2208",
         "4112x2208", "2064x2208junk"};
     for (unsigned i = 0; i < sizeof bad_sizes / sizeof bad_sizes[0]; ++i) {
         config = with_setting("SAVAGEWIND_PC_VR_EYE_SIZE", bad_sizes[i]);
@@ -328,12 +335,11 @@ static void test_eye_size(void) {
         CHECK(lround(1920 * out.sx) == (exact ? 4128 : enabled ? 3840 : 3456));
         CHECK(lround(1080 * out.sy) == (exact ? 2208 : 2160));
         if (exact) {
-            // Production texture allocation uses float scales and lroundf. Original 800x900 eye chains and the
-            // 960x1080 halves of the final image must land on identical pixels, including their half-size passes.
-            for (unsigned div = 1; div <= 16; div *= 2) {
-                CHECK(lroundf((800.0f / div) * ((float)width / 800)) == lroundf((960.0f / div) * (float)out.sx));
-                CHECK(lroundf((900.0f / div) * ((float)height / 900)) == lroundf((1080.0f / div) * (float)out.sy));
-            }
+            // Production texture allocation uses float scales and lroundf. The 800x900 eye targets and the
+            // 960x1080 halves of the final image must land on identical pixels: the eye's finished scene is placed
+            // in its half 1:1. (Only at full size: their fractions are unrelated targets.)
+            CHECK(lroundf(800.0f * ((float)width / 800)) == lroundf(960.0f * (float)out.sx));
+            CHECK(lroundf(900.0f * ((float)height / 900)) == lroundf(1080.0f * (float)out.sy));
             CHECK(lround(1600 * out.scene_sx) == 4128 && lround(900 * out.scene_sy) == 2208);
             CHECK(fabs(out.vw / out.vh - 4128.0 / 2208.0) < 1e-12);
             CHECK(out.shape == 1 && g_view_shape == 1 && g_fov == 1); // raster size cannot widen native camera FOV
@@ -345,7 +351,7 @@ static void test_eye_size(void) {
     }
     const char *bad[] = {NULL, "", "0x2208", "2064x0", "2064", "2064x", "x2208", "2064X2208",
         "2064x2208 ", " 2064x2208", "+2064x2208", "02064x2208", "2064x2208junk", "2064x2208x16",
-        "2065x2208", "2064x2209", "112x2208", "4112x2208", "999999999999999999999x2208"};
+        "112x2208", "4112x2208", "999999999999999999999x2208"};
     unsigned width, height;
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
         width = height = 42;
@@ -353,6 +359,36 @@ static void test_eye_size(void) {
     }
     CHECK(pc_vr_parse_eye_size("128x128", &width, &height) && width == 128 && height == 128);
     CHECK(pc_vr_parse_eye_size("4096x4096", &width, &height) && width == 4096 && height == 4096);
+    CHECK(pc_vr_parse_eye_size("2451x2644", &width, &height) && width == 2451 && height == 2644);
+}
+
+// The eye size from an eye scale in the OpenXR runtime's view shape: the scale's pixels of 800x900, whole pixels.
+static void test_eye_size_from_view(void) {
+    unsigned width = 42, height = 42;
+    // Link's recommended 1824x1968 (0.927): EyeScale 3.0's 6,480,000 pixels, 2400x2700 in Labo's shape.
+    CHECK(pc_vr_eye_size_for_view(3.0, 1824, 1968, &width, &height) && width == 2451 && height == 2644);
+    CHECK(fabs((double)width * height / 6480000.0 - 1.0) < 0.001);
+    CHECK(fabs((double)width / height - 1824.0 / 1968.0) < 0.001);
+    CHECK(pc_vr_eye_size_for_view(2.4, 1824, 1968, &width, &height) && width == 1961 && height == 2115);
+    CHECK(pc_vr_eye_size_for_view(3.0, 800, 900, &width, &height) && width == 2400 && height == 2700);
+    CHECK(pc_vr_eye_size_for_view(5.0, 100, 4000, &width, &height) && width == 671 && height == 4096);
+    CHECK(!pc_vr_eye_size_for_view(1.0, 1824, 1968, &width, &height) && !width && !height);
+    CHECK(!pc_vr_eye_size_for_view(3.0, 0, 1968, &width, &height) && !width && !height);
+    // Through pc_vr.c: only in PC VR, only once the runtime is discovered; an explicit EYE_SIZE wins.
+    const char *const scaled[] = {"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_EYE_SCALE", "3", NULL};
+    test_pc_vr_configure(scaled);
+    mock_view_width = mock_view_height = 0;
+    CHECK(!pc_vr_eye_size(&width, &height));
+    mock_view_width = 1824, mock_view_height = 1968;
+    CHECK(pc_vr_eye_size(&width, &height) && width == 2451 && height == 2644);
+    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_EYE_SCALE", "3",
+                                               "SAVAGEWIND_PC_VR_EYE_SIZE", "2064x2208", NULL});
+    CHECK(pc_vr_eye_size(&width, &height) && width == 2064 && height == 2208);
+    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "0", "SAVAGEWIND_PC_VR_EYE_SCALE", "3", NULL});
+    CHECK(!pc_vr_eye_size(&width, &height));
+    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    CHECK(!pc_vr_eye_size(&width, &height));
+    mock_view_width = mock_view_height = 0;
 }
 
 // Quad depths (menus D056 in metres, HUD D057 as a multiple of the camera target's distance): latched at the first
@@ -439,6 +475,7 @@ int main(int argc, char **argv) {
     test_describe();
     test_panels_off();
     test_eye_size();
+    test_eye_size_from_view();
     test_panel_depths();
     printf("PC VR configuration fixture: %u checks passed\n", checks);
     return 0;

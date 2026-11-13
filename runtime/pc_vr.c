@@ -20,20 +20,27 @@
 
 #include "gamelib.h"
 #include "game_sites.h"
+#include "pc_vr_eye_size.h"
 #include "pc_vr_main.h"
 #include "hle.h"
 #include "rt.h"
 #include "hle/labo_guest_memory.h"
 #include "hle/pc_vr_motion_contract.h"
 #include "services/labo_motion_state.h"
+#include "xr/xr_runtime.h"
 
 bool pc_vr_enabled(void) { return pc_vr_config()->enabled; }
 
+// EYE_SIZE when given; else, in PC VR with an eye scale, that scale's pixels in the OpenXR runtime's view shape
+// (pc_vr_eye_size_for_view), known from discovery on, which comes before the Vulkan device and any render target.
 bool pc_vr_eye_size(unsigned *width, unsigned *height) {
     const PcVrConfig *config = pc_vr_config();
     *width = config->play.eye_width;
     *height = config->play.eye_height;
-    return config->play.eye_width != 0;
+    if (config->play.eye_width) return true;
+    unsigned view_width, view_height;
+    return config->enabled && xr_runtime_recommended_eye_size(&view_width, &view_height) &&
+           pc_vr_eye_size_for_view(config->play.eye_scale, view_width, view_height, width, height);
 }
 
 bool pc_vr_main_compatible(void) {

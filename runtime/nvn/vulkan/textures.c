@@ -182,7 +182,8 @@ static bool format_is_float(VkFormat f) {  // (uncompressed: these can hold NaN 
 //             their half-size copy (R16 448x448x3, the max of each 2x2), at the same factor: water and the other
 //             forward-shaded surfaces take their shadows from it (issue #101)
 //   RS_EYE    Labo VR's per-eye targets (800x900, and their same-shaped fractions), only with an explicit
-//             SAVAGEWIND_PC_VR_EYE_SCALE: the headset copies these pixels, so their count sets its sharpness
+//             SAVAGEWIND_PC_VR_EYE_SCALE (in the headset's view shape, eye_scale_on): the headset copies these
+//             pixels, so their count sets its sharpness
 static float g_rs[5][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
 static uint32_t g_shadow_size;
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs[RS_OUT][0]; *sy = g_rs[RS_OUT][1]; }
@@ -233,7 +234,9 @@ bool vk_shadow_direct(void) {
 bool vk_shadow_scaled(const NvnTexture *t) { return t && g_shadow_size > t->width; }
 
 // PC VR eye scale (1 = off, up to 5: 4000x4500), exact decimal text only. The eye chain's shape (0.87..0.91, the
-// 800x900 Labo eye targets and their fractions) is otherwise never scaled.
+// 800x900 Labo eye targets and their fractions) is otherwise never scaled. In PC VR the scale's pixels take the
+// OpenXR runtime's view shape (pc_vr.c pc_vr_eye_size: 2451x2644 at 3.0 on Link), one factor per axis, so each eye
+// renders in the shape the headset shows it in; uniform (Labo's 8:9) only without a discovered runtime.
 static bool eye_scale_on(void) {
     static int on = -1;
     if (on >= 0) return on;
@@ -243,7 +246,8 @@ static bool eye_scale_on(void) {
         g_rs[RS_EYE][0] = (float)width / 800.0f;
         g_rs[RS_EYE][1] = (float)height / 900.0f;
         on = 1;
-        LOG("[pc-vr-eye-size] exact eye renders %ux%u; final halves match, poses/FOV unchanged\n", width, height);
+        LOG("[pc-vr-eye-size] exact eye renders %ux%u (%s); final halves match, poses/FOV unchanged\n", width, height,
+            pc_vr_config()->play.eye_width ? "SAVAGEWIND_PC_VR_EYE_SIZE" : "the eye scale's pixels in the runtime's view shape");
         return on;
     }
     // (SAVAGEWIND_PC_VR_EYE_SCALE: the configuration takes a decimal in (1, 5], and leaves 1 otherwise)

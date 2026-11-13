@@ -224,6 +224,7 @@ static struct {
     uint64_t local_epoch;
     XrCalibration calibration;
     uint32_t max_eye_width, max_eye_height; // the runtime's per-view maximum (0: unknown)
+    uint32_t recommended_eye_width, recommended_eye_height; // the runtime's per-view recommendation (0: unknown)
     // SAVAGEWIND_PC_VR_BENCH_HEAD=<game present>: benchmark head script start (0: off) and the latest present seen.
     uint64_t bench_head_start, bench_last_present;
     pthread_t thread;
@@ -426,7 +427,12 @@ bool xr_runtime_discover(void) {
     XrViewConfigurationView view_info[2] = {{.type = XR_TYPE_VIEW_CONFIGURATION_VIEW}, {.type = XR_TYPE_VIEW_CONFIGURATION_VIEW}};
     if (!xr_ok(xr.EnumerateViewConfigurationViews(xr.instance, xr.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                                                 2, &views, view_info), "stereo view sizes") || views != 2) goto fail;
-    // Eye images are the game's final-image halves (exec.c vr_capture_eyes), not this size; it is reported for comparison.
+    // Eye images are the game's final-image halves (exec.c vr_capture_eyes), not this size; its shape sets the eye
+    // render's (pc_vr.c pc_vr_eye_size), read before the Vulkan device and any eye target exist.
+    xr.recommended_eye_width = view_info[0].recommendedImageRectWidth < view_info[1].recommendedImageRectWidth ?
+        view_info[0].recommendedImageRectWidth : view_info[1].recommendedImageRectWidth;
+    xr.recommended_eye_height = view_info[0].recommendedImageRectHeight < view_info[1].recommendedImageRectHeight ?
+        view_info[0].recommendedImageRectHeight : view_info[1].recommendedImageRectHeight;
     xr.max_eye_width = view_info[0].maxImageRectWidth < view_info[1].maxImageRectWidth ?
         view_info[0].maxImageRectWidth : view_info[1].maxImageRectWidth;
     xr.max_eye_height = view_info[0].maxImageRectHeight < view_info[1].maxImageRectHeight ?
@@ -963,6 +969,12 @@ void xr_runtime_notify_game_present(uint64_t game_present_id) {
     pthread_cond_signal(&wake_cond);
 }
 
+bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) {
+    *width = xr.recommended_eye_width;
+    *height = xr.recommended_eye_height;
+    return *width && *height;
+}
+
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
     if (!out) return XR_POSE_UNAVAILABLE;
     memset(out, 0, sizeof *out);
@@ -1094,6 +1106,10 @@ void xr_runtime_vulkan_idle_end(void) { pthread_mutex_unlock(&xr_vulkan_lock); }
 // Ordinary builds do not acquire an OpenXR build/runtime dependency.
 #include <stdio.h>
 void xr_runtime_notify_game_present(uint64_t id) { (void)id; }
+bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) {
+    *width = *height = 0;
+    return false;
+}
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
     if (out) memset(out, 0, sizeof *out);
     return XR_POSE_UNAVAILABLE;

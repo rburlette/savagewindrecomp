@@ -71,6 +71,7 @@ uint64_t loader_find_symbol_in(const char *module, const char *name) {
 Cpu *kernel_current_cpu(void) { return &test_cpu; }
 bool labo_motion_active(void) { return sensor_active; }
 void pc_vr_motion_contract_timestamp_reset(void) { ++timestamp_reset_count; }
+bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) { *width = *height = 0; return false; }
 uint64_t plat_now_ns(void) { return now_ns; }
 void guest_call(Cpu *c, uint64_t address) {
     assert(call_count < sizeof calls / sizeof calls[0]);

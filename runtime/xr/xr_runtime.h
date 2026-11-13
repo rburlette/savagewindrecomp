@@ -96,6 +96,9 @@ typedef enum {
 // display-rate owner publishes its next tracking sample for this present;
 // it neither paces XR frames nor authorizes image submission.
 void xr_runtime_notify_game_present(uint64_t game_present_id);
+// The runtime's recommended size of one eye's image (the smaller of the two views on each axis), known from discovery
+// on (before the Vulkan device); false before it or in an OpenXR-disabled build.
+bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height);
 // No XR calls and no blocking lock; BUSY must not reset consumer calibration.
 // VALID requires visible, tracked orientation and a publication age <=250ms.
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out);

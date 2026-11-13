@@ -15,8 +15,9 @@ extern "C" {
 // Strict, process-latched opt-in shared by launcher, game hooks and renderer (pc_vr_config()->enabled).
 bool pc_vr_enabled(void);
 
-// Optional exact raster size for both eye rendering and submission (SAVAGEWIND_PC_VR_EYE_SIZE=WxH).
-// Process-latched, PC VR only; each axis 128..4096 and a multiple of 16. Poses/FOV remain runtime-derived.
+// The exact raster size for both eye rendering and submission, PC VR only: SAVAGEWIND_PC_VR_EYE_SIZE=WxH (each axis
+// 128..4096, process-latched), else the eye scale's pixels in the OpenXR runtime's view shape once discovery has run
+// (pc_vr_eye_size.h). False: the eye targets keep Labo's shape (EyeScale alone, or none). Poses/FOV remain runtime-derived.
 bool pc_vr_eye_size(unsigned *width, unsigned *height);
 
 // The game version's PC VR sites are there (runtime/game_sites.h GAME_SITES_PC_VR; a version tools/game_sites.py
