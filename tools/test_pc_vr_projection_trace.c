@@ -35,6 +35,7 @@ static BOOL WINAPI fixture_write_process_memory(HANDLE process, LPVOID address,
 #include "test_game_sites_182.h"
 #include "../runtime/pc_vr_main.h"
 #include "../runtime/hle/pc_vr_projection_trace.c"
+#include "../runtime/pc_vr_guards.c"  // (the refusal counts the trace keeps)
 #ifdef _WIN32
 #undef WriteProcessMemory
 #endif

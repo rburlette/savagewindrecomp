@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include "../runtime/xr/xr_runtime.c"
+#include "../runtime/pc_vr_guards.c"  // (the refusal counts the owner keeps)
 #include "test_pc_vr_settings.h"  // (the XR owner's settings: the play configuration's, PC VR off unless a case says)
 void rt_fatal_trace(void) { abort(); }
 

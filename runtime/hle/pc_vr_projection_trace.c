@@ -32,6 +32,7 @@
 #include "../game_sites.h"
 #include "../hle.h"
 #include "../pc_vr.h"
+#include "../pc_vr_guards.h"
 #include "../xr/xr_runtime.h"
 #include "labo_guest_memory.h"
 #include "pc_vr_projection_math.h"
@@ -287,12 +288,28 @@ static bool projection_native_pose(const XrPoseSnapshot *pose, uint64_t now) {
 // both samples against time read AFTER copying current tracking, otherwise a
 // valid newer publication is falsely classified as future. Keep the rendered
 // sample immutable; current tracking only gates its continued eligibility.
+// Each refusal is counted by its reason (pc_vr_guards.h).
 static bool projection_pose_current(const XrPoseSnapshot *retained) {
     XrPoseSnapshot current = {0};
-    if (xr_runtime_get_pose(&current) != XR_POSE_VALID) return false;
+    const XrPoseReadResult read = xr_runtime_get_pose(&current);
+    if (read != XR_POSE_VALID) {
+        pc_vr_guard_count(read == XR_POSE_BUSY ? PC_VR_GUARD_POSE_BUSY : PC_VR_GUARD_POSE_UNAVAILABLE);
+        return false;
+    }
     const uint64_t checked_now = xr_runtime_pose_clock_ns();
-    return projection_native_pose(retained, checked_now) &&
-        projection_native_pose(&current, checked_now) && current.generation == retained->generation;
+    if (!projection_native_pose(retained, checked_now) || !projection_native_pose(&current, checked_now)) {
+        const bool aged = (retained->published_monotonic_ns && checked_now >= retained->published_monotonic_ns &&
+                           checked_now - retained->published_monotonic_ns > PROJ_POSE_MAX_AGE_NS) ||
+                          (current.published_monotonic_ns && checked_now >= current.published_monotonic_ns &&
+                           checked_now - current.published_monotonic_ns > PROJ_POSE_MAX_AGE_NS);
+        pc_vr_guard_count(aged ? PC_VR_GUARD_POSE_AGE : PC_VR_GUARD_POSE_INVALID);
+        return false;
+    }
+    if (current.generation != retained->generation) {
+        pc_vr_guard_count(PC_VR_GUARD_POSE_GENERATION);
+        return false;
+    }
+    return true;
 }
 
 static ProjectionNote *projection_find_note(uint64_t object) {
@@ -435,6 +452,13 @@ static bool render_fingerprint(const ProjectionNote *note, const PcVrRenderCerti
         projection_hash(device, sizeof device) == cert->device_hash;
 }
 
+// The layer's guest state against the certificate, a mismatch counted (pc_vr_guards.h).
+static bool render_fingerprint_counted(const ProjectionNote *note, const PcVrRenderCertificate *cert) {
+    const bool same = projection_identity(note) && render_fingerprint(note, cert);
+    if (!same) pc_vr_guard_count(PC_VR_GUARD_FINGERPRINT_MISMATCH);
+    return same;
+}
+
 // Works a draw's certificate out in full: the draw's render scope against the layer's guest state now, then the eye
 // note, the traversal and the certificate under projection_lock.
 static uint64_t render_record_evaluate(uint64_t command_buffer) {
@@ -468,7 +492,7 @@ static uint64_t render_record_evaluate(uint64_t command_buffer) {
         cert.note == note->note && cert.sequence == note->sequence && cert.frame == note->frame &&
         cert.generation == note->generation && cert.native_index == (uint32_t)note->fov_native_index &&
         cert.side_bit == note->side &&
-        (scope->checked_certificate == cert.id || (projection_identity(note) && render_fingerprint(note, &cert)))) {
+        (scope->checked_certificate == cert.id || render_fingerprint_counted(note, &cert))) {
         scope->checked_certificate = cert.id;
         id = cert.id;
     }
@@ -583,6 +607,7 @@ static void projection_view_reject_locked(unsigned reason) {
     if (traversal->view_failed) return;
     traversal->view_failed = traversal->fov_failed = true;
     ++projection_view_rejected;
+    pc_vr_guard_count(PC_VR_GUARD_VIEW_HEAD_LOOK_NOT_APPLIED + (reason - 1));  // (reasons 1 to 4, in the enum's order)
     if (projection_view_rejected <= 4)
         LOG("[pc-vr-native-view] rejected=%llu reason=%u native_provenance=0 image_admission=0\n",
             (unsigned long long)projection_view_rejected, reason);
@@ -605,6 +630,7 @@ void pc_vr_projection_trace_head_result(uint64_t layer, uint64_t sequence, bool 
 static void projection_fov_reject_locked(unsigned reason) {
     ++projection_fov_rejected;
     projection_traversal.fov_failed = true;
+    pc_vr_guard_count(PC_VR_GUARD_FOV_PRECONDITION + (reason - 1));  // (reasons 1 to 3, in the enum's order)
     if (projection_fov_rejected <= 4)
         LOG("[pc-vr-fov-experiment] rejected=%llu reason=%u native_provenance=0 image_admission=0\n",
             (unsigned long long)projection_fov_rejected, reason);
@@ -885,8 +911,9 @@ static void projection_verify_native_fov(uint64_t object, bool device, uint64_t 
     pthread_mutex_unlock(&projection_lock);
 }
 
-static void projection_traversal_reject(void) {
+static void projection_traversal_reject(PcVrGuard reason) {
     ++projection_stack_rejected;
+    pc_vr_guard_count(reason);
     memset(&projection_traversal, 0, sizeof projection_traversal);
     if (projection_stack_rejected <= 3)
         LOG("[pc-vr-traversal] rejected=%llu pending_cleared=1 native_provenance=0\n",
@@ -899,20 +926,20 @@ static void projection_traversal_reject(void) {
 static void projection_observe_traversal(ProjectionNote *note, uint64_t frame, const XrPoseSnapshot *head_pose) {
     uint64_t saved[2] = {0};
     if (!projection_saved_frame(frame, saved)) {
-        projection_traversal_reject(); return;
+        projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE); return;
     }
     if (saved[1] == PROJ_ROOT_RETURN) {
         memset(&projection_traversal, 0, sizeof projection_traversal);  // (an open earlier root is abandoned)
         // Fail closed on identity exhaustion; wrapping would permit old IDs.
         if (projection_root_serial == UINT64_MAX) {
-            projection_traversal_reject();
+            projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_SERIAL_EXHAUSTED);
             return;
         }
         note->traversal_serial = ++projection_root_serial;
         ++projection_roots;
         if (!projection_config_address(note->config) || note->sibling == note->layer || (note->sibling & 7) ||
             note->sibling < GUEST_LO || note->sibling > GUEST_HI - 0x448) {
-            projection_traversal_reject(); return;
+            projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY); return;
         }
         ProjectionTraversal *traversal = &projection_traversal;
         traversal->root = *note;
@@ -944,14 +971,14 @@ static void projection_observe_traversal(ProjectionNote *note, uint64_t frame, c
         root->note + 1 == note->note && root->config == note->config && root->base == note->base &&
         root->base_hash == note->base_hash;
     if (!layer_link) {
-        projection_traversal_reject();
+        projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_NOT_SIBLING);
         return;
     }
     // Revalidate the root's still-live guest relation. The original sibling
     // may have no reverse link; require the source-backed root->sibling link.
     if (!projection_identity(root) ||
         !projection_live_link(root->layer, traversal->frame_pointer, note->layer, note->config)) {
-        projection_traversal_reject(); return;
+        projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_LINK_GONE); return;
     }
     note->traversal_serial = traversal->serial;
     traversal->open = false; // A duplicate/delayed sibling cannot consume it again.
@@ -1095,7 +1122,7 @@ void pc_vr_projection_trace_eye(uint64_t layer, uint64_t bound_base,
     }
     if (valid) for (unsigned i = 0; i < 9; ++i) valid &= isfinite(base_pose[i]);
     if (!valid) {
-        projection_traversal_reject();
+        projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_BOUND_EYE);
         ++projection_rejected;
         if (projection_rejected <= 3) LOG("[pc-vr-projection] bound-eye rejected=%llu native_provenance=0\n",
             (unsigned long long)projection_rejected);

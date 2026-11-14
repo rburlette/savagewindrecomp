@@ -176,6 +176,7 @@ bool xr_calibration_panel(const XrCalibration *calibration, float distance, floa
 #include <stdlib.h>
 #include "../platform.h"
 #include "../pc_vr_config.h"
+#include "../pc_vr_guards.h"
 #include <time.h>
 #include <math.h>
 #include "xr_vulkan.h"
@@ -1151,6 +1152,7 @@ bool xr_runtime_shutdown_checked(void) {
         for (unsigned i = 0; i < FRAME_OUTCOME_COUNT; ++i)
             fprintf(stderr, " %s=%llu", frame_outcome_names[i], (unsigned long long)xr.outcomes[i]);
         fprintf(stderr, "\n");
+        pc_vr_guards_log("exit");
         XRLOG("runtime queue completion waits=%llu zero-layer=%llu total-ns=%llu max-ns=%llu\n",
             (unsigned long long)xr.queue_completion_waits, (unsigned long long)xr.queue_completion_zero_layers,
             (unsigned long long)xr.queue_completion_wait_ns,

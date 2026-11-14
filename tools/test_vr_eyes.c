@@ -26,6 +26,7 @@ static void fixture_clear_busy(atomic_bool *busy, bool value, memory_order order
 #undef atomic_store_explicit
 #define atomic_store_explicit(object, desired, order) fixture_clear_busy(object, desired, order)
 #include "../runtime/nvn/vulkan/vr_eyes.c"
+#include "../runtime/pc_vr_guards.c"  // (the refusal counts the producer keeps)
 #undef atomic_store_explicit
 
 #include <stdio.h>

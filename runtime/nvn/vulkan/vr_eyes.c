@@ -11,6 +11,7 @@
 #include "vr_eyes.h"
 #include "../renderer.h"
 #include "../../pc_vr.h"
+#include "../../pc_vr_guards.h"
 #include "../../pc_vr_hud.h"
 #include "../../xr/xr_vulkan.h"
 
@@ -298,6 +299,18 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
         if (!vr_panel(&offer.render_pose, menu_distance, menu_distance, PC_VR_PANEL_MENU, &offer.panel))
             outcome = vr_frame_without_panel(outcome);
     }
+    // Why a frame is not offered, counted (pc_vr_guards.h); a frame with nothing captured, or a UI re-presentation,
+    // is not a refusal.
+    switch (outcome.rejection) {
+    case VR_FRAME_REJECTED_UNCERTIFIED:
+        pc_vr_guard_count(frame->certified == 3 ? PC_VR_GUARD_FRAME_UNCERTIFIED_DISAGREE
+                                                : PC_VR_GUARD_FRAME_UNCERTIFIED_MISSING);
+        break;
+    case VR_FRAME_REJECTED_MISPLACED: pc_vr_guard_count(PC_VR_GUARD_FRAME_MISPLACED); break;
+    case VR_FRAME_REJECTED_MENU_WITHOUT_POSE: pc_vr_guard_count(PC_VR_GUARD_FRAME_MENU_WITHOUT_POSE); break;
+    case VR_FRAME_REJECTED_MENU_WITHOUT_PANEL: pc_vr_guard_count(PC_VR_GUARD_FRAME_MENU_WITHOUT_PANEL); break;
+    default: break;
+    }
     if (outcome.kind == VR_FRAME_HUD_OVER_HELD_SCENE || outcome.kind == VR_FRAME_MENU_PANEL) ++vr_eyes.menu_pairs;
     else if (outcome.rejection == VR_FRAME_REJECTED_MISPLACED) ++vr_eyes.misplaced_frames;
     else if (outcome.rejection == VR_FRAME_REJECTED_UNCERTIFIED) ++vr_eyes.uncertified;
@@ -332,6 +345,7 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
             (unsigned long long)vr_eyes.menu_pairs, (unsigned long long)vr_eyes.uncertified,
             (unsigned long long)vr_eyes.misplaced_frames, (unsigned long long)vr_eyes.busy_skips,
             (unsigned long long)vr_eyes.resized, vr_eyes.width, vr_eyes.height);
+    if (!(vr_eyes.offered % 1200)) pc_vr_guards_log("present");
 }
 
 bool vr_eyes_present(uint64_t game_present_id, uint64_t submitted_seq) {

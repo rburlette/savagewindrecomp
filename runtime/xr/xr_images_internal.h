@@ -155,11 +155,14 @@ typedef enum {
     OFFER_STOPPED, OFFER_RESET, OFFER_GENERATION, OFFER_MAILBOX, OFFER_DEVICE, OFFER_IMAGE_GENERATION,
     OFFER_REASON_COUNT
 } EyeOfferReject;
+_Static_assert(PC_VR_GUARD_OFFER_CONTRACT + OFFER_REASON_COUNT == PC_VR_GUARD_OFFER_IMAGE_GENERATION + 1,
+               "pc_vr_guards.h lists the offer reasons in EyeOfferReject's order");
 static atomic_bool eye_offer_trace;
 static atomic_uint_fast64_t eye_offer_rejects[OFFER_REASON_COUNT], eye_offer_log_count;
 #define EYE_OFFER_LOG_CAP 128
 
 static bool eye_offer_reject(const XrOwnedEyePair *pair, EyeOfferReject reason, uint64_t now) {
+    pc_vr_guard_count(PC_VR_GUARD_OFFER_CONTRACT + reason);  // (always: the reasons in EyeOfferReject's order)
     if (!atomic_load_explicit(&eye_offer_trace, memory_order_relaxed)) return false;
     const uint64_t count = atomic_fetch_add(&eye_offer_rejects[reason], 1) + 1;
     if (count > 4 && count % 120) return false;
