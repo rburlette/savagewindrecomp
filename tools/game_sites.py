@@ -399,6 +399,10 @@ SITES = [
     # that choice and the load of its index count
     Site('pcvr_lens_draw', 'code', '38696909 9121610a 9111e108 7100013f 9a8a0100 b9400c02 94000000/fc000000 6d5223e9',
          6),
+    # ... and Labo's depth mask, drawn in each eye before its scene while the flag is set: the area outside the lens
+    # (the object + 0x8b8, its index count at + 0x8c4) at the nearest depth, so the scene's geometry skips it
+    Site('pcvr_lens_depth_draw', 'code', 'f94002a8 aa1303e1 52800023 b948c502 9122e100 94000000/fc000000 17ffffca '
+         'a9be7bfd', 5),
     # PC VR's HUD by screen (tools/patches.py _screen_draw; runtime/pc_vr_hud.c): the UI screen manager's draw loop calls
     # each screen of a draw unit through its vtable (+0x58): the blr, with x0 the screen and w22 its id
     Site('pcvr_screen_draw', 'code', 'd63f0100 910006e8 110006d6 92407d17 6b0802bf 54000001/ff00001f a9444ff4 f9400bf9', 0),
@@ -543,7 +547,7 @@ OPTIONAL_GROUPS = [
     ('pcvr_matrix_builder', 'pcvr_base_caller', 'pcvr_layer_base_caller', 'pcvr_eye_caller', 'pcvr_proj_builder', 'pcvr_proj_device', 'pcvr_proj_build_caller', 'pcvr_proj_device_caller', 'pcvr_proj_root_return', 'pcvr_proj_sibling_return', 'pcvr_render_begin', 'pcvr_render_begin_caller', 'labo_set_vr', 'labo_end_vr_call', 'labo_enable_rec_call', 'labo_vr_notify_1', 'labo_vr_notify_2', 'labo_sensor_ret', 'labo_track_start_ret', 'pcvr_cam_update_0', 'pcvr_cam_update_1', 'pcvr_cam_update_2', 'pcvr_cam_update_3', 'pcvr_cam_update_4', 'pcvr_cam_update_5', 'pcvr_cam_update_6', 'pcvr_cam_update_7', 'pcvr_actor_vtable', 'pcvr_eye_vtable', 'pcvr_proj_vtable', 'pcvr_base_vtable', 'labo_manager_slot', 'automation_screen_root',),
     ('gyro_scene_actor',),
     ('pcvr_hud_point',),
-    ('pcvr_lens_draw',),
+    ('pcvr_lens_draw', 'pcvr_lens_depth_draw'),
     ('pcvr_screen_draw', 'pcvr_pane_draw', 'pcvr_pane_child_draw'),
     ('pcvr_balloon_point',),
     ('pcvr_marker_store_1', 'pcvr_marker_store_2', 'pcvr_marker_store_3', 'pcvr_marker_store_4', 'pcvr_marker_store_5',
@@ -790,6 +794,7 @@ KNOWN = {
         'automation_screen_root': 0x7001d66d58,
         'pcvr_hud_point': 0x7000e1dec0,
         'pcvr_lens_draw': 0x700125a8d0,
+        'pcvr_lens_depth_draw': 0x7001261298,
         'pcvr_screen_draw': 0x7000f714c0,
         'pcvr_pane_draw': 0x7000027d80,
         'pcvr_pane_child_draw': 0x7000027dc8,

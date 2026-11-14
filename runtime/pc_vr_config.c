@@ -116,6 +116,7 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
     out->diagnostics.shot_count = present_list(lookup(context, "SAVAGEWIND_PC_VR_SHOT"),
         out->diagnostics.shot_presents, PC_VR_SHOT_PRESENTS);
     out->diagnostics.quick_menu_shots = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS"));
+    out->diagnostics.no_headset_mask = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_NO_HEADSET_MASK"));
     value = lookup(context, "SAVAGEWIND_PC_VR_BENCH_HEAD");
     out->diagnostics.bench_head_requested = value != NULL;
     const long long bench_start = value ? atoll(value) : 0;
@@ -187,6 +188,7 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
     if (config->diagnostics.shot_count)
         describe_presents(&line, "SHOT", config->diagnostics.shot_presents, config->diagnostics.shot_count);
     if (config->diagnostics.quick_menu_shots) describe_append(&line, " QUICK_MENU_SHOTS");
+    if (config->diagnostics.no_headset_mask) describe_append(&line, " NO_HEADSET_MASK");
     if (config->diagnostics.bench_head_start)
         describe_append(&line, " BENCH_HEAD=%llu", (unsigned long long)config->diagnostics.bench_head_start);
     else if (config->diagnostics.bench_head_requested) describe_append(&line, " BENCH_HEAD=invalid");

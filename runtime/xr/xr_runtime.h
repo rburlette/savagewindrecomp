@@ -99,16 +99,16 @@ void xr_runtime_notify_game_present(uint64_t game_present_id);
 // The runtime's recommended size of one eye's image (the smaller of the two views on each axis), known from discovery
 // on (before the Vulkan device); false before it or in an OpenXR-disabled build.
 bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height);
-// XR_KHR_visibility_mask: one eye's visible area as the runtime gives it, a triangle list (x, y pairs: tangents of the
-// view's angles, y up; indices into them). Published whole by the XR owner and never changed or freed afterwards (a
-// change publishes a new one), so a reader may keep the pointer. NULL while there is none (no session yet, a runtime
-// without the extension, an OpenXR-disabled build).
+// XR_KHR_visibility_mask: one eye's visible area, or its hidden area (what the lenses do not show), as the runtime
+// gives it, a triangle list (x, y pairs: tangents of the view's angles, y up; indices into them). Published whole by
+// the XR owner and never changed or freed afterwards (a change publishes a new one), so a reader may keep the pointer.
+// NULL while there is none (no session yet, a runtime without the extension, an OpenXR-disabled build).
 typedef struct {
     uint32_t vertex_count, index_count;
     const float *tangents_xy;
     const uint32_t *indices;
-} XrVisibleArea;
-const XrVisibleArea *xr_runtime_visible_area(unsigned eye);
+} XrMaskArea;
+const XrMaskArea *xr_runtime_mask_area(unsigned eye, bool hidden);
 // No XR calls and no blocking lock; BUSY must not reset consumer calibration.
 // VALID requires visible, tracked orientation and a publication age <=250ms.
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out);

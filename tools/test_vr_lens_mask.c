@@ -1,10 +1,12 @@
 // Asset-free check of the eye masks from the headset (runtime/nvn/vulkan/vr_lens_mask.c, compiled here as it is): a
 // tangent becomes the game's lens-polygon vertex through the eye's FOV (edges to the square's edges, y up to v down,
-// texture = position + 0.5 with v flipped); only the lens draw is replaced; a certified eye with a visible area gets
-// that area's indices and vertices for its own eye and FOV, and a new FOV builds a new mesh while the old one stays;
-// without a certificate or a visible area the draw covers the whole image.
+// texture = position + 0.5 with v flipped); only the two lens geometries are replaced (named by the tagged draws,
+// then recognised by their index buffer and count whatever the call), and only at the layout's vertex stride; a
+// certified eye with a mask gets its visible area for the screen quad (each triangle counter-clockwise) and its hidden
+// area for the depth mask, at its own FOV, and a new FOV builds a new mesh while the old one stays; without a certificate or a mask
+// the screen quad covers the whole image and the depth mask nothing.
 //
-// The stubs below stand for what the module calls (the render trace's certificates, the XR owner's visible areas). No
+// The stubs below stand for what the module calls (the render trace's certificates, the XR owner's mask areas). No
 // GPU, OpenXR runtime or game is involved.
 #include "../runtime/nvn/vulkan/vr_lens_mask.c"
 
@@ -17,16 +19,20 @@ static unsigned checks, failures;
 // ------------------------------------------------------------------------------------------------- what the module calls
 static PcVrRenderCertificate certificate;  // (resolved for its id when certificate_known)
 static bool certificate_known;
-static const XrVisibleArea *areas[2];
+static const XrMaskArea *areas[2][2];  // [hidden][eye]
 
 bool pc_vr_render_trace_resolve(uint64_t id, PcVrRenderCertificate *out) {
     if (!certificate_known || id != certificate.id) return false;
     *out = certificate;
     return true;
 }
-const XrVisibleArea *xr_runtime_visible_area(unsigned eye) { return eye < 2 ? areas[eye] : NULL; }
+const XrMaskArea *xr_runtime_mask_area(unsigned eye, bool hidden) { return eye < 2 ? areas[hidden][eye] : NULL; }
+static PcVrConfig configuration;  // (the diagnostics' no_headset_mask, set by a check)
+const PcVrConfig *pc_vr_config(void) { return &configuration; }
 
 static bool near(float value, float expected) { return fabsf(value - expected) < 1e-5f; }
+static const uint32_t stride = sizeof(VrLensVertex);
+static const uint64_t LENS = 0x72d3abdb88, DEPTH = 0x72d3abdc48;  // (the game's two index buffers)
 
 // ------------------------------------------------------------------------------------------------------------- checks
 static void test_vertex(void) {
@@ -48,39 +54,76 @@ static void test_vertex(void) {
 
 static void test_draw(void) {
     VrLensDraw draw;
-    // Not the lens draw: left alone.
-    CHECK(!vr_lens_draw(PC_VR_LAYER_DRAW_FINAL | PC_VR_LAYER_DRAW_EYE, 7, &draw));
-    // The lens draw without a certificate: the whole image.
-    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS | PC_VR_LAYER_DRAW_EYE, 7, &draw));
-    CHECK(draw.index_count == 6 && draw.vertex_address == (uint64_t)(uintptr_t)lens_rectangle_vertices);
-    // A certified eye 1 with a visible area (a fan of two triangles): that area, at that eye's FOV.
-    static const float tangents[] = {0, 0, -1, 1, 1, 1, 1, -1};
-    static const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
-    static const XrVisibleArea area = {4, 6, tangents, indices};
-    areas[1] = &area;
+    const uint64_t rectangle = (uint64_t)(uintptr_t)lens_rectangle_vertices;
+    // Not a lens draw, or another vertex stride: left alone.
+    CHECK(!vr_lens_draw(PC_VR_LAYER_DRAW_FINAL | PC_VR_LAYER_DRAW_EYE, 0x5000, 3, 7, stride, &draw));
+    CHECK(!vr_lens_draw(PC_VR_LAYER_DRAW_LENS | PC_VR_LAYER_DRAW_EYE, LENS, 48, 7, 16, &draw));
+    // Without a certificate: the whole image for the screen quad, nothing for the depth mask.
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS | PC_VR_LAYER_DRAW_EYE, LENS, 48, 7, stride, &draw));
+    CHECK(draw.index_count == 6 && draw.vertex_address == rectangle);
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS_HIDDEN | PC_VR_LAYER_DRAW_EYE, DEPTH, 48, 7, stride, &draw));
+    CHECK(draw.index_count == 3 && draw.indices[0] == 0 && draw.indices[1] == 0 && draw.indices[2] == 0);
+    // A certified eye 1 with both areas: the visible one for the screen quad, the hidden one for the depth mask.
+    static const float visible_tangents[] = {0, 0, -1, 1, 1, 1, 1, -1};
+    static const uint32_t visible_indices[] = {0, 1, 2, 0, 2, 3};
+    static const XrMaskArea visible = {4, 6, visible_tangents, visible_indices};
+    static const float hidden_tangents[] = {-2, 2, -1, 2, -2, 1};
+    static const uint32_t hidden_indices[] = {0, 1, 2};
+    static const XrMaskArea hidden = {3, 3, hidden_tangents, hidden_indices};
+    areas[0][1] = &visible;
+    areas[1][1] = &hidden;
     certificate = (PcVrRenderCertificate){.id = 7, .native_index = 1};
     const float angles[4] = {-0.9f, 0.7f, 0.8f, -0.95f};
     memcpy(certificate.native_snapshot.eyes[1].fov_left_right_up_down, angles, sizeof angles);
     certificate_known = true;
-    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS | PC_VR_LAYER_DRAW_EYE, 7, &draw));
-    CHECK(draw.index_count == 6 && draw.indices[1] == 1 && draw.indices[5] == 3);
-    CHECK(draw.vertex_size == 4 * sizeof(VrLensVertex) &&
-          draw.vertex_address != (uint64_t)(uintptr_t)lens_rectangle_vertices);
-    const VrLensVertex *vertices = (const VrLensVertex *)(uintptr_t)draw.vertex_address;
     const float fov[4] = {tanf(angles[0]), tanf(angles[1]), tanf(angles[2]), tanf(angles[3])};
-    const VrLensVertex expected = vr_lens_vertex(-1, 1, fov);
-    CHECK(near(vertices[1].position[0], expected.position[0]) && near(vertices[1].texture[1], expected.texture[1]));
-    // The same eye and FOV again: the same mesh.
+    // The screen quad: the eye's visible area at its FOV, each triangle turned counter-clockwise (y up) as Labo's
+    // polygon is (the fixture's two are clockwise).
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS | PC_VR_LAYER_DRAW_EYE, LENS, 48, 7, stride, &draw));
+    CHECK(draw.index_count == 6 && draw.vertex_address != rectangle && draw.vertex_size == 4 * sizeof(VrLensVertex));
+    CHECK(draw.indices[0] == 0 && draw.indices[1] == 2 && draw.indices[2] == 1);
+    CHECK(draw.indices[3] == 0 && draw.indices[4] == 3 && draw.indices[5] == 2);
+    const VrLensVertex visible_expected = vr_lens_vertex(-1, 1, fov);
+    const VrLensVertex *visible_vertices = (const VrLensVertex *)(uintptr_t)draw.vertex_address;
+    CHECK(near(visible_vertices[1].position[0], visible_expected.position[0]) &&
+          near(visible_vertices[1].texture[1], visible_expected.texture[1]));
+    // The depth mask: the eye's hidden area at its FOV.
+    VrLensDraw depth;
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS_HIDDEN | PC_VR_LAYER_DRAW_EYE, DEPTH, 48, 7, stride, &depth));
+    CHECK(depth.index_count == 3 && depth.vertex_size == 3 * sizeof(VrLensVertex) && depth.vertex_address != rectangle);
+    const VrLensVertex hidden_expected = vr_lens_vertex(-2, 2, fov);
+    const VrLensVertex *hidden_vertices = (const VrLensVertex *)(uintptr_t)depth.vertex_address;
+    CHECK(near(hidden_vertices[0].position[0], hidden_expected.position[0]));
+    CHECK(near(hidden_vertices[0].position[1], hidden_expected.position[1]));
+    // SAVAGEWIND_PC_VR_NO_HEADSET_MASK=1: the screen quad covers the whole image, the depth mask nothing.
+    configuration.diagnostics.no_headset_mask = true;
+    VrLensDraw off;
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS | PC_VR_LAYER_DRAW_EYE, LENS, 48, 7, stride, &off) &&
+          off.vertex_address == rectangle);
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS_HIDDEN | PC_VR_LAYER_DRAW_EYE, DEPTH, 48, 7, stride, &off) &&
+          off.index_count == 3 && off.indices[0] == 0 && off.indices[2] == 0);
+    configuration.diagnostics.no_headset_mask = false;
+    // Untagged draws of the same geometries (another call drawing the lens polygon or the depth mask): treated the
+    // same; another buffer, or the same buffer with another count, is not one of them.
+    VrLensDraw untagged;
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_EYE, LENS, 48, 7, stride, &untagged) &&
+          untagged.vertex_address == draw.vertex_address);
+    CHECK(vr_lens_draw(0, DEPTH, 48, 7, stride, &untagged) && untagged.vertex_address == depth.vertex_address);
+    CHECK(!vr_lens_draw(0, LENS + 0x100, 48, 7, stride, &untagged));
+    CHECK(!vr_lens_draw(0, LENS, 3, 7, stride, &untagged));
+    // The same eye and FOV again: the same mesh. Another FOV: a new mesh, the old one kept.
     VrLensDraw again;
-    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS, 7, &again) && again.vertex_address == draw.vertex_address);
-    // Another FOV: a new mesh, the old one kept.
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS_HIDDEN, DEPTH, 48, 7, stride, &again) &&
+          again.vertex_address == depth.vertex_address);
     certificate.native_snapshot.eyes[1].fov_left_right_up_down[0] = -1.0f;
-    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS, 7, &again) && again.vertex_address != draw.vertex_address);
-    CHECK(near(vertices[1].position[0], expected.position[0]));
-    // Eye 0 has no visible area: the whole image.
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS_HIDDEN, DEPTH, 48, 7, stride, &again) &&
+          again.vertex_address != depth.vertex_address);
+    CHECK(near(hidden_vertices[0].position[0], hidden_expected.position[0]));
+    // Eye 0 has no mask: the fallbacks.
     certificate.native_index = 0;
-    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS, 7, &draw) &&
-          draw.vertex_address == (uint64_t)(uintptr_t)lens_rectangle_vertices);
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS, LENS, 48, 7, stride, &draw) && draw.vertex_address == rectangle);
+    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS_HIDDEN, DEPTH, 48, 7, stride, &draw) && draw.index_count == 3 &&
+          draw.indices[2] == 0);
 }
 
 int main(void) {

@@ -248,6 +248,8 @@ static void test_diagnostics(void) {
     CHECK(config.diagnostics.shot_count == 1 && config.diagnostics.shot_presents[0] == 7);
     CHECK(with_setting("SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "1").diagnostics.quick_menu_shots);
     CHECK(!with_setting("SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "yes").diagnostics.quick_menu_shots);
+    CHECK(with_setting("SAVAGEWIND_PC_VR_NO_HEADSET_MASK", "1").diagnostics.no_headset_mask);
+    CHECK(!with_setting("SAVAGEWIND_PC_VR_NO_HEADSET_MASK", "yes").diagnostics.no_headset_mask);
     config = with_setting("SAVAGEWIND_PC_VR_BENCH_HEAD", "3000");
     CHECK(config.diagnostics.bench_head_requested && config.diagnostics.bench_head_start == 3000);
     const char *bad_bench[] = {"0", "100001", "-5", "abc", ""};

@@ -76,6 +76,8 @@ typedef struct {
         uint64_t bench_head_start;  // its game present, 1..100000; 0: off, or not a present in that range
         bool log_panes;           // SAVAGEWIND_LOG_PANES: a number above 0
         bool log_screens;         // SAVAGEWIND_LOG_SCREENS: a number above 0
+        bool no_headset_mask;     // SAVAGEWIND_PC_VR_NO_HEADSET_MASK=1: Labo's mask draws cover the whole image, the
+                                  // depth mask nothing (D114 A/B runs)
     } diagnostics;
     unsigned aliases_seen, aliases_ignored;  // a bit per alias given, and per alias given another value than 1
     unsigned settings_ignored;               // a bit per play setting whose value was not taken

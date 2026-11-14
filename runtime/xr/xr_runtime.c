@@ -988,12 +988,12 @@ static bool visibility_mesh_fetch(uint32_t eye, unsigned kind, XrVisibilityMesh 
     return true;
 }
 
-// The visible areas the renderer reads (xr_runtime_visible_area): published copies, never freed (a change of mask is
-// rare: one copy per eye per change).
-static _Atomic(const XrVisibleArea *) visible_areas[2];
+// The areas the renderer reads (xr_runtime_mask_area), by eye and kind: published copies, never freed (a change of
+// mask is rare: one copy per eye and kind per change).
+static _Atomic(const XrMaskArea *) mask_areas[2][XR_MASK_KINDS];
 
-static void visible_area_publish(uint32_t eye, const XrVisibilityMesh *mesh) {
-    XrVisibleArea *area = calloc(1, sizeof *area);
+static void mask_area_publish(uint32_t eye, unsigned kind, const XrVisibilityMesh *mesh) {
+    XrMaskArea *area = calloc(1, sizeof *area);
     float *tangents = calloc(mesh->vertex_count ? 2 * mesh->vertex_count : 1, sizeof *tangents);
     uint32_t *indices = calloc(mesh->index_count ? mesh->index_count : 1, sizeof *indices);
     if (!area || !tangents || !indices) { free(area); free(tangents); free(indices); return; }
@@ -1002,12 +1002,12 @@ static void visible_area_publish(uint32_t eye, const XrVisibilityMesh *mesh) {
         tangents[2 * i + 1] = mesh->vertices[i].y;
     }
     memcpy(indices, mesh->indices, mesh->index_count * sizeof *indices);
-    *area = (XrVisibleArea){mesh->vertex_count, mesh->index_count, tangents, indices};
-    atomic_store(&visible_areas[eye], area);
+    *area = (XrMaskArea){mesh->vertex_count, mesh->index_count, tangents, indices};
+    atomic_store(&mask_areas[eye][kind], area);
 }
 
-const XrVisibleArea *xr_runtime_visible_area(unsigned eye) {
-    return eye < 2 ? atomic_load(&visible_areas[eye]) : NULL;
+const XrMaskArea *xr_runtime_mask_area(unsigned eye, bool hidden) {
+    return eye < 2 ? atomic_load(&mask_areas[eye][hidden ? XR_MASK_HIDDEN : XR_MASK_VISIBLE]) : NULL;
 }
 
 // Fetches both eyes' meshes, publishes the visible areas, and logs their sizes and the share of each eye's FOV
@@ -1018,8 +1018,9 @@ static void visibility_masks_fetch(void) {
         bool fetched = true;
         for (unsigned kind = 0; kind < XR_MASK_KINDS; ++kind)
             fetched = visibility_mesh_fetch(eye, kind, &visibility_meshes[eye][kind]) && fetched;
-        if (fetched && visibility_meshes[eye][XR_MASK_VISIBLE].index_count >= 3)
-            visible_area_publish(eye, &visibility_meshes[eye][XR_MASK_VISIBLE]);
+        for (unsigned kind = 0; fetched && kind < XR_MASK_KINDS; ++kind)
+            if (visibility_meshes[eye][kind].index_count >= 3)
+                mask_area_publish(eye, kind, &visibility_meshes[eye][kind]);
         const XrVisibilityMesh *visible = &visibility_meshes[eye][XR_MASK_VISIBLE];
         const XrVisibilityMesh *hidden = &visibility_meshes[eye][XR_MASK_HIDDEN];
         float bounds[4] = {INFINITY, -INFINITY, INFINITY, -INFINITY};  // left, right, down, up (tangents)
@@ -1227,7 +1228,7 @@ bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) {
     *width = *height = 0;
     return false;
 }
-const XrVisibleArea *xr_runtime_visible_area(unsigned eye) { (void)eye; return NULL; }
+const XrMaskArea *xr_runtime_mask_area(unsigned eye, bool hidden) { (void)eye; (void)hidden; return NULL; }
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
     if (out) memset(out, 0, sizeof *out);
     return XR_POSE_UNAVAILABLE;

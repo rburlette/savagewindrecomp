@@ -542,10 +542,10 @@ uint32_t rt_layer_draw_begin(uint32_t kind) {
     return previous;
 }
 
-uint32_t rt_lens_draw_begin(void) {
+uint32_t rt_lens_draw_begin(uint32_t hidden) {
     const uint32_t previous = render_layer_draw;
     if (pc_vr_enabled())
-        render_layer_draw = previous | PC_VR_LAYER_DRAW_LENS |
+        render_layer_draw = previous | (hidden ? PC_VR_LAYER_DRAW_LENS_HIDDEN : PC_VR_LAYER_DRAW_LENS) |
             (atomic_load_explicit(&render_collecting, memory_order_relaxed) ? render_scope_eye_layer()
                                                                              : PC_VR_LAYER_DRAW_MAYBE_EYE);
     return previous;

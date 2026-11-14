@@ -58,13 +58,15 @@ typedef enum {
 // if the layer were an eye's, so it is never shown as a flat menu panel.
 #define PC_VR_LAYER_DRAW_MAYBE_EYE 8u
 // Alongside whatever kind is set: the draw is the eye scenes' screen-quad draw while Labo's mask flag is set, which
-// covers only Labo's lens polygon (tools/game_sites.py pcvr_lens_draw); the renderer draws the headset's visible area
-// in its place (runtime/nvn/vulkan/vr_lens_mask.h, D114). Its layer's flag (EYE or MAYBE_EYE) as for the kinds.
+// covers only Labo's lens polygon (tools/game_sites.py pcvr_lens_draw), or Labo's depth mask, which covers the area
+// outside it (pcvr_lens_depth_draw); the renderer draws the headset's visible or hidden area in their place
+// (runtime/nvn/vulkan/vr_lens_mask.h, D114). Their layer's flag (EYE or MAYBE_EYE) as for the kinds.
 #define PC_VR_LAYER_DRAW_LENS 16u
+#define PC_VR_LAYER_DRAW_LENS_HIDDEN 32u
 // Called by patched game code around the call that issues the draw, on the thread recording it. begin returns what
-// was set before, which end restores; rt_lens_draw_begin adds the lens flag to what is set.
+// was set before, which end restores; rt_lens_draw_begin adds a lens flag to what is set (hidden: the depth mask's).
 uint32_t rt_layer_draw_begin(uint32_t kind);
-uint32_t rt_lens_draw_begin(void);
+uint32_t rt_lens_draw_begin(uint32_t hidden);
 void rt_layer_draw_end(uint32_t previous);
 // What a draw recorded on this thread now is: a PcVrLayerDraw, with its layer's flag. 0 outside those calls.
 uint32_t pc_vr_layer_draw_recording(void);

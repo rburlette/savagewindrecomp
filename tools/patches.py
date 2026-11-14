@@ -1109,17 +1109,20 @@ def _marker_wheel_flag(site_number, follows):
 
 
 # PC VR's eye masks from the headset (D114): while the Labo display's mask flag is set, the eye scenes' screen-quad
-# draw covers only Labo's lens-shaped polygon. The runtime notes the call while it runs, so the draw recorded meanwhile
-# carries the lens flag (runtime/hle/pc_vr_render_trace.h PC_VR_LAYER_DRAW_LENS), and the renderer draws the
-# headset's visible area there instead (runtime/nvn/vulkan/vr_lens_mask.h).
-def _lens_draw(gen, address):
-    word = _word(gen, address)
-    assert word >> 26 == 0x25, hex(word)  # bl
-    target = address + sext(word & 0x3ffffff, 26) * 4
-    return (f'{{ extern void f_{target:x}(Cpu *); extern uint32_t rt_lens_draw_begin(void); '
-            'extern void rt_layer_draw_end(uint32_t); uint32_t prev = rt_lens_draw_begin(); '
-            f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); rt_layer_draw_end(prev); }}'
-            f'  /* {address:#x}: bl (the eye scenes\' screen-quad draw: Labo\'s lens polygon) */')
+# draw covers only Labo's lens-shaped polygon, and Labo's depth mask covers the area outside it. The runtime notes the
+# call while it runs, so the draw recorded meanwhile carries the lens flag (runtime/hle/pc_vr_render_trace.h
+# PC_VR_LAYER_DRAW_LENS, or PC_VR_LAYER_DRAW_LENS_HIDDEN for the depth mask), and the renderer draws the headset's
+# visible or hidden area there instead (runtime/nvn/vulkan/vr_lens_mask.h).
+def _lens_draw(hidden, what):
+    def patch(gen, address):
+        word = _word(gen, address)
+        assert word >> 26 == 0x25, hex(word)  # bl
+        target = address + sext(word & 0x3ffffff, 26) * 4
+        return (f'{{ extern void f_{target:x}(Cpu *); extern uint32_t rt_lens_draw_begin(uint32_t); '
+                f'extern void rt_layer_draw_end(uint32_t); uint32_t prev = rt_lens_draw_begin({hidden}); '
+                f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); rt_layer_draw_end(prev); }}'
+                f'  /* {address:#x}: bl ({what}) */')
+    return patch
 
 
 # PC VR's UI without Labo's screen parallax (runtime/pc_vr_hud.c rt_ui_parallax). In its VR mode the game shifts its
@@ -1211,7 +1214,8 @@ PATCHES = {
     'pcvr_marker_wheel_flat': _marker_wheel_flag(11, False),
     'pcvr_rune_test': _rune_test,
     'pcvr_ui_parallax': _ui_parallax,
-    'pcvr_lens_draw': _lens_draw,
+    'pcvr_lens_draw': _lens_draw(0, "the eye scenes' screen-quad draw: Labo's lens polygon"),
+    'pcvr_lens_depth_draw': _lens_draw(1, "Labo's depth mask: the area outside its lens"),
     'pcvr_layer_final_draw': _layer_draw(1, "a render layer's finished image"),
     'pcvr_layer_placement_draw': _layer_draw(2, "a render layer's image placed in the final image"),
     'pcvr_display_lens_draw': _layer_draw(3, "the final image to the display: Labo's lens pass"),

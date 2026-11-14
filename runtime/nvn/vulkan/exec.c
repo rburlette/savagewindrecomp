@@ -10178,10 +10178,11 @@ have_pipe:
     uint64_t prof_t2_ = profd ? SDL_GetTicksNS() : 0;
     ProfZone pz7 = PZ_NOW();
     uint64_t prof_index_start = prof_t2_;
-    // PC VR (D114): the eye scenes' lens polygon is drawn as the headset's visible area (vr_lens_mask.h): its indices
-    // and its stream 0 vertices in place of the game's
+    // PC VR (D114): Labo's lens polygon and depth mask are drawn as the headset's visible and hidden areas
+    // (vr_lens_mask.h): their indices and stream 0 vertices in place of the game's
     VrLensDraw lens;
-    const bool lens_draw = indexed && native && vr_lens_draw(nvn_layer_draw(r), vr_draw_certificate, &lens);
+    const bool lens_draw = indexed && native &&
+        vr_lens_draw(nvn_layer_draw(r), r->x[3], r->x[2], vr_draw_certificate, (uint32_t)pipe_memo.k.s.stride[0], &lens);
     // ---- indices (copied; the largest index bounds the vertex data copied below)
     uint32_t first = 0, count = lens_draw ? lens.index_count : (uint32_t)r->x[2], inst, base_inst, max_index = 0;
     int32_t base_vertex = 0;
