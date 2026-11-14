@@ -4,27 +4,16 @@
 #include <vulkan/vulkan.h>
 #include "xr_runtime.h"
 
-typedef enum {
-    XR_EYE_PROJECTION_UNPROVEN = 0,
-    XR_EYE_PROJECTION_NATIVE_RENDERED = 1,
-    // D048, the PC VR eye images only: native view/FOV certificates reached both
-    // scene-final draws, but shader consumption and full coverage remain
-    // unproven. Admitted only in the PC VR play configuration (pc_vr_config.h).
-    XR_EYE_PROJECTION_DEV_UNPROVEN = 2
-} XrEyeProjectionProvenance;
-
 // One immutable, owned GPU pair, not borrowed guest textures. Both images must
-// be single-sample 2D color images, mip/layer zero, TRANSFER_SRC usage, GENERAL
-// layout, on this exact device and queue family. Producer submission MUST
-// already exist and signal ready_value on ready_timeline. Neither images nor
-// semaphore may be destroyed/reused until release. The producer establishes
-// both eyes belong to one game state; present identity alone cannot prove it.
-//
-// NATIVE_RENDERED is a renderer assertion: native runtime eye transforms/FOV
-// were actually used for all corresponding image/culling consumers. Original
-// Labo views and a copied tracking snapshot MUST remain UNPROVEN. rendered_eyes
-// are the exact runtime-space poses/FOV used to render, before the game's
-// third-person world-anchor conversion; they must match render_pose.eyes.
+// be single-sample 2D R8G8B8A8_SRGB color images, mip/layer zero, TRANSFER_SRC
+// usage, GENERAL layout, on the device and queue family bound to XR
+// (xr_runtime_bind_vulkan). Producer submission MUST already exist and signal
+// ready_value on ready_timeline. Neither images nor semaphore may be
+// destroyed/reused until release. The producer establishes both eyes belong to
+// one game state; present identity alone cannot prove it. render_pose.eyes are
+// the exact runtime-space poses/FOV the eyes were rendered with, before the
+// game's third-person world-anchor conversion; the projection layer shows them.
+// Offered only in the PC VR play configuration (pc_vr_config.h).
 //
 // true transfers ownership; false retains ownership with the caller. The
 // mailbox queues up to two pairs (EYE_QUEUE, D081) and refuses an offer while
@@ -40,12 +29,8 @@ typedef enum {
 // render_pose must be in the current reference generation and fresh; it need
 // not be the latest publication.
 //
-// display_encoded: pixels already hold display (sRGB) code values in a UNORM
-// format. They reach an _SRGB swapchain by a raw size-compatible copy.
-//
 // anchored: 2D content (menus) with no render pose. render_pose is a tracking
 // sample latched to place it; freshness counts from the offer, not the sample.
-// Only DEV_UNPROVEN pairs may be anchored.
 //
 // panel (anchored only, D056): instead of the projection layer, show `rect`
 // (x, y, width, height in pixels) of image `eye` to both eyes on one world-
@@ -60,18 +45,14 @@ typedef struct {
 } XrEyePanel;
 
 typedef struct {
-    VkDevice device;
-    uint32_t queue_family;
     VkImage images[2];
     VkFormat format;
     uint32_t width, height;
     VkSemaphore ready_timeline;
     uint64_t ready_value;
-    uint64_t game_present_id, image_generation;
+    uint64_t game_present_id;
     XrPoseSnapshot render_pose;
-    XrEyeSnapshot rendered_eyes[2];
-    XrEyeProjectionProvenance projection;
-    bool display_encoded, anchored;
+    bool anchored;
     XrEyePanel panel;
     // hud (scene pairs only, D057): hud_image, owned like images[], holds the
     // 2D overlay with premultiplied alpha; it is shown on one world-locked quad

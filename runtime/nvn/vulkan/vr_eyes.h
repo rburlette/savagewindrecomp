@@ -91,8 +91,7 @@ typedef struct {
     int state;  // 0 not configured yet, 1 armed, -1 off (read by exec.c's draw hooks)
     bool flip;  // flip rows when copying (the window present's row order)
     // Written by this module at a capture that follows a resize. Survive the game reset with the images they describe.
-    uint32_t width, height;     // one half of the final image, in allocated pixels: the size of each owned image
-    uint64_t image_generation;  // counts reallocations (a window resize rescales the final image)
+    uint32_t width, height;  // one half of the final image, in allocated pixels: the size of each owned image
     // Written by this module (busy also by the XR owner thread). Survive the game reset: the device and the images live
     // on, and the XR owner may still hold a slot it will release.
     VrEyeSlot slots[VR_EYE_SLOTS];

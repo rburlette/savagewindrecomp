@@ -250,7 +250,7 @@ static uint32_t requested_vulkan_api;
 static unsigned successful_instance_creates;
 static unsigned create_attempts, create_rejections, driver_creates;
 static bool exit_cleanup_registered;
-// D048 development admission of DEV_UNPROVEN eye pairs; never a default.
+// The PC VR play configuration offers eye images (pc_vr_config.h); without it every offer is refused.
 static bool eye_images_enabled;
 static _Thread_local const char *current_xr_call;
 
@@ -793,9 +793,9 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
         }
     }
     if (xr_perf.frames >= 120) xr_perf_report();
-    const char *provenance = !image_submitted ? "none" : eye_gpu.layer_panel ? "dev-unproven-panel" :
-        eye_gpu.layer_over ? "dev-unproven-over-scene" : eye_gpu.layer_hud ? "dev-unproven-hud" :
-        eye_gpu.layer_projection == XR_EYE_PROJECTION_DEV_UNPROVEN ? "dev-unproven" : "native-rendered";
+    // What the submitted layers show (scripts/start-pc-vr.ps1 counts the frame lines by it).
+    const char *content = !image_submitted ? "none" : eye_gpu.layer_panel ? "panel" :
+        eye_gpu.layer_over ? "over-scene" : eye_gpu.layer_hud ? "hud" : "scene";
     // 4. Publish the tracking sample. Poll focus and loss changes first, so a just-lost session cannot leave a valid
     // sample until the next game present.
     poll_events();
@@ -805,8 +805,8 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
         !xr.pending_reference_change && located_generation == atomic_load(&reference_generation);
     if (!game_present_id) {
         if (xr.frame_id <= 5 || xr.frame_id % 120 == 0)
-            XRLOG("display frame=%llu predicted=%lld layers=%d provenance=%s game-eye-submissions=%llu copied-pairs=%llu\n",
-                (unsigned long long)xr.frame_id, (long long)frame.predictedDisplayTime, image_submitted, provenance,
+            XRLOG("display frame=%llu predicted=%lld layers=%d content=%s game-eye-submissions=%llu copied-pairs=%llu\n",
+                (unsigned long long)xr.frame_id, (long long)frame.predictedDisplayTime, image_submitted, content,
                 (unsigned long long)eye_gpu.submitted, (unsigned long long)eye_gpu.copied);
         if (!xr.display_rate_tracking) return;
     }
@@ -868,9 +868,9 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
     if (epoch == atomic_load(&reset_epoch) && !atomic_load(&stop_requested)) published = snapshot;
     pthread_mutex_unlock(&pose_lock);
     if (xr.frame_id <= 5 || xr.frame_id % 120 == 0)
-        XRLOG("tracking frame=%llu game-present=%llu predicted=%lld generation=%llu valid=%d angular-velocity-valid=%d zero-layers=%d provenance=%s game-eye-submissions=%llu copied-pairs=%llu\n",
+        XRLOG("tracking frame=%llu game-present=%llu predicted=%lld generation=%llu valid=%d angular-velocity-valid=%d zero-layers=%d content=%s game-eye-submissions=%llu copied-pairs=%llu\n",
             (unsigned long long)xr.frame_id, (unsigned long long)game_present_id, (long long)frame.predictedDisplayTime,
-            (unsigned long long)snapshot.generation, valid, snapshot.angular_velocity_valid, !image_submitted, provenance,
+            (unsigned long long)snapshot.generation, valid, snapshot.angular_velocity_valid, !image_submitted, content,
             (unsigned long long)eye_gpu.submitted, (unsigned long long)eye_gpu.copied);
     return;
 fail:
@@ -1051,8 +1051,7 @@ bool xr_runtime_bind_vulkan(VkInstance instance, VkPhysicalDevice physical,
     const PcVrConfig *config = pc_vr_config();
     eye_images_enabled = config->enabled;  // (the play configuration has the eye images)
     atomic_store(&eye_offer_trace, config->diagnostics.offer_trace);
-    XRLOG("eye admission=%s\n", eye_images_enabled ?
-          "strict+dev-unproven (the PC VR play configuration; not a production rule)" : "strict");
+    XRLOG("eye images=%d (the PC VR play configuration)\n", eye_images_enabled);
     vkGetDeviceQueue(device, queue_family, queue_index, &xr.queue);
     if (!xr.queue) return false;
     XrGraphicsBindingVulkan2KHR binding = {.type = XR_TYPE_GRAPHICS_BINDING_VULKAN2_KHR,

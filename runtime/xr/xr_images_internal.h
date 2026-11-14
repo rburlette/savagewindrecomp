@@ -37,7 +37,7 @@ static struct {
     VkFormat format;
     uint32_t width, height;
     XrOwnedEyePair pending[EYE_QUEUE], current;  // pending: oldest first, pending_count of them
-    uint64_t pending_epoch[EYE_QUEUE], current_epoch, current_taken_ns, latest_image_generation, image_epoch;
+    uint64_t pending_epoch[EYE_QUEUE], current_epoch, current_taken_ns;
     unsigned pending_count;
     bool current_valid, producer_complete, copy_pending;
     // The latest copied pair, re-submitted every display frame with the poses
@@ -49,7 +49,6 @@ static struct {
     XrCompositionLayerQuad layer_quad;
     uint64_t layer_epoch, layer_generation, layer_published_ns;
     XrTime layer_predicted;
-    XrEyeProjectionProvenance layer_projection;
     bool layer_valid, layer_panel, layer_hud, layer_over;  // layer_over: a panel over the held scene
     // The views of the last scene pair, whose images the eye swapchains still
     // hold as their last release: an over-scene panel is shown over them.
@@ -65,7 +64,6 @@ static struct {
         XrCompositionLayerProjectionView views[2];
         XrCompositionLayerQuad quad;
         XrPoseSnapshot render_pose;
-        XrEyeProjectionProvenance projection;
         uint64_t epoch, submitted_ns;
         uint32_t first, images;
         bool panel, hud, over;
@@ -75,7 +73,7 @@ static struct {
     uint64_t late_producers;  // bounded waits for a pair's producer that it outlasted
 } eye_gpu;
 static pthread_mutex_t eye_mailbox_lock = PTHREAD_MUTEX_INITIALIZER;
-// Serializes a game reset with the final image-generation check and EndFrame.
+// Serializes a game reset with the final reset and reference check and EndFrame.
 // It is never held across producer waits/copies or for tracking-only frames.
 static pthread_mutex_t eye_submission_lock = PTHREAD_MUTEX_INITIALIZER;
 // A stalled producer/runtime must not trap the sole frame owner indefinitely.
@@ -102,14 +100,6 @@ static bool eye_gpu_bind(VkDevice device, uint32_t queue_family) {
     EYE_VK_PROCS(EYE_LOAD)
 #undef EYE_LOAD
     return true;
-}
-
-static bool eye_pose_equal(const XrEyeSnapshot *first, const XrEyeSnapshot *second) {
-    // All elements originate in the exact runtime snapshot; tolerance could
-    // silently admit a projection/eye-order mismatch. Do not compare padding.
-    return !memcmp(first->orientation_xyzw, second->orientation_xyzw, sizeof first->orientation_xyzw) &&
-        !memcmp(first->position_xyz, second->position_xyz, sizeof first->position_xyz) &&
-        !memcmp(first->fov_left_right_up_down, second->fov_left_right_up_down, sizeof first->fov_left_right_up_down);
 }
 
 static bool eye_pose_finite(const XrEyeSnapshot *eye) {
@@ -139,23 +129,16 @@ static bool eye_panel_valid(const XrEyePanel *panel, uint32_t width, uint32_t he
         panel->width_m > 0 && panel->height_m > 0;
 }
 
-static VkFormat eye_target_format(const XrOwnedEyePair *pair) {
-    if (!pair->display_encoded) return pair->format;
-    return pair->format == VK_FORMAT_R8G8B8A8_UNORM ? VK_FORMAT_R8G8B8A8_SRGB :
-        pair->format == VK_FORMAT_B8G8R8A8_UNORM ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_UNDEFINED;
-}
-
 bool xr_runtime_eye_images_enabled(void) { return eye_images_enabled; }
 
 // Optional bounded, numeric-only admission attribution. Counts and the log
 // budget last for the process; diagnostics never change ownership or guards.
 typedef enum {
-    OFFER_CONTRACT, OFFER_FORMAT, OFFER_ANCHOR, OFFER_PANEL, OFFER_HUD,
-    OFFER_POSE_IDENTITY, OFFER_POSE_FUTURE, OFFER_POSE_AGE, OFFER_EYES, OFFER_EYE_ORDER,
-    OFFER_STOPPED, OFFER_RESET, OFFER_GENERATION, OFFER_MAILBOX, OFFER_DEVICE, OFFER_IMAGE_GENERATION,
+    OFFER_CONTRACT, OFFER_PANEL, OFFER_HUD, OFFER_POSE_IDENTITY, OFFER_POSE_AGE, OFFER_EYES,
+    OFFER_STOPPED, OFFER_RESET, OFFER_GENERATION, OFFER_MAILBOX,
     OFFER_REASON_COUNT
 } EyeOfferReject;
-_Static_assert(PC_VR_GUARD_OFFER_CONTRACT + OFFER_REASON_COUNT == PC_VR_GUARD_OFFER_IMAGE_GENERATION + 1,
+_Static_assert(PC_VR_GUARD_OFFER_CONTRACT + OFFER_REASON_COUNT == PC_VR_GUARD_OFFER_MAILBOX + 1,
                "pc_vr_guards.h lists the offer reasons in EyeOfferReject's order");
 static atomic_bool eye_offer_trace;
 static atomic_uint_fast64_t eye_offer_rejects[OFFER_REASON_COUNT], eye_offer_log_count;
@@ -168,8 +151,7 @@ static bool eye_offer_reject(const XrOwnedEyePair *pair, EyeOfferReject reason, 
     if (count > 4 && count % 120) return false;
     if (atomic_fetch_add(&eye_offer_log_count, 1) >= EYE_OFFER_LOG_CAP) return false;
     static const char *const names[OFFER_REASON_COUNT] = {
-        "contract", "format", "anchor", "panel", "hud", "pose-identity", "pose-future", "pose-age",
-        "eyes", "eye-order", "stopped", "reset", "generation", "mailbox", "device", "image-generation"
+        "contract", "panel", "hud", "pose-identity", "pose-age", "eyes", "stopped", "reset", "generation", "mailbox"
     };
     const uint64_t published = pair ? pair->render_pose.published_monotonic_ns : 0;
     XRLOG("offer-rejected reason=%s count=%llu present=%llu tracking-frame=%llu generation=%llu anchored=%d pose-age-ns=%llu pose-age-valid=%d offer-age-limit-ns=250000000\n",
@@ -192,17 +174,12 @@ static bool eye_images_queued(const XrOwnedEyePair *pair) {
 }
 
 bool xr_runtime_offer_eye_pair(const XrOwnedEyePair *pair) {
-    if (!pair || !atomic_load(&accepting) || !pair->release ||
-        !(pair->projection == XR_EYE_PROJECTION_NATIVE_RENDERED ||
-          (pair->projection == XR_EYE_PROJECTION_DEV_UNPROVEN && eye_images_enabled)) ||
-        !pair->device || !pair->images[0] || !pair->images[1] || pair->images[0] == pair->images[1] ||
-        !pair->ready_timeline || !pair->ready_value || !pair->game_present_id || !pair->image_generation ||
-        !pair->width || !pair->height || pair->width > INT32_MAX || pair->height > INT32_MAX ||
-        !pair->render_pose.native_views_valid) return eye_offer_reject(pair, OFFER_CONTRACT, 0);
-    if (pair->format != VK_FORMAT_R8G8B8A8_UNORM && pair->format != VK_FORMAT_R8G8B8A8_SRGB &&
-        pair->format != VK_FORMAT_B8G8R8A8_UNORM && pair->format != VK_FORMAT_B8G8R8A8_SRGB) return eye_offer_reject(pair, OFFER_FORMAT, 0);
-    if (eye_target_format(pair) == VK_FORMAT_UNDEFINED) return eye_offer_reject(pair, OFFER_FORMAT, 0);
-    if (pair->anchored && pair->projection != XR_EYE_PROJECTION_DEV_UNPROVEN) return eye_offer_reject(pair, OFFER_ANCHOR, 0);
+    if (!pair || !atomic_load(&accepting) || !eye_images_enabled || !pair->release ||
+        !pair->images[0] || !pair->images[1] || pair->images[0] == pair->images[1] ||
+        pair->format != VK_FORMAT_R8G8B8A8_SRGB || !pair->ready_timeline || !pair->ready_value ||
+        !pair->game_present_id || !pair->width || !pair->height || pair->width > INT32_MAX ||
+        pair->height > INT32_MAX || !pair->render_pose.native_views_valid)
+        return eye_offer_reject(pair, OFFER_CONTRACT, 0);
     if (pair->panel.valid && (!pair->anchored || !eye_panel_valid(&pair->panel, pair->width, pair->height))) return eye_offer_reject(pair, OFFER_PANEL, 0);
     if (pair->over_scene && (!pair->panel.valid || pair->hud.valid || !pair->hud_image ||
         pair->hud_image == pair->images[0] || pair->hud_image == pair->images[1])) return eye_offer_reject(pair, OFFER_PANEL, 0);
@@ -215,12 +192,11 @@ bool xr_runtime_offer_eye_pair(const XrOwnedEyePair *pair) {
     const uint64_t now = xr_runtime_pose_clock_ns();
     if (!render->frame_id || !render->generation || !render->active ||
         !render->published_monotonic_ns) return eye_offer_reject(pair, OFFER_POSE_IDENTITY, now);
-    if (now < render->published_monotonic_ns) return eye_offer_reject(pair, OFFER_POSE_FUTURE, now);
     if (!pair->anchored && now - render->published_monotonic_ns > 250000000)
         return eye_offer_reject(pair, OFFER_POSE_AGE, now);
+    // A pose xrEndFrame would refuse ends the session: the projection views are these.
     for (unsigned i = 0; i < 2; ++i)
-        if (!eye_pose_finite(&pair->rendered_eyes[i]) || !eye_pose_equal(&render->eyes[i], &pair->rendered_eyes[i])) return eye_offer_reject(pair, OFFER_EYES, now);
-    if (eye_pose_equal(&pair->rendered_eyes[0], &pair->rendered_eyes[1])) return eye_offer_reject(pair, OFFER_EYE_ORDER, now);
+        if (!eye_pose_finite(&render->eyes[i])) return eye_offer_reject(pair, OFFER_EYES, now);
     const uint64_t epoch = atomic_load(&reset_epoch);
     bool accepted = false;
     EyeOfferReject reason = OFFER_STOPPED;
@@ -229,17 +205,12 @@ bool xr_runtime_offer_eye_pair(const XrOwnedEyePair *pair) {
     else if (epoch != atomic_load(&reset_epoch)) reason = OFFER_RESET;
     else if (render->generation != atomic_load(&reference_generation)) reason = OFFER_GENERATION;
     else if (eye_gpu.pending_count == EYE_QUEUE || eye_images_queued(pair)) reason = OFFER_MAILBOX;
-    else if (pair->device != eye_gpu.device || pair->queue_family != eye_gpu.queue_family) reason = OFFER_DEVICE;
-    else if (eye_gpu.image_epoch == epoch && pair->image_generation < eye_gpu.latest_image_generation)
-        reason = OFFER_IMAGE_GENERATION;
     else {
         XrOwnedEyePair *queued = &eye_gpu.pending[eye_gpu.pending_count];
         *queued = *pair;
         // An anchored pose places 2D content; its freshness is this offer.
         if (pair->anchored) queued->render_pose.published_monotonic_ns = now;
         eye_gpu.pending_epoch[eye_gpu.pending_count++] = epoch;
-        eye_gpu.image_epoch = epoch;
-        eye_gpu.latest_image_generation = pair->image_generation;
         accepted = true;
     }
     pthread_mutex_unlock(&eye_mailbox_lock);
@@ -353,7 +324,7 @@ static bool eye_create_swapchain(unsigned i, const XrSwapchainCreateInfo *info) 
 }
 
 static bool eye_create_targets(const XrOwnedEyePair *pair) {
-    const VkFormat target = eye_target_format(pair);
+    const VkFormat target = pair->format;
     XrSwapchainCreateInfo info = {.type = XR_TYPE_SWAPCHAIN_CREATE_INFO,
         .usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT,
         .format = target, .sampleCount = 1, .width = pair->width, .height = pair->height,
@@ -379,8 +350,7 @@ static bool eye_create_targets(const XrOwnedEyePair *pair) {
     if (!xr_ok(xr.EnumerateSwapchainFormats(xr.session, count, &count, formats), "eye format data") || count > 256) return false;
     bool supported = false;
     for (uint32_t i = 0; i < count; ++i) if (formats[i] == target) supported = true;
-    // Raw copy only: no hidden color conversion/scaling. A display-encoded
-    // UNORM source keeps its code values in the size-compatible sRGB target.
+    // Raw copy only: no hidden color conversion/scaling.
     if (!supported) {
         static unsigned reported;
         if (reported++ < 4) XRLOG("eye swapchain format %d unsupported by runtime; pair dropped\n", (int)target);
@@ -388,9 +358,8 @@ static bool eye_create_targets(const XrOwnedEyePair *pair) {
     }
     for (unsigned i = 0; i < (pair->hud.valid || pair->over_scene ? 3u : 2u); ++i) if (!eye_create_swapchain(i, &info)) goto fail;
     eye_gpu.width = pair->width; eye_gpu.height = pair->height; eye_gpu.format = target;
-    XRLOG("eye swapchains created %ux%u format=%d images=%u/%u source-format=%d display-encoded=%d\n",
-          pair->width, pair->height, (int)target, eye_gpu.eyes[0].count, eye_gpu.eyes[1].count,
-          (int)pair->format, pair->display_encoded);
+    XRLOG("eye swapchains created %ux%u format=%d images=%u/%u\n",
+          pair->width, pair->height, (int)target, eye_gpu.eyes[0].count, eye_gpu.eyes[1].count);
     if (!eye_gpu.pool) {
         VkCommandPoolCreateInfo pool = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .queueFamilyIndex = eye_gpu.queue_family};
@@ -559,7 +528,6 @@ static void eye_copy_finish(void) {
         eye_gpu.layer_generation = render_pose->generation;
         eye_gpu.layer_published_ns = render_pose->published_monotonic_ns;
         eye_gpu.layer_predicted = render_pose->predicted_display_time_ns;
-        eye_gpu.layer_projection = eye_gpu.copy.projection;
         eye_gpu.layer_valid = true;
         ++eye_gpu.copied;
     } else eye_gpu.layer_valid = false;
@@ -632,7 +600,7 @@ static void eye_copy_pair(XrTime display_time, bool native_tracking_valid) {
         eye_gpu.CmdPipelineBarrier(eye_gpu.command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             0, 0, NULL, 0, NULL, 1, &barrier);
         if (i == 2) continue;  // (the HUD: its quad below)
-        const XrEyeSnapshot *eye = &pair->rendered_eyes[i];
+        const XrEyeSnapshot *eye = &pair->render_pose.eyes[i];
         views[i] = (XrCompositionLayerProjectionView){.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW,
             .pose = {.orientation = {eye->orientation_xyzw[0], eye->orientation_xyzw[1], eye->orientation_xyzw[2], eye->orientation_xyzw[3]},
                 .position = {eye->position_xyz[0], eye->position_xyz[1], eye->position_xyz[2]}},
@@ -672,7 +640,6 @@ static void eye_copy_pair(XrTime display_time, bool native_tracking_valid) {
     memcpy(eye_gpu.copy.views, views, sizeof views);
     eye_gpu.copy.quad = quad;
     eye_gpu.copy.render_pose = pair->render_pose;
-    eye_gpu.copy.projection = pair->projection;
     eye_gpu.copy.epoch = epoch;
     eye_gpu.copy.submitted_ns = xr_runtime_pose_clock_ns();
     eye_gpu.copy.first = first;

@@ -43,7 +43,7 @@ static bool vr_eyes_configure(void) {
     // The final image holds linear values: the game's lens pass writes it to the display through an sRGB view.
     // Blitting into an sRGB image encodes them, which also keeps dark tones' precision in 8 bits.
     vr_eyes.state = 1;
-    LOG("[pc-vr-eyes] producer armed source=final-image-halves slots=%u format=R8G8B8A8_SRGB encode=linear-to-srgb row_flip=%d provenance=dev-unproven\n",
+    LOG("[pc-vr-eyes] producer armed source=final-image-halves slots=%u format=R8G8B8A8_SRGB encode=linear-to-srgb row_flip=%d\n",
         VR_EYE_SLOTS, vr_eyes.flip);
     return true;
 }
@@ -96,7 +96,6 @@ VrEyeSlot *vr_eyes_capture_claim(const TexBackend *combined) {
         if (vr_eyes.width) ++vr_eyes.resized;
         vr_eyes.width = half_width;
         vr_eyes.height = height;
-        ++vr_eyes.image_generation;
     }
     // Claim a slot the XR owner does not hold.
     for (unsigned i = 0; i < VR_EYE_SLOTS && !vr_eyes.filling; ++i) {
@@ -249,13 +248,10 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
     const VrFrameFindings *frame = inputs.findings;
     const uint64_t game_present_id = inputs.game_present_id;
     if (submitted_seq < vr_eyes.ready_seq) renderer_submit();  // (the copies must be submitted before XR waits)
-    XrOwnedEyePair offer = {.device = g_vk.dev, .queue_family = g_vk.qfam,
-        .images = {slot->image[0], slot->image[1]}, .format = VK_FORMAT_R8G8B8A8_SRGB,
+    XrOwnedEyePair offer = {.images = {slot->image[0], slot->image[1]}, .format = VK_FORMAT_R8G8B8A8_SRGB,
         .width = vr_eyes.width, .height = vr_eyes.height,
         .ready_timeline = g_vk.timeline, .ready_value = vr_eyes.ready_seq,
-        .game_present_id = game_present_id, .image_generation = vr_eyes.image_generation,
-        .projection = XR_EYE_PROJECTION_DEV_UNPROVEN,
-        .release = vr_eye_slot_release, .context = slot};
+        .game_present_id = game_present_id, .release = vr_eye_slot_release, .context = slot};
     if (!frame->scene_seen) {
         // Menus (D053): world-locked at the calibration pose, where the game's forward is, through tracking
         // loss and reopening; each offer carries the current tracking generation. Shown only as quads (D056, D068):
@@ -316,7 +312,6 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
     else if (outcome.rejection == VR_FRAME_REJECTED_UNCERTIFIED) ++vr_eyes.uncertified;
     const bool ready = outcome.kind != VR_FRAME_REJECTED;
     const char *kind = vr_frame_kind_name(outcome);
-    memcpy(offer.rendered_eyes, offer.render_pose.eyes, sizeof offer.rendered_eyes);
     const bool accepted = ready && xr_runtime_offer_eye_pair(&offer);
     ++vr_eyes.offered;
     if (accepted) {
@@ -337,7 +332,7 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
     }
     vr_eyes.last_kind = kind;
     if (vr_eyes.offered <= 8 || !(vr_eyes.offered % 120) || (!accepted && vr_eyes.rejected <= 16))
-        LOG("[pc-vr-eyes] offer=%llu present=%llu kind=%s traversal=%llu generation=%llu accepted=%d accepted_total=%llu rejected=%llu menu_pairs=%llu uncertified=%llu misplaced=%llu busy_skips=%llu resized=%llu half=%ux%u provenance=dev-unproven\n",
+        LOG("[pc-vr-eyes] offer=%llu present=%llu kind=%s traversal=%llu generation=%llu accepted=%d accepted_total=%llu rejected=%llu menu_pairs=%llu uncertified=%llu misplaced=%llu busy_skips=%llu resized=%llu half=%ux%u\n",
             (unsigned long long)vr_eyes.offered, (unsigned long long)game_present_id, kind,
             (unsigned long long)(frame->scene_seen ? frame->eyes[0].traversal : 0),
             (unsigned long long)offer.render_pose.generation, accepted,

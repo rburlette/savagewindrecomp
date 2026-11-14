@@ -609,7 +609,7 @@ static void projection_view_reject_locked(unsigned reason) {
     ++projection_view_rejected;
     pc_vr_guard_count(PC_VR_GUARD_VIEW_HEAD_LOOK_NOT_APPLIED + (reason - 1));  // (reasons 1 to 4, in the enum's order)
     if (projection_view_rejected <= 4)
-        LOG("[pc-vr-native-view] rejected=%llu reason=%u native_provenance=0 image_admission=0\n",
+        LOG("[pc-vr-native-view] rejected=%llu reason=%u\n",
             (unsigned long long)projection_view_rejected, reason);
     if (traversal->view_written_mask || traversal->fov_written_mask) projection_fov_finish_locked();
 }
@@ -632,7 +632,7 @@ static void projection_fov_reject_locked(unsigned reason) {
     projection_traversal.fov_failed = true;
     pc_vr_guard_count(PC_VR_GUARD_FOV_PRECONDITION + (reason - 1));  // (reasons 1 to 3, in the enum's order)
     if (projection_fov_rejected <= 4)
-        LOG("[pc-vr-fov-experiment] rejected=%llu reason=%u native_provenance=0 image_admission=0\n",
+        LOG("[pc-vr-fov-experiment] rejected=%llu reason=%u\n",
             (unsigned long long)projection_fov_rejected, reason);
     if (projection_traversal.fov_written_mask || projection_traversal.view_written_mask)
         projection_fov_finish_locked();
@@ -896,7 +896,7 @@ static void projection_verify_native_fov(uint64_t object, bool device, uint64_t 
             projection_near(converted[11], logical[11] * (double)depth[0] + depth[1] * logical[15]);
     }
     if (!valid) {
-        LOG("[pc-vr-fov-experiment] verified_stage=%s eye=%llu native_rays=0 original_conversion=0 native_provenance=0 image_admission=0\n",
+        LOG("[pc-vr-fov-experiment] verified_stage=%s eye=%llu native_rays=0 original_conversion=0\n",
             device ? "device" : "logical", (unsigned long long)note->note);
         projection_fov_reject_locked(3);
     } else if (device) {
@@ -916,7 +916,7 @@ static void projection_traversal_reject(PcVrGuard reason) {
     pc_vr_guard_count(reason);
     memset(&projection_traversal, 0, sizeof projection_traversal);
     if (projection_stack_rejected <= 3)
-        LOG("[pc-vr-traversal] rejected=%llu pending_cleared=1 native_provenance=0\n",
+        LOG("[pc-vr-traversal] rejected=%llu pending_cleared=1\n",
             (unsigned long long)projection_stack_rejected);
 }
 
@@ -957,7 +957,7 @@ static void projection_observe_traversal(ProjectionNote *note, uint64_t frame, c
             traversal->native_latched = true;
         }
         if (projection_roots <= 4 || !(projection_roots % 16))
-            LOG("[pc-vr-traversal] root=%llu serial=%llu root_return=1 native_latched=%d native_matches_head=%d native_provenance=0\n",
+            LOG("[pc-vr-traversal] root=%llu serial=%llu root_return=1 native_latched=%d native_matches_head=%d\n",
                 (unsigned long long)projection_roots, (unsigned long long)traversal->serial,
                 traversal->native_latched, traversal->native_latched && note->latch_valid &&
                 head_matches);
@@ -987,7 +987,7 @@ static void projection_observe_traversal(ProjectionNote *note, uint64_t frame, c
     // snapshot. Lost tracking, recenter/reset, BUSY or age reject the pair.
     if (traversal->native_latched) traversal->native_pair = projection_pose_current(&traversal->native_snapshot);
     if (projection_traversal_pairs <= 4 || !(projection_traversal_pairs % 16))
-        LOG("[pc-vr-traversal] pair=%llu serial=%llu saved_frame_link=1 exact_layer_config_base=1 opposite_sides=1 same_base_pose=1 same_head_latch=%d native_snapshot_retained=%d native_pair_valid=%d same_simulation_proven=0 native_provenance=0\n",
+        LOG("[pc-vr-traversal] pair=%llu serial=%llu saved_frame_link=1 exact_layer_config_base=1 opposite_sides=1 same_base_pose=1 same_head_latch=%d native_snapshot_retained=%d native_pair_valid=%d\n",
             (unsigned long long)projection_traversal_pairs, (unsigned long long)traversal->serial,
             root->sequence && root->sequence == note->sequence && root->frame == note->frame &&
             root->generation == note->generation && root->latch_valid && note->latch_valid,
@@ -1082,7 +1082,7 @@ static void projection_observe_native_fov(ProjectionNote *note) {
         projection_matrix_contract(mapped, logical);
     note->native_fov_ready = preserved_depth && logical_contract && (dirty & 0xff) != 0;
     if (projection_fov_attempts <= 8 || !(projection_fov_attempts % 32))
-        LOG("[pc-vr-native-fov] eye=%llu side_bit=%u right_basis=%d parallel_eye=%d lateral_eye=%d basis_offset_sign=%d native_stereo_order=%d candidate_native_index=%d logical_dirty=%d near_far_preserved=%d dry_run_contract=%d guest_writes=0 resource_mapping_proven=0 native_provenance=0\n",
+        LOG("[pc-vr-native-fov] eye=%llu side_bit=%u right_basis=%d parallel_eye=%d lateral_eye=%d basis_offset_sign=%d native_stereo_order=%d candidate_native_index=%d logical_dirty=%d near_far_preserved=%d dry_run_contract=%d guest_writes=0\n",
             (unsigned long long)note->note, note->side, note->basis_read && note->basis.right_matches,
             note->basis_read && note->basis.parallel_eye, note->basis_read && note->basis.lateral_eye,
             note->basis_read ? note->basis.offset_sign : 0, native_order, native_index,
@@ -1124,7 +1124,7 @@ void pc_vr_projection_trace_eye(uint64_t layer, uint64_t bound_base,
     if (!valid) {
         projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_BOUND_EYE);
         ++projection_rejected;
-        if (projection_rejected <= 3) LOG("[pc-vr-projection] bound-eye rejected=%llu native_provenance=0\n",
+        if (projection_rejected <= 3) LOG("[pc-vr-projection] bound-eye rejected=%llu\n",
             (unsigned long long)projection_rejected);
         pthread_mutex_unlock(&projection_lock);
         return;
@@ -1141,7 +1141,7 @@ void pc_vr_projection_trace_eye(uint64_t layer, uint64_t bound_base,
             projection_read(vtable + 0x68, &end, sizeof end) &&
             begin >= MAIN_BASE && begin < main_end && !(begin & 3) &&
             end >= MAIN_BASE && end < main_end && !(end & 3);
-        LOG("[pc-vr-render-scope] eye=%llu side_bit=%u callbacks_in_pinned_main=%d begin_offset=%llx end_offset=%llx live_rinfo_join=0 native_provenance=0\n",
+        LOG("[pc-vr-render-scope] eye=%llu side_bit=%u callbacks_in_pinned_main=%d begin_offset=%llx end_offset=%llx live_rinfo_join=0\n",
             (unsigned long long)note.note, note.side, callbacks,
             (unsigned long long)(callbacks ? begin - MAIN_BASE : 0),
             (unsigned long long)(callbacks ? end - MAIN_BASE : 0));
@@ -1160,7 +1160,7 @@ void pc_vr_projection_trace_eye(uint64_t layer, uint64_t bound_base,
             projection_read(note.projection + 0x98, params, sizeof params) &&
             projection_read(note.projection + 0xc, matrix, sizeof matrix);
         const bool existing_contract = inspected && projection_matrix_contract(params, matrix);
-        LOG("[pc-vr-projection] eye=%llu side_bit=%u offset_sign=%d selected_owned_projection=1 latch_valid=%d sequence=%llu tracking_frame=%llu generation=%llu dirty_bits=%u existing_matrix_contract=%d native_provenance=0\n",
+        LOG("[pc-vr-projection] eye=%llu side_bit=%u offset_sign=%d selected_owned_projection=1 latch_valid=%d sequence=%llu tracking_frame=%llu generation=%llu dirty_bits=%u existing_matrix_contract=%d\n",
             (unsigned long long)note.note, note.side, note.offset_sign, note.latch_valid,
             (unsigned long long)sequence, (unsigned long long)frame, (unsigned long long)generation,
             inspected ? dirty : UINT16_MAX, existing_contract);
@@ -1170,7 +1170,7 @@ void pc_vr_projection_trace_eye(uint64_t layer, uint64_t bound_base,
         projection_last_pair = note.note;
         ++projection_pairs;
         if (projection_pairs <= 4 || !(projection_pairs % 16))
-            LOG("[pc-vr-projection] pair=%llu opposite_sides=1 same_config=%d sibling_link=%d same_base_pose=%d same_latch=%d same_tracking=%d same_simulation_proven=0\n",
+            LOG("[pc-vr-projection] pair=%llu opposite_sides=1 same_config=%d sibling_link=%d same_base_pose=%d same_latch=%d same_tracking=%d\n",
                 (unsigned long long)projection_pairs, note.config && note.config == other->config,
                 note.sibling == other->layer || other->sibling == note.layer,
                 note.base == other->base && note.base_hash == other->base_hash,
@@ -1238,13 +1238,13 @@ static void projection_observe_matrix(uint64_t object, bool device) {
             projection_near(device_matrix[11], matrix[11] * (double)depth[0] + depth[1] * matrix[15]);
     } else if (!contract) ++projection_bad_matrix;
     if (note->native_fov_ready && (*counter < 8 || !((*counter + 1) % 32)))
-        LOG("[pc-vr-native-fov] original_stage=%s eye=%llu dry_run_ready=1 logical_before_device=%d original_contract=%d experiment_applied=%d native_provenance=0\n",
+        LOG("[pc-vr-native-fov] original_stage=%s eye=%llu dry_run_ready=1 logical_before_device=%d original_contract=%d experiment_applied=%d\n",
             device ? "device" : "logical", (unsigned long long)note->note,
             device && note->logical_seen, contract && (!device || depth_contract), note->fov_applied);
     if (!device) note->logical_seen = contract;
     ++*counter;
     if (*counter <= 8 || !(*counter % 32) || (!contract && projection_bad_matrix <= 3))
-        LOG("[pc-vr-projection] stage=%s sample=%llu side_bit=%u note=%llu read_ok=%d perspective_contract=%d device_finite=%d device_depth_contract=%d posture=%u parameter_hash=%016llx matrix_hash=%016llx native_provenance=0\n",
+        LOG("[pc-vr-projection] stage=%s sample=%llu side_bit=%u note=%llu read_ok=%d perspective_contract=%d device_finite=%d device_depth_contract=%d posture=%u parameter_hash=%016llx matrix_hash=%016llx\n",
             device ? "device" : "perspective", (unsigned long long)*counter, note->side,
             (unsigned long long)note->note, valid, contract, device_finite, depth_contract, posture,
             (unsigned long long)(valid ? projection_hash(params, sizeof params) : 0),
@@ -1373,7 +1373,7 @@ void pc_vr_projection_trace_init(void) {
     atomic_store_explicit(&projection_started, false, memory_order_release);
     atomic_store_explicit(&projection_enabled, true, memory_order_release);
     pthread_mutex_unlock(&projection_lock);
-    LOG("[pc-vr-eyes] armed continuous native view/FOV/certificates game_units_per_meter=%.9g live_scale_keys=minus,equals,0 certificate_slots=%u scope_cap=%u original_builder_retained=1 provenance=dev-unproven\n",
+    LOG("[pc-vr-eyes] armed continuous native view/FOV/certificates game_units_per_meter=%.9g live_scale_keys=minus,equals,0 certificate_slots=%u scope_cap=%u original_builder_retained=1\n",
         units_per_meter, RENDER_CERTIFICATE_SLOTS, RENDER_SCOPE_CAP);
 }
 

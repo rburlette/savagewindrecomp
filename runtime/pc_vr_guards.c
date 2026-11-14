@@ -16,9 +16,8 @@ static const char *const pc_vr_guard_names[PC_VR_GUARD_COUNT] = {
     "fingerprint-mismatch",
     "frame-uncertified-missing", "frame-uncertified-disagree", "frame-misplaced", "frame-menu-without-pose",
     "frame-menu-without-panel",
-    "offer-contract", "offer-format", "offer-anchor", "offer-panel", "offer-hud", "offer-pose-identity",
-    "offer-pose-future", "offer-pose-age", "offer-eyes", "offer-eye-order", "offer-stopped", "offer-reset",
-    "offer-generation", "offer-mailbox", "offer-device", "offer-image-generation",
+    "offer-contract", "offer-panel", "offer-hud", "offer-pose-identity", "offer-pose-age", "offer-eyes",
+    "offer-stopped", "offer-reset", "offer-generation", "offer-mailbox",
 };
 
 void pc_vr_guards_log(const char *when) {

@@ -276,19 +276,19 @@ int main(int argc, char **argv) {
     VrEyeSlot *slot = lens_pass(1920, 1080, false);
     CHECK(slot && vr_eyes.filling == slot && atomic_load(&slot->busy) && vr_eyes.state == 1);
     CHECK(calls.images_created == 3 && calls.layouts == 3 && vr_eyes.width == 960 && vr_eyes.height == 1080);
-    CHECK(vr_eyes.ready_seq == 10 && vr_eyes.image_generation == 1);
+    CHECK(vr_eyes.ready_seq == 10);
     draw_frame(DRAWN_SCENE);
     CHECK(present(500));
     CHECK(calls.offers == 1 && atomic_load(&slot->busy) && slot_holder[slot_index(slot)] == SLOT_WITH_XR_OWNER);
     CHECK(vr_eyes.scene_held == 5 && vr_eyes.accepted == 1 && vr_eyes.filling == NULL);
     // The offer's fields that carry ownership: the claimed slot's images, its release callback and context, and when
-    // its copies are complete, on the game's device, queue family and timeline.
+    // its copies are complete, on the game's timeline; sRGB images, the one format the XR owner takes.
     const XrOwnedEyePair *offer = &calls.last_offer;
     CHECK(offer->images[0] == slot->image[0] && offer->images[1] == slot->image[1] &&
           offer->hud_image == VK_NULL_HANDLE);
     CHECK(offer->release == vr_eye_slot_release && offer->context == slot);
     CHECK(offer->ready_value == vr_eyes.ready_seq && offer->ready_timeline == g_vk.timeline);
-    CHECK(offer->image_generation == 1 && offer->device == g_vk.dev && offer->queue_family == 3);
+    CHECK(offer->format == VK_FORMAT_R8G8B8A8_SRGB);
     CHECK(offer->width == 960 && offer->height == 1080 && offer->game_present_id == 500);
     CHECK(calls.submits == 0);  // (the copies, ready at submission 10, were submitted already)
     xr_owner_release(0);
@@ -346,20 +346,20 @@ int main(int argc, char **argv) {
     CHECK(lens_pass(1920, 1080, false) == NULL && claims == 1);  // (off: no claim)
 
     // A resize while the XR owner holds a slot: no reallocation and no claim; once it is free, the old images go
-    // through deferred destruction and a new image generation starts.
+    // through deferred destruction and new ones are made at the new size.
     fresh_producer();
     slot = lens_pass(1920, 1080, false);
     draw_frame(DRAWN_SCENE);
     CHECK(present(510));
     CHECK(lens_pass(2560, 1440, false) == NULL);
-    CHECK(vr_eyes.busy_skips == 1 && calls.images_deferred == 0 && vr_eyes.image_generation == 1 && claims == 1);
+    CHECK(vr_eyes.busy_skips == 1 && calls.images_deferred == 0 && claims == 1);
     CHECK(vr_eyes.width == 960 && ownership_holds());
     xr_owner_release(0);
     slot = lens_pass(2560, 1440, false);
-    CHECK(slot && calls.images_deferred == 3 && vr_eyes.image_generation == 2 && vr_eyes.width == 1280);
+    CHECK(slot && calls.images_deferred == 3 && vr_eyes.width == 1280);
     CHECK(vr_eyes.height == 1440 && vr_eyes.resized == 1 && calls.images_created == 6 && ownership_holds());
     draw_frame(DRAWN_SCENE);
-    CHECK(present(511) && calls.last_offer.image_generation == 2 && calls.last_offer.width == 1280);
+    CHECK(present(511) && calls.last_offer.width == 1280 && calls.last_offer.height == 1440);
 
     // The game reset: releases the slot being filled and forgets the held scene, but leaves the XR owner's slot.
     fresh_producer();

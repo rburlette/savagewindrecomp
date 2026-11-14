@@ -15,7 +15,6 @@ static struct {
     VkResult producer_result, submit_result, fence_result;
     uint32_t expected_width;
     VkFormat expected_format;
-    bool offer_srgb;
     XrEyeSnapshot expected_eyes[2];
     const XrEyePanel *expected_panel; // D056: frames must carry its quad instead of the projection
     const XrEyePanel *expected_hud;   // D057: frames carry the projection and this quad over it
@@ -149,11 +148,10 @@ static PFN_vkVoidFunction image_proc(VkDevice device, const char *name) {
 
 static XrResult XRAPI_CALL image_formats(XrSession session, uint32_t capacity, uint32_t *count, int64_t *formats) {
     CHECK(session == xr.session);
-    *count = gpu_mock.offer_srgb ? 2 : 1;
+    *count = 1;
     if (capacity) {
         CHECK(capacity == *count);
-        formats[0] = gpu_mock.unsupported ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
-        if (gpu_mock.offer_srgb) formats[1] = VK_FORMAT_R8G8B8A8_SRGB;
+        formats[0] = gpu_mock.unsupported ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_SRGB;
     }
     return XR_SUCCESS;
 }
@@ -266,7 +264,7 @@ static XrOwnedEyePair image_prepare(void) {
     prepare();
     memset(&gpu_mock, 0, sizeof gpu_mock);
     gpu_mock.expected_width = 800;
-    gpu_mock.expected_format = VK_FORMAT_R8G8B8A8_UNORM;
+    gpu_mock.expected_format = VK_FORMAT_R8G8B8A8_SRGB;
     test_device_proc = image_proc;
     CHECK(eye_gpu_bind((VkDevice)(uintptr_t)10, 4));
     xr.EnumerateSwapchainFormats = image_formats; xr.CreateSwapchain = image_create; xr.DestroySwapchain = image_destroy;
@@ -278,14 +276,12 @@ static XrOwnedEyePair image_prepare(void) {
     (void)xr_runtime_pose_clock_ns();
     SDL_Delay(1);
     tracking_frame(1);
-    XrOwnedEyePair pair = {.device = (VkDevice)(uintptr_t)10, .queue_family = 4,
-        .images = {(VkImage)(uintptr_t)20, (VkImage)(uintptr_t)21}, .format = VK_FORMAT_R8G8B8A8_UNORM,
+    eye_images_enabled = true;  // (the PC VR play configuration: offers are refused without it)
+    XrOwnedEyePair pair = {.images = {(VkImage)(uintptr_t)20, (VkImage)(uintptr_t)21}, .format = VK_FORMAT_R8G8B8A8_SRGB,
         .width = 800, .height = 900, .ready_timeline = (VkSemaphore)(uintptr_t)30, .ready_value = 7,
-        .game_present_id = 2, .image_generation = 1, .projection = XR_EYE_PROJECTION_NATIVE_RENDERED,
-        .release = image_retire, .context = &gpu_mock};
+        .game_present_id = 2, .release = image_retire, .context = &gpu_mock};
     CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID && pair.render_pose.native_views_valid);
-    memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
-    memcpy(gpu_mock.expected_eyes, pair.rendered_eyes, sizeof pair.rendered_eyes);
+    memcpy(gpu_mock.expected_eyes, pair.render_pose.eyes, sizeof gpu_mock.expected_eyes);
     mock.eye_shift = 1;
     ++mock.predicted;
     test_end_inspect = image_inspect_end;
@@ -296,6 +292,7 @@ static void image_close(void) {
     // Avoid the worker's exit request in this direct-owner fixture.
     xr.running = false;
     xr_runtime_shutdown();
+    eye_images_enabled = false;
     CHECK(!eye_gpu.device && !eye_gpu.current_valid && !eye_gpu.pending_count);
     CHECK(gpu_mock.pool_destroys == gpu_mock.pools && !gpu_mock.pending_copy);
 }
@@ -326,8 +323,7 @@ static void test_display_only_owned_pose(void) {
     mock.rich_views = true;
     tracking_frame(0);
     CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID && !pair.render_pose.game_present_id);
-    memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
-    memcpy(gpu_mock.expected_eyes, pair.rendered_eyes, sizeof pair.rendered_eyes);
+    memcpy(gpu_mock.expected_eyes, pair.render_pose.eyes, sizeof gpu_mock.expected_eyes);
     const XrPoseSnapshot retained = pair.render_pose;
     mock.eye_shift = 2;
     mock.rich_views = false; // Every pose/FOV member now differs from the retained render sample.
@@ -350,24 +346,22 @@ static void test_image_admission(void) {
     XrOwnedEyePair pair = image_prepare(), bad;
     CHECK(!xr_runtime_offer_eye_pair(NULL));
 #define REJECT(edit) do { bad = pair; edit; CHECK(!xr_runtime_offer_eye_pair(&bad)); } while (0)
-    REJECT(bad.projection = XR_EYE_PROJECTION_UNPROVEN);
+    eye_images_enabled = false;  // (not the PC VR play configuration)
+    CHECK(!xr_runtime_eye_images_enabled() && !xr_runtime_offer_eye_pair(&pair));
+    eye_images_enabled = true;
     REJECT(bad.images[1] = VK_NULL_HANDLE); REJECT(bad.images[1] = bad.images[0]);
-    REJECT(bad.device = (VkDevice)(uintptr_t)11); REJECT(++bad.queue_family);
     REJECT(bad.ready_timeline = VK_NULL_HANDLE); REJECT(bad.ready_value = 0);
     REJECT(bad.width = 0); REJECT(bad.height = UINT32_MAX); REJECT(bad.format = VK_FORMAT_D32_SFLOAT);
-    REJECT(bad.game_present_id = 0); REJECT(bad.image_generation = 0); REJECT(bad.release = NULL);
+    REJECT(bad.format = VK_FORMAT_R8G8B8A8_UNORM); // only the sRGB images the producer makes
+    REJECT(bad.game_present_id = 0); REJECT(bad.release = NULL);
     REJECT(bad.render_pose.frame_id = 0); REJECT(++bad.render_pose.generation);
     REJECT(bad.render_pose.published_monotonic_ns = 0);
-    REJECT(bad.render_pose.published_monotonic_ns = xr_runtime_pose_clock_ns() + 1000000000);
     REJECT(bad.render_pose.native_views_valid = false); REJECT(bad.render_pose.active = false);
-    REJECT(bad.projection = XR_EYE_PROJECTION_DEV_UNPROVEN); // strict unless the D048 flag is set
-    REJECT(bad.display_encoded = true; bad.format = VK_FORMAT_R8G8B8A8_SRGB);
-    REJECT(memcpy(bad.render_pose.eyes, bad.rendered_eyes + 1, sizeof bad.rendered_eyes[0]);
-           bad.rendered_eyes[0] = bad.rendered_eyes[1]); // identical eyes cannot show order
-    REJECT(bad.rendered_eyes[0].position_xyz[0] = 0);
-    REJECT(bad.rendered_eyes[1].fov_left_right_up_down[0] = -0.5f);
-    REJECT(bad.rendered_eyes[0].orientation_xyzw[0] = NAN);
-    REJECT(bad.render_pose.eyes[1] = bad.render_pose.eyes[0]);
+    // A pose xrEndFrame would refuse: not finite, not unit, or an inverted FOV.
+    REJECT(bad.render_pose.eyes[0].orientation_xyzw[0] = NAN);
+    REJECT(bad.render_pose.eyes[1].position_xyz[2] = INFINITY);
+    REJECT(bad.render_pose.eyes[0].orientation_xyzw[3] = 0.5f);
+    REJECT(bad.render_pose.eyes[1].fov_left_right_up_down[0] = bad.render_pose.eyes[1].fov_left_right_up_down[1]);
 #undef REJECT
     CHECK(gpu_mock.retirements == 0 && gpu_mock.creates == 0 && gpu_mock.submits == 0);
     CHECK(xr_runtime_offer_eye_pair(&pair));
@@ -378,32 +372,22 @@ static void test_image_admission(void) {
     eye_retire_obsolete();
     CHECK(gpu_mock.retirements == 1 && gpu_mock.producer_waits == 1 && gpu_mock.submits == 0);
     image_close();
-    // A newer publication does not invalidate the pose the eyes rendered with,
-    // and the D048 flag admits DEV_UNPROVEN pairs; nothing else changes.
+    // A newer publication does not invalidate the pose the eyes rendered with.
     pair = image_prepare();
     tracking_frame(2);
-    pair.projection = XR_EYE_PROJECTION_DEV_UNPROVEN;
-    CHECK(!xr_runtime_offer_eye_pair(&pair));
-    eye_images_enabled = true;
     CHECK(xr_runtime_eye_images_enabled() && xr_runtime_offer_eye_pair(&pair));
     image_close();
     // Anchored 2D content (menus): an old latched sample is placement, not a render
-    // pose. Only DEV_UNPROVEN pairs may be anchored; freshness restarts at the offer.
+    // pose; freshness restarts at the offer.
     pair = image_prepare();
-    eye_images_enabled = true;
     SDL_Delay(260);
-    pair.projection = XR_EYE_PROJECTION_DEV_UNPROVEN;
     CHECK(!xr_runtime_offer_eye_pair(&pair));
     pair.anchored = true;
-    pair.projection = XR_EYE_PROJECTION_NATIVE_RENDERED;
-    CHECK(!xr_runtime_offer_eye_pair(&pair));
-    pair.projection = XR_EYE_PROJECTION_DEV_UNPROVEN;
     CHECK(xr_runtime_offer_eye_pair(&pair));
     CHECK(eye_gpu.pending[0].render_pose.published_monotonic_ns + 1000000 > xr_runtime_pose_clock_ns());
     mock.expected_layers = 1;
     tracking_frame(0);
-    CHECK(eye_gpu.submitted == 1 && eye_gpu.layer_projection == XR_EYE_PROJECTION_DEV_UNPROVEN);
-    eye_images_enabled = false;
+    CHECK(eye_gpu.submitted == 1 && eye_gpu.layer_valid);
     image_close();
 }
 
@@ -420,19 +404,14 @@ static void test_image_copy_and_resize(void) {
     // destroy only completed prior swapchains and adopt a new generation.
     for (unsigned n = 0; n < 2; ++n) {
         CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID);
-        memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
-        memcpy(gpu_mock.expected_eyes, pair.rendered_eyes, sizeof pair.rendered_eyes);
+        memcpy(gpu_mock.expected_eyes, pair.render_pose.eyes, sizeof gpu_mock.expected_eyes);
         pair.game_present_id = 3 + n;
-        if (n) { pair.width = gpu_mock.expected_width = 1024; ++pair.image_generation; }
+        if (n) pair.width = gpu_mock.expected_width = 1024;
         CHECK(xr_runtime_offer_eye_pair(&pair));
         ++mock.predicted;
         tracking_frame(pair.game_present_id);
     }
     CHECK(gpu_mock.creates == 4 && gpu_mock.destroys == 2 && gpu_mock.submits == 3 && gpu_mock.retirements == 3);
-    CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID);
-    memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
-    --pair.image_generation;
-    CHECK(!xr_runtime_offer_eye_pair(&pair)); // old allocation generation after resize
     image_close();
     CHECK(gpu_mock.destroys == 4 && gpu_mock.fence_destroys == 1);
 }
@@ -525,7 +504,6 @@ static void test_image_late_copy(void) {
     CHECK(eye_gpu.submitted == 1 && eye_gpu.copied == 1 && gpu_mock.fence_asks == 0);
     // The next pair's copy is late.
     CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID);
-    memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
     pair.game_present_id = 3;
     CHECK(xr_runtime_offer_eye_pair(&pair));
     gpu_mock.fence_result = VK_TIMEOUT;
@@ -543,7 +521,7 @@ static void test_image_late_copy(void) {
     CHECK(gpu_mock.fences == 3 && gpu_mock.fence_asks == 1 && eye_gpu.late_copies == 1);
     // Finished: its images are released, the pair goes back, and its layers are shown.
     gpu_mock.fence_result = VK_SUCCESS;
-    memcpy(gpu_mock.expected_eyes, pair.rendered_eyes, sizeof pair.rendered_eyes);
+    memcpy(gpu_mock.expected_eyes, pair.render_pose.eyes, sizeof gpu_mock.expected_eyes);
     ++mock.predicted;
     tracking_frame(0);
     CHECK(!xr.terminal && !eye_gpu.copy_pending && !eye_gpu.current_valid);
@@ -595,8 +573,7 @@ static void test_visible_and_wait_recovery(void) {
     xr.state = XR_SESSION_STATE_VISIBLE;
     tracking_frame(2);
     CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID && !pair.render_pose.focused);
-    memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
-    memcpy(gpu_mock.expected_eyes, pair.rendered_eyes, sizeof pair.rendered_eyes);
+    memcpy(gpu_mock.expected_eyes, pair.render_pose.eyes, sizeof gpu_mock.expected_eyes);
     CHECK(xr_runtime_offer_eye_pair(&pair));
     mock.expected_layers = 1;
     tracking_frame(0);
@@ -741,8 +718,6 @@ static void test_image_queue(void) {
 // projection layer.
 static void test_image_panel(void) {
     XrOwnedEyePair pair = image_prepare(), bad;
-    eye_images_enabled = true;
-    pair.projection = XR_EYE_PROJECTION_DEV_UNPROVEN;
     pair.anchored = true;
     pair.panel = (XrEyePanel){.valid = true, .eye = 1, .rect = {100, 200, 600, 340},
         .position_xyz = {0.1f, 0.4f, -1.5f}, .orientation_xyzw = {0, 0.0998f, 0, 0.995f}, .width_m = 2.5f, .height_m = 1.4f};
@@ -764,8 +739,7 @@ static void test_image_panel(void) {
     tracking_frame(0); // re-submitted without a new copy
     CHECK(eye_gpu.submitted == 2 && gpu_mock.copies == 2);
     CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID);
-    memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
-    memcpy(gpu_mock.expected_eyes, pair.rendered_eyes, sizeof pair.rendered_eyes);
+    memcpy(gpu_mock.expected_eyes, pair.render_pose.eyes, sizeof gpu_mock.expected_eyes);
     pair.anchored = pair.panel.valid = false;
     pair.game_present_id = 3;
     gpu_mock.expected_panel = NULL;
@@ -774,7 +748,6 @@ static void test_image_panel(void) {
     ++mock.predicted;
     tracking_frame(3);
     CHECK(eye_gpu.submitted == 3 && !eye_gpu.layer_panel && gpu_mock.copies == 4);
-    eye_images_enabled = false;
     image_close();
 }
 
@@ -790,9 +763,8 @@ static void test_image_hud(void) {
     REJECT(bad.hud_image = VK_NULL_HANDLE); REJECT(bad.hud_image = bad.images[1]);
     REJECT(bad.hud.rect[2] = 701); REJECT(bad.hud.width_m = NAN);
     // (menus: no HUD)
-    REJECT(eye_images_enabled = true; bad.projection = XR_EYE_PROJECTION_DEV_UNPROVEN; bad.anchored = true);
+    REJECT(bad.anchored = true);
 #undef REJECT
-    eye_images_enabled = false;
     CHECK(gpu_mock.retirements == 0 && gpu_mock.creates == 0);
     CHECK(xr_runtime_offer_eye_pair(&pair));
     gpu_mock.expected_hud = &pair.hud;
@@ -805,8 +777,7 @@ static void test_image_hud(void) {
     CHECK(eye_gpu.submitted == 2 && gpu_mock.copies == 3);
     for (unsigned n = 0; n < 2; ++n) {
         CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID);
-        memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
-        memcpy(gpu_mock.expected_eyes, pair.rendered_eyes, sizeof pair.rendered_eyes);
+        memcpy(gpu_mock.expected_eyes, pair.render_pose.eyes, sizeof gpu_mock.expected_eyes);
         pair.game_present_id = 3 + n;
         pair.hud.valid = n == 1;
         gpu_mock.expected_hud = n ? &pair.hud : NULL;
@@ -830,15 +801,12 @@ static void test_image_over_scene(void) {
     mock.expected_layers = 1;
     tracking_frame(2);
     CHECK(eye_gpu.submitted == 1 && gpu_mock.copies == 2 && eye_gpu.scene_valid);
-    eye_images_enabled = true;
     menu = pair;
-    menu.projection = XR_EYE_PROJECTION_DEV_UNPROVEN;
     menu.anchored = menu.over_scene = true;
     menu.hud_image = (VkImage)(uintptr_t)22;
     menu.panel = (XrEyePanel){.valid = true, .rect = {100, 200, 600, 340}, .position_xyz = {0.1f, 0.4f, -0.77f},
         .orientation_xyzw = {0, 0.0998f, 0, 0.995f}, .width_m = 1.28f, .height_m = 0.72f};
     CHECK(xr_runtime_get_pose(&menu.render_pose) == XR_POSE_VALID);
-    memcpy(menu.rendered_eyes, menu.render_pose.eyes, sizeof menu.rendered_eyes);
     menu.game_present_id = 3;
 #define REJECT(edit) do { bad = menu; edit; CHECK(!xr_runtime_offer_eye_pair(&bad)); } while (0)
     REJECT(bad.panel.valid = false); REJECT(bad.hud_image = VK_NULL_HANDLE); REJECT(bad.hud_image = bad.images[0]);
@@ -858,7 +826,6 @@ static void test_image_over_scene(void) {
         menu.over_scene = n == 1;
         menu.hud_image = n ? (VkImage)(uintptr_t)22 : VK_NULL_HANDLE;
         CHECK(xr_runtime_get_pose(&menu.render_pose) == XR_POSE_VALID);
-        memcpy(menu.rendered_eyes, menu.render_pose.eyes, sizeof menu.rendered_eyes);
         menu.game_present_id = 4 + n;
         CHECK(xr_runtime_offer_eye_pair(&menu));
         gpu_mock.expected_hud = NULL;
@@ -871,8 +838,7 @@ static void test_image_over_scene(void) {
     }
     CHECK(gpu_mock.copies == 6 && eye_gpu.submitted == 5);
     CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID);
-    memcpy(pair.rendered_eyes, pair.render_pose.eyes, sizeof pair.rendered_eyes);
-    memcpy(gpu_mock.expected_eyes, pair.rendered_eyes, sizeof pair.rendered_eyes);
+    memcpy(gpu_mock.expected_eyes, pair.render_pose.eyes, sizeof gpu_mock.expected_eyes);
     pair.game_present_id = 6;
     gpu_mock.expected_panel = NULL;
     gpu_mock.expected_over = false;
@@ -880,29 +846,8 @@ static void test_image_over_scene(void) {
     ++mock.predicted;
     tracking_frame(6);
     CHECK(gpu_mock.copies == 8 && eye_gpu.scene_valid && !eye_gpu.layer_panel && !eye_gpu.layer_over);
-    eye_images_enabled = false;
     image_close();
     CHECK(gpu_mock.destroys == 3);
-}
-
-// Display-encoded UNORM pixels keep their code values in an sRGB swapchain;
-// without one the pair is dropped, never shown through a linear swapchain.
-static void test_image_display_encoded(void) {
-    XrOwnedEyePair pair = image_prepare();
-    pair.display_encoded = true;
-    CHECK(xr_runtime_offer_eye_pair(&pair));
-    tracking_frame(0);
-    CHECK(gpu_mock.creates == 0 && gpu_mock.retirements == 1 && !eye_gpu.layer_valid);
-    image_close();
-    pair = image_prepare();
-    pair.display_encoded = true;
-    gpu_mock.offer_srgb = true;
-    gpu_mock.expected_format = VK_FORMAT_R8G8B8A8_SRGB;
-    CHECK(xr_runtime_offer_eye_pair(&pair));
-    mock.expected_layers = 1;
-    tracking_frame(0);
-    CHECK(gpu_mock.creates == 2 && gpu_mock.copies == 2 && eye_gpu.format == VK_FORMAT_R8G8B8A8_SRGB && eye_gpu.submitted == 1);
-    image_close();
 }
 
 static void test_offer_rejection_diagnostics(void) {
@@ -920,10 +865,8 @@ static void test_offer_rejection_diagnostics(void) {
     CHECK(!memcmp(&before, &bad, sizeof bad) && !eye_gpu.pending_count); \
 } while (0)
     DIAGNOSTIC(OFFER_POSE_AGE, bad.render_pose.published_monotonic_ns = xr_runtime_pose_clock_ns() - 300000000);
-    DIAGNOSTIC(OFFER_POSE_FUTURE, bad.render_pose.published_monotonic_ns = xr_runtime_pose_clock_ns() + 1000000000);
     DIAGNOSTIC(OFFER_GENERATION, ++bad.render_pose.generation);
-    DIAGNOSTIC(OFFER_DEVICE, ++bad.queue_family);
-    DIAGNOSTIC(OFFER_EYES, bad.rendered_eyes[0].position_xyz[0] += 1);
+    DIAGNOSTIC(OFFER_EYES, bad.render_pose.eyes[0].position_xyz[0] = NAN);
     DIAGNOSTIC(OFFER_POSE_IDENTITY, bad.render_pose.active = false);
     // Exhausting the reporting budget never changes the rejection itself.
     atomic_store(&eye_offer_log_count, EYE_OFFER_LOG_CAP);
@@ -948,7 +891,6 @@ int main(void) {
     test_image_panel();
     test_image_hud();
     test_image_over_scene();
-    test_image_display_encoded();
     test_image_resubmission();
     test_image_queue();
     test_image_copy_and_resize();
