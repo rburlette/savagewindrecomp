@@ -8,7 +8,7 @@
 #include "../xr/xr_runtime.h"
 
 typedef struct {
-    uint64_t id, traversal, note, sequence, frame, generation, reference_hash;
+    uint64_t id, traversal, note, sequence, frame, generation;
     uint64_t camera_hash, view_hash, parameters_hash, logical_hash, device_hash;
     double units_per_meter; // Explicit diagnostic input, NOT calibrated scale.
     // The eye projection's device matrix, the z and w rows' z and w terms (row-major [10], [11], [14], [15]): a

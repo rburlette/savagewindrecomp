@@ -183,11 +183,11 @@ static void test_init(void) {
     CHECK(!overrides && lookups == 4 && !atomic_load(&projection_enabled));
     missing_device = false; missing_render = true; fixture_init();
     CHECK(!overrides && lookups == 8 && !atomic_load(&projection_enabled) && !pc_vr_render_trace_enabled());
-    CHECK(!atomic_load(&projection_view_experiment) && !atomic_load(&projection_fov_experiment));
+    CHECK(!atomic_load(&projection_view_writes_on) && !atomic_load(&projection_fov_writes_on));
     missing_render = false; fixture_init();
     CHECK(overrides == 4 && projection_registered && atomic_load(&projection_enabled) && pc_vr_render_trace_enabled());
-    CHECK(atomic_load(&render_collecting) && atomic_load(&projection_view_experiment) &&
-          atomic_load(&projection_fov_experiment) && projection_view_scale == 1.0);
+    CHECK(atomic_load(&render_collecting) && atomic_load(&projection_view_writes_on) &&
+          atomic_load(&projection_fov_writes_on) && projection_view_scale == 1.0);
     fixture_init(); CHECK(overrides == 4 && lookups == 12); // no recursive re-wrapping
 }
 
@@ -239,63 +239,41 @@ static void call_writer(uint64_t object, bool device, uint64_t caller, uint64_t 
     if (device) projection_device_wrapper(&actual); else projection_builder_wrapper(&actual);
     CHECK(originals == before + 1 && !memcmp(&actual, &expected, sizeof actual));
 }
+// The eye calls make one note per eye, and the projection writers, from any caller, run their originals exactly once
+// (call_writer) and write no guest memory while no eye's native view is verified.
 static void test_observation(void) {
     fixture_objects();
     unsigned char before[0x4000]; memcpy(before, (void *)(uintptr_t)region, sizeof before);
     const uint64_t object = layers[0] + 0x288;
-    call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
-    CHECK(projection_writes == 0); // no verified layer note
+    call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);  // (no note yet)
     for (unsigned i = 0; i < 2; ++i)
         pc_vr_projection_trace_eye(layers[i], base, 5, 77, 3, true, frames[i], &mock_pose);
-    CHECK(projection_note_count == 2 && projection_pairs == 1);
-    CHECK(projection_notes[0].offset_sign == -1 && projection_notes[1].offset_sign == 1);
+    CHECK(projection_note_count == 2 && projection_notes[0].note + 1 == projection_notes[1].note);
+    CHECK(projection_notes[0].basis.offset_sign == -1 && projection_notes[1].basis.offset_sign == 1);
     CHECK(projection_notes[0].base_hash == projection_notes[1].base_hash);
     call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
     call_writer(object, true, PROJ_DEVICE_CALLER, object + 0x4c);
-    CHECK(projection_writes == 1 && projection_device_writes == 1 && !projection_bad_matrix);
-    CHECK(!memcmp(before, (void *)(uintptr_t)region, sizeof before)); // absolutely no guest writes
     call_writer(object, false, PROJ_BUILD_CALLER + 4, object + 0xc);
     call_writer(object, false, PROJ_BUILD_CALLER, object + 0x10);
     call_writer(object, true, PROJ_DEVICE_CALLER + 4, object + 0x4c);
     call_writer(object, true, PROJ_DEVICE_CALLER, object + 0x50);
-    CHECK(projection_writes == 1 && projection_device_writes == 1);
-    u64(layers[0] + 0x220, object + 8);
-    call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
-    CHECK(projection_writes == 1);
-    u64(layers[0] + 0x220, object);
-    u64(object, PROJ_VTABLE + 8);
-    call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
-    CHECK(projection_writes == 1); u64(object, PROJ_VTABLE);
-    mock_now += UINT64_C(250000001);
-    call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
-    CHECK(projection_writes == 1);
-    pc_vr_projection_trace_eye(layers[0], base, 6, 78, 3, true, frames[0], &mock_pose);
-    *(float *)(uintptr_t)(object + 0xc) += 0.1f;
-    call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
-    CHECK(projection_writes == 2 && projection_bad_matrix == 1);
-    *(float *)(uintptr_t)(object + 0x4c + 0x28) += 0.1f;
-    call_writer(object, true, PROJ_DEVICE_CALLER, object + 0x4c);
-    CHECK(projection_device_writes == 2);
-    // No budget: eyes and writers go on being observed.
-    const uint64_t notes_before = projection_note_count, writes_before = projection_writes;
+    CHECK(!memcmp(before, (void *)(uintptr_t)region, sizeof before)); // absolutely no guest writes
+    CHECK(!projection_notes[0].fov_applied && !projection_notes[0].render_certificate);
+    // No budget: eyes and writers go on.
+    const uint64_t notes_before = projection_note_count;
     for (unsigned i = 0; i < 250; ++i) {
         pc_vr_projection_trace_eye(layers[i % 2], base, 9, 80, 4, false, frames[i % 2], &mock_pose);
         call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
     }
-    CHECK(projection_note_count == notes_before + 250 && projection_writes == writes_before + 250);
+    CHECK(projection_note_count == notes_before + 250 && atomic_load(&projection_enabled));
     pc_vr_projection_trace_reset();
     call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
-    CHECK(projection_writes == writes_before + 250 && !projection_notes[0].note && !atomic_load(&projection_enabled));
+    CHECK(!projection_notes[0].note && !atomic_load(&projection_enabled));
     fixture_init();
     for (unsigned i = 0; i < 250; ++i)
         pc_vr_projection_trace_eye(0, base, 1, 1, 1, true, frames[0], &mock_pose);
     CHECK(projection_rejected == 250 && !projection_note_count && atomic_load(&projection_enabled));
-    // No deadline: an eye older than the pose age is not matched to a writer, and the trace goes on.
-    fixture_init();
-    pc_vr_projection_trace_eye(layers[0], base, 1, 1, 1, true, frames[0], &mock_pose);
-    mock_now += UINT64_C(5000000000);
-    call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
-    CHECK(!projection_writes && atomic_load(&projection_enabled));
+    CHECK(!memcmp(before, (void *)(uintptr_t)region, sizeof before));
     CHECK(VirtualFree((void *)(uintptr_t)region, 0, MEM_RELEASE));
 }
 
@@ -495,19 +473,13 @@ static void test_native_fov_observation(void) {
         *(uint16_t *)(uintptr_t)(layers[i] + 0x288 + 8) = 1;
     unsigned char before[0x4000]; memcpy(before, (void *)(uintptr_t)region, sizeof before);
     restart_traversal(); observe(0); observe(1);
-    CHECK(projection_fov_attempts == 2 && projection_notes[0].native_fov_ready && projection_notes[1].native_fov_ready);
+    CHECK(projection_notes[0].native_fov_ready && projection_notes[1].native_fov_ready);
     CHECK(projection_notes[0].basis.offset_sign == -1 && projection_notes[1].basis.offset_sign == 1);
     const uint64_t object = layers[0] + 0x288;
-    call_writer(object, true, PROJ_DEVICE_CALLER, object + 0x4c);
-    CHECK(!projection_notes[0].logical_seen); // Device-only observation cannot prove writer ordering.
-    call_writer(object, false, PROJ_BUILD_CALLER, object + 0xc);
-    call_writer(object, true, PROJ_DEVICE_CALLER, object + 0x4c);
-    CHECK(projection_notes[0].logical_seen);
     CHECK(!memcmp(before, (void *)(uintptr_t)region, sizeof before));
 
     restart_traversal(); mock_pose.eyes[0].position_xyz[0] = 0.04f;
     mock_pose.eyes[1].position_xyz[0] = -0.04f; mock_head_pose = mock_pose; observe(0); observe(1);
-    CHECK(projection_fov_attempts == 2);
     CHECK(!projection_notes[0].native_fov_ready && !projection_notes[1].native_fov_ready);
     restart_traversal(); *(float *)(uintptr_t)(base + 8) = -1; observe(0); observe(1);
     CHECK(!projection_notes[0].native_fov_ready && !projection_notes[1].native_fov_ready);
@@ -524,7 +496,7 @@ static void test_native_fov_observation(void) {
     *(float *)(uintptr_t)(object + 0x98) = 0.125f;
     restart_traversal(); observe(0); ++mock_pose.generation; observe(1);
     CHECK(projection_notes[0].native_fov_ready && !projection_notes[1].native_fov_ready);
-    pc_vr_projection_trace_reset(); observe(0); CHECK(projection_fov_attempts == 2);  // (not armed: no dry run)
+    pc_vr_projection_trace_reset(); observe(0); CHECK(!projection_notes[0].note);  // (not armed: no note)
     CHECK(!memcmp(before, (void *)(uintptr_t)region, sizeof before));
     CHECK(VirtualFree((void *)(uintptr_t)region, 0, MEM_RELEASE));
 }
@@ -682,7 +654,7 @@ static void test_fov_experiment(void) {
     restart_view(); native_camera(0);
     *(float *)(uintptr_t)(object + 0xa4) += 0.1f;
     render_observed(0); CHECK(!projection_traversal.fov_written_mask); // Reject inconsistent original caches.
-    CHECK(parameter_write_calls == 1 && atomic_load(&projection_fov_experiment));  // (the camera's write only)
+    CHECK(parameter_write_calls == 1 && atomic_load(&projection_fov_writes_on));  // (the camera's write only)
 
     // A rendered first eye cannot be rolled back: a sibling that fails after the root's parameters were written leaves
     // a partial pair (no certificate pair), and the writes go on.
@@ -694,27 +666,27 @@ static void test_fov_experiment(void) {
     render_observed(1);
     CHECK(projection_traversal.fov_written_mask == 1 && fov_pair_partial() && view_pair_partial());
     CHECK(atomic_load(&render_certificate_count) == certificates_before);  // (the root has its own; the sibling none)
-    CHECK(atomic_load(&projection_fov_experiment) && atomic_load(&projection_view_experiment));
+    CHECK(atomic_load(&projection_fov_writes_on) && atomic_load(&projection_view_writes_on));
     restart_view(); native_camera(0); render_observed(0);
     observe(0);  // (a new root abandons it, and starts afresh)
-    CHECK(projection_traversal.open && !projection_traversal.fov_admitted && atomic_load(&projection_fov_experiment));
+    CHECK(projection_traversal.open && !projection_traversal.fov_admitted && atomic_load(&projection_fov_writes_on));
 
     // A failed parameter write (it touches a prefix) is restored exactly and turns the writes off until the trace is
     // armed again.
     restart_view(); native_camera(0);
     fail_next_parameter_write = true; render_observed(0);
     CHECK(parameter_write_calls == 3 && !projection_traversal.fov_written_mask);
-    CHECK(!atomic_load(&projection_fov_experiment));
+    CHECK(!atomic_load(&projection_fov_writes_on));
     CHECK(!memcmp((void *)(uintptr_t)(object + 0x98), experiment_clean + (object + 0x98 - region), 9 * sizeof(float)));
     // The original writers' matrices are verified: a wrong one leaves a partial pair, and the writes go on.
     restart_view(); native_camera(0);
     mock_bad_logical = true; render_observed(0);
     CHECK(projection_traversal.fov_written_mask == 1 && !projection_traversal.fov_logical_mask && fov_pair_partial());
-    CHECK(atomic_load(&projection_fov_experiment));
+    CHECK(atomic_load(&projection_fov_writes_on));
     restart_view(); native_camera(0);
     mock_bad_device = true; render_observed(0);
     CHECK(projection_traversal.fov_logical_mask == 1 && !projection_traversal.fov_device_mask && fov_pair_partial());
-    CHECK(atomic_load(&projection_fov_experiment));
+    CHECK(atomic_load(&projection_fov_writes_on));
     pc_vr_projection_trace_reset();
     mock_generate_projection = false;
     CHECK(VirtualFree((void *)(uintptr_t)region, 0, MEM_RELEASE));
@@ -729,8 +701,8 @@ static void test_native_view_experiment(void) {
     const double bad_scales[] = {0, -0.0, -1, NAN, INFINITY, -INFINITY};
     for (unsigned i = 0; i < sizeof bad_scales / sizeof bad_scales[0]; ++i) {
         restart_view_at(bad_scales[i]);
-        CHECK(!atomic_load(&projection_enabled) && !atomic_load(&projection_view_experiment) &&
-              !atomic_load(&projection_fov_experiment) && !atomic_load(&render_collecting));
+        CHECK(!atomic_load(&projection_enabled) && !atomic_load(&projection_view_writes_on) &&
+              !atomic_load(&projection_fov_writes_on) && !atomic_load(&render_collecting));
         CHECK(!pc_vr_world_scale_active() && pc_vr_world_scale(1.25) == 0);
         observe(0); PcVrNativeViewToken legacy_token = {0};
         CHECK(prepare_view(0, &view_reference, &legacy_token) == PC_VR_NATIVE_VIEW_LEGACY && !legacy_token.note);
@@ -832,14 +804,14 @@ static void test_native_view_experiment(void) {
     CHECK(prepare_view(0, &view_reference, &token) == PC_VR_NATIVE_VIEW_APPLIED);
     CHECK(last_parameter_write_size == sizeof(PcVrHeadLookCamera));
     render_observed(0);
-    CHECK(!projection_traversal.fov_written_mask && view_pair_partial() && atomic_load(&projection_view_experiment));
+    CHECK(!projection_traversal.fov_written_mask && view_pair_partial() && atomic_load(&projection_view_writes_on));
 
     // A failed 36-byte copy touches a prefix, then restores the entire original.
     restart_view(); observe(0); token = (PcVrNativeViewToken){0};
     fail_next_parameter_write = true;
     CHECK(prepare_view(0, &view_reference, &token) == PC_VR_NATIVE_VIEW_REJECTED);
     CHECK(!token.note && !projection_traversal.view_written_mask && !view_pair_partial());
-    CHECK(parameter_write_calls == 2 && !atomic_load(&projection_view_experiment));
+    CHECK(parameter_write_calls == 2 && !atomic_load(&projection_view_writes_on));
     CHECK(!memcmp((void *)(uintptr_t)(layers[0] + 0x260),
         experiment_clean + layers[0] + 0x260 - region, sizeof(PcVrHeadLookCamera)));
 
@@ -853,7 +825,7 @@ static void test_native_view_experiment(void) {
         CHECK(!pc_vr_projection_trace_native_view_built(&token, true));
         CHECK(view_pair_partial() && !projection_traversal.view_verified_mask);
         CHECK(!projection_traversal.fov_written_mask);
-        CHECK(atomic_load(&projection_view_experiment) && atomic_load(&projection_fov_experiment));
+        CHECK(atomic_load(&projection_view_writes_on) && atomic_load(&projection_fov_writes_on));
     }
     restart_view(); observe(0); token = (PcVrNativeViewToken){0};
     CHECK(prepare_view(0, &view_reference, &token) == PC_VR_NATIVE_VIEW_APPLIED);
@@ -874,7 +846,7 @@ static void test_native_view_experiment(void) {
     restart_view(); native_camera(0); native_camera(1);
     mock_bad_logical = true; render_observed(0);
     CHECK(view_pair_partial() && fov_pair_partial());
-    CHECK(atomic_load(&projection_view_experiment) && atomic_load(&projection_fov_experiment));
+    CHECK(atomic_load(&projection_view_writes_on) && atomic_load(&projection_fov_writes_on));
 
     // Changed calibration, frame, stale tokens and original-state mismatches
     // cannot borrow an earlier camera result.
@@ -900,9 +872,9 @@ static void test_native_view_experiment(void) {
     restart_view(); native_camera(0); mock_now += UINT64_C(5000000000); observe(1);
     token = (PcVrNativeViewToken){0};
     CHECK(prepare_view(1, &view_reference, &token) == PC_VR_NATIVE_VIEW_REJECTED && !token.note);
-    CHECK(view_pair_partial() && atomic_load(&projection_view_experiment));
+    CHECK(view_pair_partial() && atomic_load(&projection_view_writes_on));
     pc_vr_projection_trace_reset();
-    CHECK(!projection_traversal.view_admitted && !atomic_load(&projection_view_experiment));  // (the game reset)
+    CHECK(!projection_traversal.view_admitted && !atomic_load(&projection_view_writes_on));  // (the game reset)
     mock_generate_projection = false;
     CHECK(VirtualFree((void *)(uintptr_t)region, 0, MEM_RELEASE));
 }
@@ -1168,7 +1140,7 @@ static void test_render_trace(void) {
         complete_pairs += view_pair_complete();
     }
     CHECK(complete_pairs == 40);
-    CHECK(atomic_load(&projection_view_experiment) && atomic_load(&projection_fov_experiment));
+    CHECK(atomic_load(&projection_view_writes_on) && atomic_load(&projection_fov_writes_on));
     const unsigned after = atomic_load(&render_certificate_count);
     CHECK(after == before + 80);
     PcVrRenderCertificate latest = unchanged;
@@ -1191,14 +1163,23 @@ static void test_render_trace(void) {
     CHECK(!pc_vr_render_trace_record(render_cb));  // (that answer kept in turn)
     CHECK(!pc_vr_render_trace_record(render_cb + 8));  // (another command buffer: worked out, none)
     CHECK(pc_vr_render_trace_record(render_cb) == after - 1);  // (asked again for this one: worked out)
-    // A change through any of the module's own entries moves the version: the next draw is worked out again, even
-    // when the change is not this note's (here a camera that is neither eye's).
+    // A camera or projection built that is neither eye's leaves the version alone, and takes no lock: the answer is
+    // kept. A change through any of the module's own entries for an eye moves it: the next draw is worked out again.
     u64(render_context + 0xb8, render_cb + 8);
+    const uint64_t version_before_other = atomic_load(&render_state_version);
     pc_vr_render_trace_invalidate_camera(base);
-    CHECK(!pc_vr_render_trace_record(render_cb));
+    render_invalidate_projection(base + 0x288, false);
+    render_invalidate_projection(base, true);
+    pc_vr_render_trace_invalidate_camera(0x228);  // (no layer: never an eye note's)
+    CHECK(atomic_load(&render_state_version) == version_before_other);
+    CHECK(pc_vr_render_trace_record(render_cb) == after - 1);  // (kept)
+    CHECK(!record_worked_out(render_cb));  // (worked out, it would be none)
     u64(render_context + 0xb8, render_cb);
+    CHECK(record_worked_out(render_cb) == after - 1);
+    const uint64_t version_before_eye = atomic_load(&render_state_version);
     pc_vr_render_trace_invalidate_camera(layers[0] + 0x228);
-    CHECK(!pc_vr_render_trace_record(render_cb));  // (this note's: no certificate now)
+    CHECK(atomic_load(&render_state_version) > version_before_eye);
+    CHECK(!pc_vr_render_trace_record(render_cb));  // (this note's: worked out again, no certificate now)
     pthread_mutex_lock(&projection_lock);  // (the note put back as it was, without moving the version)
     projection_notes[0].render_view_current = true; projection_notes[0].render_certificate = after - 1;
     pthread_mutex_unlock(&projection_lock);
@@ -1217,7 +1198,7 @@ static void test_render_trace(void) {
     memcpy((void *)(uintptr_t)region, experiment_clean, sizeof experiment_clean); fixture_render_info();
     native_camera(0); native_camera(1); render_observed(0); render_observed(1);
     CHECK(view_pair_complete() && atomic_load(&render_certificate_count) == before_partial + 2);
-    CHECK(atomic_load(&projection_view_experiment));
+    CHECK(atomic_load(&projection_view_writes_on));
     pc_vr_projection_trace_reset();
     CHECK(!atomic_load(&projection_enabled) && !atomic_load(&render_collecting));
     mock_generate_projection = false;
@@ -1360,12 +1341,12 @@ static void test_play_configuration(void) {
     test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});  // (the configuration's own scale)
     pc_vr_projection_trace_reset();
     mock_pc_vr = false; pc_vr_projection_trace_init();
-    CHECK(!atomic_load(&projection_enabled) && !atomic_load(&projection_fov_experiment));
-    CHECK(!atomic_load(&projection_view_experiment) && !atomic_load(&render_collecting));
+    CHECK(!atomic_load(&projection_enabled) && !atomic_load(&projection_fov_writes_on));
+    CHECK(!atomic_load(&projection_view_writes_on) && !atomic_load(&render_collecting));
     mock_pc_vr = true;
     pc_vr_projection_trace_init();
-    CHECK(atomic_load(&projection_enabled) && atomic_load(&projection_fov_experiment));
-    CHECK(atomic_load(&projection_view_experiment) && pc_vr_render_trace_enabled() && atomic_load(&render_collecting));
+    CHECK(atomic_load(&projection_enabled) && atomic_load(&projection_fov_writes_on));
+    CHECK(atomic_load(&projection_view_writes_on) && pc_vr_render_trace_enabled() && atomic_load(&render_collecting));
     CHECK(projection_view_scale == 14.53 && pc_vr_world_scale_active());
     test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1",
         "SAVAGEWIND_PC_VR_NATIVE_VIEW_UNITS_PER_METER", "20", NULL});
