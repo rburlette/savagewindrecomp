@@ -970,7 +970,7 @@ static void test_render_trace(void) {
     render_observed(0);
     const uint64_t first = pc_vr_render_trace_record(render_cb);
     CHECK(first == published_before + 1 && pc_vr_render_trace_resolve(first, &out));
-    CHECK(out.note == projection_notes[0].note && out.traversal == projection_traversal.serial && out.native_index == 0);
+    CHECK(out.frame == projection_notes[0].frame && out.traversal == projection_traversal.serial && out.native_index == 0);
     const PcVrRenderCertificate first_copy = out;
     CHECK(!projection_traversal.fov_finished); // No invented sibling-complete requirement at recording.
     render_observed(1);
@@ -1013,8 +1013,8 @@ static void test_render_trace(void) {
     CHECK(!record_worked_out(render_cb)); projection_traversal.view_skipped = false;
     current_note->native_view_verified = false;
     CHECK(!record_worked_out(render_cb)); current_note->native_view_verified = true;
-    ++current_note->sequence;
-    CHECK(!record_worked_out(render_cb)); --current_note->sequence;
+    // (A note's fields never change in place: an eye call replaces it whole, without a certificate. The comparison of
+    // a certificate with its note went in the validation review's step 3, and with it this case.)
     CHECK(record_worked_out(render_cb) == first);
     CHECK(!pc_vr_render_trace_record(render_cb + 8));  // (another command buffer: always worked out)
     u64(render_context + 0xb8, render_cb + 8); CHECK(!record_worked_out(render_cb));

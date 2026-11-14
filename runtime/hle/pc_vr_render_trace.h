@@ -8,14 +8,14 @@
 #include "../xr/xr_runtime.h"
 
 typedef struct {
-    uint64_t id, traversal, note, sequence, frame, generation;
+    uint64_t id, traversal, frame, generation;
     uint64_t camera_hash, view_hash, parameters_hash, logical_hash, device_hash;
     double units_per_meter; // Explicit diagnostic input, NOT calibrated scale.
     // The eye projection's device matrix, the z and w rows' z and w terms (row-major [10], [11], [14], [15]): a
     // depth d of a view-space z is (a z + b) / (c z + e). D073's aim depth reads the scene with it.
     float depth_terms[4];
     float near_far[2];
-    uint32_t native_index, side_bit;
+    uint32_t native_index;
     // The traversal's single latched runtime snapshot that built both eyes:
     // the exact poses/FOV to submit with the rendered pixels.
     XrPoseSnapshot native_snapshot;

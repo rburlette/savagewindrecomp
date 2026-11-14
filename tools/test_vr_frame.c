@@ -122,21 +122,8 @@ static void traversals_differ(VrFrameFindings *findings, VrFrameInputs *inputs) 
     certify_scene_pair(findings);
     findings->eyes[1].traversal = 901;
 }
-static void generations_differ(VrFrameFindings *findings, VrFrameInputs *inputs) {
-    (void)inputs;
-    certify_scene_pair(findings);
-    findings->eyes[1].generation = HELD_GENERATION + 1;
-}
-static void tracking_frames_differ(VrFrameFindings *findings, VrFrameInputs *inputs) {
-    (void)inputs;
-    certify_scene_pair(findings);
-    findings->eyes[0].frame = 1233;
-}
-static void pose_snapshots_differ(VrFrameFindings *findings, VrFrameInputs *inputs) {
-    (void)inputs;
-    certify_scene_pair(findings);
-    findings->eyes[1].native_snapshot.eyes[1].position_xyz[0] = 0.033f;
-}
+// (The same traversal with another generation, tracking frame or pose snapshot cannot happen: one traversal makes
+// both certificates from one snapshot. The validation review's step 3 removed those comparisons and their cases.)
 static void eye_placed_in_other_half(VrFrameFindings *findings, VrFrameInputs *inputs) {
     (void)inputs;
     certify_scene_pair(findings);
@@ -253,10 +240,6 @@ static const ClassifyCase classify_cases[] = {
     {"only the left certified, unplaced", only_left_certified_unplaced, VR_FRAME_REJECTED,
      VR_FRAME_REJECTED_UNCERTIFIED, "uncertified"},
     {"traversals differ", traversals_differ, VR_FRAME_REJECTED, VR_FRAME_REJECTED_UNCERTIFIED, "uncertified"},
-    {"generations differ", generations_differ, VR_FRAME_REJECTED, VR_FRAME_REJECTED_UNCERTIFIED, "uncertified"},
-    {"tracking frames differ", tracking_frames_differ, VR_FRAME_REJECTED, VR_FRAME_REJECTED_UNCERTIFIED,
-     "uncertified"},
-    {"pose snapshots differ", pose_snapshots_differ, VR_FRAME_REJECTED, VR_FRAME_REJECTED_UNCERTIFIED, "uncertified"},
     {"an eye placed in the other half", eye_placed_in_other_half, VR_FRAME_REJECTED, VR_FRAME_REJECTED_MISPLACED,
      "misplaced"},
     {"misplaced with all else agreeing", misplaced_with_all_else_agreeing, VR_FRAME_REJECTED,
@@ -355,8 +338,9 @@ static DecisionTrace decision_before_vr_frame(const DecisionInputs *in) {
     const char *kind = "none";
     bool ready = false;
     if (in->scene_seen) {
-        const bool same = in->certified == 3 && in->placed == 3 && !in->misplaced && in->same_traversal &&
-            in->same_generation && in->same_frame && in->same_snapshot;
+        // (the traversal alone: the same traversal is the same generation, frame and snapshot; the other three
+        // differing with the traversal the same are inputs the runtime cannot produce, and agree either way)
+        const bool same = in->certified == 3 && in->placed == 3 && !in->misplaced && in->same_traversal;
         if (same) {
             kind = "scene";
             ready = true;

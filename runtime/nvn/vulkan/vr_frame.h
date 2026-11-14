@@ -157,9 +157,10 @@ static inline VrFrameRejection vr_frame_not_offered(const VrFrameInputs *inputs)
 // byte for byte), so that the pair is one rendering and the snapshot is the pose to submit it with.
 static inline bool vr_frame_eyes_agree(const VrFrameFindings *findings) {
     const PcVrRenderCertificate *left = &findings->eyes[0], *right = &findings->eyes[1];
+    // (One traversal makes both eyes' certificates from its one snapshot and latch, so the same traversal is the same
+    // frame, generation and pose: the validation review's step 3 removed comparing those again.)
     return findings->certified == 3 && findings->placed == 3 && !findings->misplaced &&
-        left->traversal == right->traversal && left->generation == right->generation && left->frame == right->frame &&
-        !memcmp(&left->native_snapshot, &right->native_snapshot, sizeof left->native_snapshot);
+        left->traversal == right->traversal;
 }
 
 // The outcome of a frame that offers kind (any kind but VR_FRAME_REJECTED).

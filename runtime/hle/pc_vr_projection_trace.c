@@ -435,10 +435,9 @@ static void render_publish_locked(ProjectionNote *note) {
         !projection_read(note->projection + 0xc, logical, sizeof logical) ||
         !projection_read(note->projection + 0x4c, device, sizeof device)) return;
     const ProjectionTraversal *traversal = &projection_traversal;
-    PcVrRenderCertificate certificate = {.id = count + 1, .traversal = traversal->serial,
-        .note = note->note, .sequence = note->sequence, .frame = note->frame,
+    PcVrRenderCertificate certificate = {.id = count + 1, .traversal = traversal->serial, .frame = note->frame,
         .generation = note->generation, .native_index = (uint32_t)note->fov_native_index,
-        .side_bit = note->side, .units_per_meter = projection_view_scale,
+        .units_per_meter = projection_view_scale,
         .camera_hash = note->render_camera_hash, .view_hash = note->render_view_hash,
         .parameters_hash = projection_hash(parameters, sizeof parameters),
         .logical_hash = projection_hash(logical, sizeof logical),
@@ -500,13 +499,12 @@ static uint64_t render_record_evaluate(uint64_t command_buffer) {
         note->native_view_verified && note->fov_applied && note->fov_logical_ok && note->fov_device_ok &&
         note->render_view_current && note->render_logical_current && note->render_device_current &&
         note->render_certificate;
-    // The certificate is this note's, and the layer's guest state still matches it (checked once per certificate in a
-    // render scope).
+    // The note's certificate, still in the store, and the layer's guest state still matching it (checked once per
+    // certificate in a render scope). (The certificate is made from this note under projection_lock, and an eye call
+    // replaces the note whole with no certificate, so its traversal, frame, generation and eye are the note's: the
+    // validation review's step 3 removed comparing them again.)
     PcVrRenderCertificate cert;
-    if (ready && pc_vr_render_trace_resolve(note->render_certificate, &cert) && cert.traversal == traversal->serial &&
-        cert.note == note->note && cert.sequence == note->sequence && cert.frame == note->frame &&
-        cert.generation == note->generation && cert.native_index == (uint32_t)note->fov_native_index &&
-        cert.side_bit == note->side &&
+    if (ready && pc_vr_render_trace_resolve(note->render_certificate, &cert) &&
         (scope->checked_certificate == cert.id || render_fingerprint_counted(note, &cert))) {
         scope->checked_certificate = cert.id;
         id = cert.id;
