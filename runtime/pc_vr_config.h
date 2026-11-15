@@ -27,9 +27,10 @@ extern "C" {
 #define PC_VR_HUD_DEPTH_MIN 0.1
 #define PC_VR_HUD_DEPTH_MAX 4.0
 #define PC_VR_SHOT_PRESENTS 8
-// (measured on Link at 90 Hz, 2026-11-15: at 0 the frame still reads the pose published in that display frame and its
-// image has the most room; at 2.5 ms one image in 25 came a display frame late)
-#define PC_VR_HEADSET_PACE_OFFSET_MS_DEFAULT 0.0
+// (measured on Link at 90 Hz, 2026-11-15, eye scale 2.7, one or two runs each: starting 1.5 ms before the display
+// frame, the frame still reads the pose published in it, the pose being published right after it is located, and
+// about one image in 200 comes a display frame late while standing; at 0 about one in 55; -3 ms is no better)
+#define PC_VR_HEADSET_PACE_OFFSET_MS_DEFAULT (-1.5)
 
 typedef enum { PC_VR_RUNE_AIM_OFF, PC_VR_RUNE_AIM_ON, PC_VR_RUNE_AIM_FLIP } PcVrRuneAim;
 
@@ -83,8 +84,9 @@ typedef struct {
                                   // depth mask nothing (D114 A/B runs)
         unsigned headset_pace;    // SAVAGEWIND_PC_VR_HEADSET_PACE=1..6: the game's frames on the headset's grid, each
                                   // at least this many display frames (runtime/pc_vr_pace.h, an experiment); 0: off
-        uint64_t headset_pace_offset_ns;  // with the pace, SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS, 0 to 50 (0 when not
-                                          // given): a frame starts this long after a display frame does
+        int64_t headset_pace_offset_ns;   // with the pace, SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS, -50 to 50 (-1.5
+                                          // when not given): a frame starts this long after a display frame does,
+                                          // before it when negative
     } diagnostics;
     unsigned aliases_seen, aliases_ignored;  // a bit per alias given, and per alias given another value than 1
     unsigned settings_ignored;               // a bit per play setting whose value was not taken

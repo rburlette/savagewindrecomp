@@ -37,7 +37,7 @@ bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced) {
     static bool logged;
     if (!logged) {
         logged = true;
-        LOG("[pc-vr] headset pace: a game frame every %u display frames of %.3f ms, starting %.3f ms after one starts\n",
+        LOG("[pc-vr] headset pace: a game frame every %u display frames of %.3f ms, starting %+.3f ms from one's start\n",
             display_frames, clock.period_ns / 1e6, config->diagnostics.headset_pace_offset_ns / 1e6);
     }
     previous_start_ns = start_xr_ns;

@@ -38,6 +38,7 @@ static struct {
     uint32_t width, height;
     XrOwnedEyePair pending[EYE_QUEUE], current;  // pending: oldest first, pending_count of them
     uint64_t pending_epoch[EYE_QUEUE], current_epoch, current_taken_ns;
+    uint64_t pending_offered_ns[EYE_QUEUE], current_offered_ns;  // when each pair was offered (the timing windows' spare)
     unsigned pending_count;
     bool current_valid, producer_complete, copy_pending;
     // The latest copied pair, re-submitted every display frame with the poses it was rendered with until a newer pair,
@@ -186,6 +187,7 @@ bool xr_runtime_offer_eye_pair(const XrOwnedEyePair *pair) {
     else {
         XrOwnedEyePair *queued = &eye_gpu.pending[eye_gpu.pending_count];
         *queued = *pair;
+        eye_gpu.pending_offered_ns[eye_gpu.pending_count] = xr_runtime_pose_clock_ns();
         eye_gpu.pending_epoch[eye_gpu.pending_count++] = epoch;
         accepted = true;
     }
@@ -363,11 +365,13 @@ static bool eye_take_pending(uint64_t *epoch) {
     if (eye_gpu.pending_count) {  // the oldest
         eye_gpu.current = eye_gpu.pending[0];
         *epoch = eye_gpu.pending_epoch[0];
+        eye_gpu.current_offered_ns = eye_gpu.pending_offered_ns[0];
         eye_gpu.current_taken_ns = xr_runtime_pose_clock_ns();
         eye_gpu.current_valid = true;
         const unsigned rest = --eye_gpu.pending_count;
         memmove(eye_gpu.pending, eye_gpu.pending + 1, rest * sizeof *eye_gpu.pending);
         memmove(eye_gpu.pending_epoch, eye_gpu.pending_epoch + 1, rest * sizeof *eye_gpu.pending_epoch);
+        memmove(eye_gpu.pending_offered_ns, eye_gpu.pending_offered_ns + 1, rest * sizeof *eye_gpu.pending_offered_ns);
         memset(&eye_gpu.pending[rest], 0, sizeof eye_gpu.pending[rest]);
     }
     pthread_mutex_unlock(&eye_mailbox_lock);
@@ -518,6 +522,12 @@ static void eye_copy_pair(bool may_render) {
     if (!eye_gpu.current_valid && !eye_take_pending(&eye_gpu.current_epoch)) return;
     const uint64_t epoch = eye_gpu.current_epoch;
     if (!eye_wait_producer(0)) return;  // (the display-rate owner asks, without waiting)
+    if (xr_perf.enabled) {
+        // The pair's spare time: how long before this display frame started it was offered (0 when offered after;
+        // over a display period when its producer had not finished at an earlier display frame).
+        const uint64_t frame_start_ns = atomic_load(&display_frame_start_ns);
+        xr_perf_add(&xr_perf.spare, frame_start_ns > eye_gpu.current_offered_ns ? frame_start_ns - eye_gpu.current_offered_ns : 0);
+    }
     XrCompositionLayerProjectionView views[2];
     XrCompositionLayerQuad quad = {.type = XR_TYPE_COMPOSITION_LAYER_QUAD};
     bool panel = false, hud = false, over = false;

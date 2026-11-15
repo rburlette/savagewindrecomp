@@ -13,9 +13,10 @@ static unsigned checks;
 #define MILLISECOND 1000000ull
 static const uint64_t period_90hz = 11111111, period_72hz = 13888889;
 
-static bool on_grid(const PcVrDisplayClock *clock, uint64_t offset_ns, uint64_t time_ns) {
-    const int64_t from_origin = (int64_t)time_ns - (int64_t)(clock->frame_start_ns + offset_ns % clock->period_ns);
-    return from_origin % (int64_t)clock->period_ns == 0;
+static bool on_grid(const PcVrDisplayClock *clock, int64_t offset_ns, uint64_t time_ns) {
+    const int64_t period = (int64_t)clock->period_ns;
+    const int64_t from_origin = (int64_t)time_ns - ((int64_t)clock->frame_start_ns + offset_ns % period);
+    return from_origin % period == 0;
 }
 
 static void display_frames_for_a_limit(void) {
@@ -42,7 +43,7 @@ typedef struct {
     uint64_t begun_ns;   // when the game really began it (after the wait, or at once when late)
 } PacedFrame;
 
-static PacedFrame next_frame(const PcVrDisplayClock *clock, uint64_t offset_ns, uint64_t game_period_ns,
+static PacedFrame next_frame(const PcVrDisplayClock *clock, int64_t offset_ns, uint64_t game_period_ns,
                              PacedFrame previous, uint64_t work_ns) {
     const uint64_t now_ns = previous.begun_ns + work_ns;
     PacedFrame frame;
@@ -52,9 +53,10 @@ static PacedFrame next_frame(const PcVrDisplayClock *clock, uint64_t offset_ns, 
 }
 
 static void a_fast_game_keeps_the_grid(void) {
-    const uint64_t offsets[] = {0, 2500000, 9 * MILLISECOND, 13 * MILLISECOND};  // (the last wraps past one period)
-    for (unsigned offset_index = 0; offset_index < 4; ++offset_index) {
-        const uint64_t offset_ns = offsets[offset_index];
+    // (13 ms and -14 ms wrap past one period; the negative ones start before the display frame)
+    const int64_t offsets[] = {0, 2500000, 9000000, 13000000, -1500000, -14000000};
+    for (unsigned offset_index = 0; offset_index < sizeof offsets / sizeof offsets[0]; ++offset_index) {
+        const int64_t offset_ns = offsets[offset_index];
         const PcVrDisplayClock clock = {.frame_start_ns = 5000 * MILLISECOND, .period_ns = period_90hz};
         const uint64_t game_period_ns = 2 * period_90hz;
         // The first frame, with no previous one: a grid point no more than half a period ahead, or the one now is in.

@@ -9,8 +9,10 @@
 //
 // What this does instead:
 //  - the game's frame starts on the headset's grid: a whole number of display frames after the last one, and a set
-//    time (the offset) after a display frame's start, which is when the XR owner takes the finished images and
-//    publishes the head pose the next frame reads;
+//    time (the offset) from a display frame's start, which is when the XR owner takes the finished images and
+//    publishes the head pose the next frame reads. An earlier start (a negative offset) gives the frame's image more
+//    room before the display frame that should take it, as long as the frame still reads its pose after that
+//    display frame's publication;
 //  - the wait comes after the present has been handed on (objects.c nvnQueuePresentTexture), so a finished frame's
 //    image goes to the headset at once and the spare time is spent before the next frame reads its pose;
 //  - a late frame never waits: it starts at once, and the grid carries on from the display frame it fell in.
@@ -54,13 +56,13 @@ static inline int64_t pc_vr_pace_grid_floor(int64_t time, int64_t origin, int64_
 }
 
 // When the game's next frame starts, in the display clock's time. Grid points lie offset_ns after each display frame's
-// start. The answer is the grid point nearest to game_period_ns after the previous frame's start (previous_start_ns;
-// 0: no previous frame, the nearest to now_ns) when that is still ahead; otherwise the grid point now_ns falls in,
-// which is at or before now_ns: a late frame does not wait. Needs clock->period_ns above 0.
-static inline uint64_t pc_vr_pace_frame_start(const PcVrDisplayClock *clock, uint64_t offset_ns,
+// start (before it when negative). The answer is the grid point nearest to game_period_ns after the previous frame's
+// start (previous_start_ns; 0: no previous frame, the nearest to now_ns) when that is still ahead; otherwise the grid
+// point now_ns falls in, which is at or before now_ns: a late frame does not wait. Needs clock->period_ns above 0.
+static inline uint64_t pc_vr_pace_frame_start(const PcVrDisplayClock *clock, int64_t offset_ns,
                                               uint64_t game_period_ns, uint64_t previous_start_ns, uint64_t now_ns) {
     const int64_t period = (int64_t)clock->period_ns;
-    const int64_t origin = (int64_t)(clock->frame_start_ns + offset_ns % clock->period_ns);
+    const int64_t origin = (int64_t)clock->frame_start_ns + offset_ns % period;
     const int64_t wanted = previous_start_ns ? (int64_t)(previous_start_ns + game_period_ns) : (int64_t)now_ns;
     int64_t start = pc_vr_pace_grid_floor(wanted + period / 2, origin, period);  // (the nearest grid point)
     if (start < (int64_t)now_ns) start = pc_vr_pace_grid_floor((int64_t)now_ns, origin, period);

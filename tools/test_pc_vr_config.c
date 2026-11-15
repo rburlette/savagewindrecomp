@@ -250,10 +250,10 @@ static void test_diagnostics(void) {
     CHECK(!with_setting("SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "yes").diagnostics.quick_menu_shots);
     CHECK(with_setting("SAVAGEWIND_PC_VR_NO_HEADSET_MASK", "1").diagnostics.no_headset_mask);
     CHECK(!with_setting("SAVAGEWIND_PC_VR_NO_HEADSET_MASK", "yes").diagnostics.no_headset_mask);
-    // The headset pace: off unless 1 to 6. With it, its offset: 0 unless a decimal above 0 and up to 50; without it
+    // The headset pace: off unless 1 to 6. With it, its offset: -1.5 ms unless a decimal from -50 to 50; without it
     // the offset is nothing.
     config = with_setting("SAVAGEWIND_PC_VR_HEADSET_PACE", "2");
-    CHECK(config.diagnostics.headset_pace == 2 && config.diagnostics.headset_pace_offset_ns == 0);
+    CHECK(config.diagnostics.headset_pace == 2 && config.diagnostics.headset_pace_offset_ns == -1500000);
     CHECK(with_setting("SAVAGEWIND_PC_VR_HEADSET_PACE", "6").diagnostics.headset_pace == 6);
     const char *bad_pace[] = {"0", "7", "-2", "abc", ""};
     for (unsigned i = 0; i < sizeof bad_pace / sizeof bad_pace[0]; ++i) {
@@ -261,8 +261,9 @@ static void test_diagnostics(void) {
         CHECK(!config.diagnostics.headset_pace && !config.diagnostics.headset_pace_offset_ns);
     }
     CHECK(!with_setting("SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS", "4.25").diagnostics.headset_pace_offset_ns);
-    const struct { const char *text; uint64_t offset_ns; } pace_offsets[] = {
-        {"4.25", 4250000}, {"2.5", 2500000}, {"50", 50000000}, {"0", 0}, {"50.5", 0}, {"-1", 0}, {"abc", 0}, {"", 0}};
+    const struct { const char *text; int64_t offset_ns; } pace_offsets[] = {
+        {"4.25", 4250000}, {"2.5", 2500000}, {"50", 50000000}, {"-3", -3000000}, {"-50", -50000000}, {"0", 0},
+        {"50.5", -1500000}, {"-50.5", -1500000}, {"abc", -1500000}, {"", -1500000}};
     for (unsigned i = 0; i < sizeof pace_offsets / sizeof pace_offsets[0]; ++i) {
         test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_HEADSET_PACE", "2",
             "SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS", pace_offsets[i].text, NULL}, &config);
@@ -270,11 +271,11 @@ static void test_diagnostics(void) {
     }
     char pace_line[1024];
     pc_vr_config_describe(&config, pace_line, sizeof pace_line);
-    CHECK(strstr(pace_line, " HEADSET_PACE=2 HEADSET_PACE_OFFSET_MS=0"));
+    CHECK(strstr(pace_line, " HEADSET_PACE=2 HEADSET_PACE_OFFSET_MS=-1.5"));
     test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_HEADSET_PACE", "3",
-        "SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS", "1.5", NULL}, &config);
+        "SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS", "2.25", NULL}, &config);
     pc_vr_config_describe(&config, pace_line, sizeof pace_line);
-    CHECK(strstr(pace_line, " HEADSET_PACE=3 HEADSET_PACE_OFFSET_MS=1.5"));
+    CHECK(strstr(pace_line, " HEADSET_PACE=3 HEADSET_PACE_OFFSET_MS=2.25"));
     config = with_setting("SAVAGEWIND_PC_VR_BENCH_HEAD", "3000");
     CHECK(config.diagnostics.bench_head_requested && config.diagnostics.bench_head_start == 3000);
     const char *bad_bench[] = {"0", "100001", "-5", "abc", ""};

@@ -33,13 +33,21 @@ static const char *const setting_names[PC_VR_SETTING_COUNT] = {
 
 static bool exactly_one(const char *value) { return value && !strcmp(value, "1"); }
 
-// A decimal with nothing else around it, finite and above 0 (the units per metre).
-static bool explicit_positive_number(const char *text, double *out) {
+// A decimal with nothing else around it, finite.
+static bool explicit_number(const char *text, double *out) {
     if (!text || !*text || strspn(text, "0123456789.+-eE") != strlen(text)) return false;
     errno = 0;
     char *end = NULL;
     const double value = strtod(text, &end);
-    if (errno == ERANGE || end == text || *end || !isfinite(value) || !(value > 0)) return false;
+    if (errno == ERANGE || end == text || *end || !isfinite(value)) return false;
+    *out = value;
+    return true;
+}
+
+// ... and above 0 (the units per metre).
+static bool explicit_positive_number(const char *text, double *out) {
+    double value;
+    if (!explicit_number(text, &value) || !(value > 0)) return false;
     *out = value;
     return true;
 }
@@ -123,9 +131,9 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
     if (out->diagnostics.headset_pace) {  // (the offset belongs to the pace: nothing without it)
         value = lookup(context, "SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS");
         double pace_offset_ms = PC_VR_HEADSET_PACE_OFFSET_MS_DEFAULT;
-        if (value && !(explicit_positive_number(value, &pace_offset_ms) && pace_offset_ms <= 50.0))
+        if (value && !(explicit_number(value, &pace_offset_ms) && pace_offset_ms >= -50.0 && pace_offset_ms <= 50.0))
             pace_offset_ms = PC_VR_HEADSET_PACE_OFFSET_MS_DEFAULT;
-        out->diagnostics.headset_pace_offset_ns = (uint64_t)(pace_offset_ms * 1e6 + 0.5);
+        out->diagnostics.headset_pace_offset_ns = llround(pace_offset_ms * 1e6);
     }
     value = lookup(context, "SAVAGEWIND_PC_VR_BENCH_HEAD");
     out->diagnostics.bench_head_requested = value != NULL;

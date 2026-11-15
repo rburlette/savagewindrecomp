@@ -332,6 +332,74 @@ static XrQuaternionf yaw_pitch_roll(double yaw, double pitch, double roll) {
                            (float)(yp[2] * cr + yp[3] * sr), (float)(yp[3] * cr - yp[2] * sr)};
 }
 
+// The published pose as a reader finds it while the frame's xrEndFrame runs (the mock's test_end_inspect).
+static struct {
+    unsigned reads;
+    XrPoseReadResult result;
+    uint64_t frame_id, game_present_id;
+} pose_during_end;
+static void read_pose_during_end(const XrFrameEndInfo *info) {
+    (void)info;
+    XrPoseSnapshot pose;
+    pose_during_end.result = xr_runtime_get_pose(&pose);
+    pose_during_end.frame_id = pose.frame_id;
+    pose_during_end.game_present_id = pose.game_present_id;
+    ++pose_during_end.reads;
+}
+static void prepare_reading_during_end(void) {
+    prepare();
+    memset(&pose_during_end, 0, sizeof pose_during_end);
+    test_end_inspect = read_pose_during_end;
+}
+
+// A frame's sample is published once it is located, ahead of the frame's delivery work: it can be read while
+// xrEndFrame is still running. What comes in during the frame is polled after it and invalidates that sample.
+static void test_publication_before_delivery(void) {
+    XrPoseSnapshot pose;
+    prepare_reading_during_end();
+    tracking_frame(7);
+    CHECK(pose_during_end.reads == 1 && pose_during_end.result == XR_POSE_VALID);
+    CHECK(pose_during_end.frame_id == 1 && pose_during_end.game_present_id == 7);
+    tracking_frame(8);
+    CHECK(pose_during_end.reads == 2 && pose_during_end.result == XR_POSE_VALID);
+    CHECK(pose_during_end.frame_id == 2 && pose_during_end.game_present_id == 8);
+    // A display frame without a game present publishes nothing: present 8's sample stays ...
+    tracking_frame(0);
+    CHECK(pose_during_end.reads == 3 && pose_during_end.frame_id == 2 && pose_during_end.game_present_id == 8);
+    // ... unless tracking is published every display frame.
+    xr.display_rate_tracking = true;
+    tracking_frame(0);
+    CHECK(pose_during_end.reads == 4 && pose_during_end.result == XR_POSE_VALID);
+    CHECK(pose_during_end.frame_id == 4 && pose_during_end.game_present_id == 0);
+    // A focus change that came in during the frame: polled after xrEndFrame, it invalidates the frame's sample.
+    prepare_reading_during_end();
+    atomic_store(&mock.event, 1);
+    tracking_frame(1);
+    CHECK(pose_during_end.reads == 1 && pose_during_end.result == XR_POSE_VALID);
+    CHECK(xr_runtime_get_pose(&pose) == XR_POSE_UNAVAILABLE && xr.state == XR_SESSION_STATE_VISIBLE);
+    // So does a pending redefinition of LOCAL.
+    prepare_reading_during_end();
+    atomic_store(&mock.event, 2);
+    tracking_frame(1);
+    CHECK(pose_during_end.result == XR_POSE_VALID);
+    CHECK(xr_runtime_get_pose(&pose) == XR_POSE_UNAVAILABLE && xr.pending_reference_change != 0);
+    // A frame whose xrEndFrame fails leaves no valid sample.
+    prepare_reading_during_end();
+    mock.end_result = XR_ERROR_SESSION_LOST;
+    tracking_frame(1);
+    CHECK(pose_during_end.result == XR_POSE_VALID && xr.terminal);
+    CHECK(xr_runtime_get_pose(&pose) == XR_POSE_UNAVAILABLE);
+    // Tracking lost in this frame: its sample is already unavailable while the frame is ended, and names the frame.
+    prepare_reading_during_end();
+    mock.flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    tracking_frame(1);
+    CHECK(pose_during_end.reads == 1 && pose_during_end.result == XR_POSE_UNAVAILABLE && pose_during_end.frame_id == 1);
+    // The frame that recovers tracking is counted by what it lacked, not as a reference change of its own making.
+    prepare();
+    tracking_frame(1);
+    CHECK(xr.outcomes[FRAME_TRACKING] == 1 && !xr.outcomes[FRAME_REFERENCE]);
+}
+
 static void test_display_only_recovery(void) {
     prepare();
     xr.display_rate_tracking = true;
@@ -738,6 +806,7 @@ int main(int argc, char **argv) {
     CHECK(xr_perf_p95(&metric) == 512);
     xr_perf.enabled = true;
     test_frames();
+    test_publication_before_delivery();
     test_display_only_recovery();
     test_calibration();
     test_bench_head();

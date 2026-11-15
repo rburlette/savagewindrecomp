@@ -319,6 +319,7 @@ static struct {
     uint64_t shown[4];  // images that were shown for 1, 2, 3, 4 or more display frames in a row (the cadence)
     uint64_t skipped;   // finished pairs returned unshown because a newer one had finished (D081)
     XrPerfMetric wait, producer, swapchain, fence, end, completion, new_age, age;
+    XrPerfMetric spare;  // how long before its display frame started each pair was offered (xr_images_internal.h)
 } xr_perf;
 static XrTime xr_perf_last_predicted;  // (kept across reports)
 static unsigned xr_perf_showing;       // display frames the current image has been shown (kept across reports)
@@ -339,7 +340,19 @@ static void xr_perf_report(void) {
 } while (0)
     XR_PERF_REPORT(wait); XR_PERF_REPORT(producer); XR_PERF_REPORT(swapchain); XR_PERF_REPORT(fence);
     XR_PERF_REPORT(end); XR_PERF_REPORT(completion); XR_PERF_REPORT(new_age); XR_PERF_REPORT(age);
+    XR_PERF_REPORT(spare);
 #undef XR_PERF_REPORT
+    // The spare time's spread: pairs by the milliseconds between their offer and their display frame's start, rounded
+    // up (0: offered after it started; the last count: 17 ms or more).
+    char spare_spread[160];
+    int spread_length = 0;
+    uint64_t spare_beyond = 0;
+    for (unsigned bucket = 0; bucket < 513; ++bucket) {
+        if (bucket > 16) spare_beyond += xr_perf.spare.histogram_ms[bucket];
+        else spread_length += snprintf(spare_spread + spread_length, sizeof spare_spread - (size_t)spread_length,
+                                       " %u", xr_perf.spare.histogram_ms[bucket]);
+    }
+    XRLOG("perf spare-spread-ms%s %llu\n", spare_spread, (unsigned long long)spare_beyond);
     memset(&xr_perf, 0, sizeof xr_perf);
     xr_perf.enabled = true;
 }
@@ -638,11 +651,12 @@ static void frame_failed(void) {
 //  1. begin the frame (applying a pending LOCAL redefinition: calibrate again);
 //  2. locate the head and both eyes at the predicted display time, and capture the D053 calibration on the first
 //     fully tracked frame in this LOCAL;
-//  3. build the layers from the latest admitted eye pair (eye_submit_layers: every display frame re-submits it) and
+//  3. publish the tracking sample, ahead of the delivery work below. Only a frame carrying a game present normally
+//     publishes one; the display-rate experiment refreshes it every display frame. The camera code keeps one complete
+//     sample for both eyes of each game frame;
+//  4. build the layers from the latest admitted eye pair (eye_submit_layers: every display frame re-submits it) and
 //     end the frame, counting its outcome;
-//  4. publish the tracking sample. Only a frame carrying a game present normally publishes one; the display-rate
-//     experiment refreshes it every display frame. The camera code keeps one complete sample for both eyes of each
-//     game frame.
+//  5. poll the session's events: a change invalidates the sample just published.
 static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
     const uint64_t epoch = atomic_load(&reset_epoch);
     const XrFrameState frame = *waited;
@@ -709,7 +723,77 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
                 2 * atan2(xr.calibration.heading_xyzw[1], xr.calibration.heading_xyzw[3]) * (180.0 / 3.14159265358979323846),
                 xr.calibration.origin_xyz[0], xr.calibration.origin_xyz[1], xr.calibration.origin_xyz[2]);
     }
-    // 3. Submit the latest eye pair's layers (none when there is no pair in this game boot and LOCAL definition, or the
+    // 3. Publish the tracking sample, ahead of this frame's delivery work (the copy's fence, xrEndFrame, the queue
+    // completion wait: 1 to 2 ms on Link), so the game can read it as soon as it exists. The session's state here is
+    // what the last event poll left (the one before xrWaitFrame). The poll after the frame is ended (step 5) still
+    // covers a change that came in meanwhile: every such event invalidates the publication, this frame's included.
+    const bool publishes = game_present_id || xr.display_rate_tracking;
+    XrPoseSnapshot snapshot = {0};
+    // The generation this frame expects to end in: the one it was located in, and one more when its own publication
+    // marks tracking recovered or lost below. Another one by then is a change from outside (step 4's outcome).
+    uint64_t frame_generation = located_generation;
+    if (publishes) {
+        valid = valid && xr.running && !xr.terminal &&
+            !atomic_load(&stop_requested) && epoch == atomic_load(&reset_epoch) &&
+            !xr.pending_reference_change && located_generation == atomic_load(&reference_generation);
+        if (valid != xr.last_good) {
+            invalidate_pose(valid ? "tracking recovered; calibration kept" : "tracking unavailable", true);
+            ++frame_generation;
+            xr.last_good = valid;
+            if (valid && native_views_valid)
+                XRLOG("eye views fov_lrud=%.4f,%.4f,%.4f,%.4f/%.4f,%.4f,%.4f,%.4f separation=%.5f\n",
+                    views[0].fov.angleLeft, views[0].fov.angleRight, views[0].fov.angleUp, views[0].fov.angleDown,
+                    views[1].fov.angleLeft, views[1].fov.angleRight, views[1].fov.angleUp, views[1].fov.angleDown,
+                    sqrt(pow(views[1].pose.position.x - views[0].pose.position.x, 2) +
+                         pow(views[1].pose.position.y - views[0].pose.position.y, 2) +
+                         pow(views[1].pose.position.z - views[0].pose.position.z, 2)));
+        }
+        snapshot = (XrPoseSnapshot){.frame_id = xr.frame_id, .game_present_id = game_present_id,
+            .generation = atomic_load(&reference_generation), .published_monotonic_ns = located_monotonic_ns,
+            .predicted_display_time_ns = frame.predictedDisplayTime,
+            .orientation_xyzw = {head.pose.orientation.x, head.pose.orientation.y, head.pose.orientation.z, head.pose.orientation.w},
+            .active = valid, .focused = xr.state == XR_SESSION_STATE_FOCUSED,
+            .orientation_valid = valid, .orientation_tracked = valid, .views_valid = valid,
+            .native_views_valid = valid && native_views_valid, .calibration = xr.calibration, .local_definition = local};
+        // The runtime owns velocity estimation. Never inspect members without the
+        // corresponding flag, and never publish a rate from a discarded pose/frame.
+        if (valid && (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
+            snapshot.angular_velocity_xyz[0] = velocity.angularVelocity.x;
+            snapshot.angular_velocity_xyz[1] = velocity.angularVelocity.y;
+            snapshot.angular_velocity_xyz[2] = velocity.angularVelocity.z;
+            snapshot.angular_velocity_valid = true;
+        }
+        for (unsigned i = 0; i < 2; ++i) {
+            snapshot.eyes[i] = (XrEyeSnapshot){
+                .orientation_xyzw = {views[i].pose.orientation.x, views[i].pose.orientation.y,
+                                     views[i].pose.orientation.z, views[i].pose.orientation.w},
+                .position_xyz = {views[i].pose.position.x, views[i].pose.position.y, views[i].pose.position.z},
+                .fov_left_right_up_down = {views[i].fov.angleLeft, views[i].fov.angleRight,
+                                           views[i].fov.angleUp, views[i].fov.angleDown}};
+        }
+        if (game_present_id) xr.bench_last_present = game_present_id;
+        if (xr.bench_head_start && valid && xr.bench_last_present >= xr.bench_head_start) {
+            // Benchmark only: turn the sample before anything reads it. Calibration above used the real pose; the
+            // eyes rendered with this sample are submitted with it, and the compositor reprojects to the real head.
+            const uint64_t step = xr.bench_last_present - xr.bench_head_start;
+            double yaw, pitch;
+            if (xr_bench_head_turn(step, &yaw, &pitch)) {
+                // The headset's rate is not the script's: no consumer may extrapolate the turned pose with it.
+                snapshot.angular_velocity_valid = false;
+                memset(snapshot.angular_velocity_xyz, 0, sizeof snapshot.angular_velocity_xyz);
+                if (!xr_bench_head_apply(yaw, pitch, snapshot.orientation_xyzw, snapshot.eyes)) {
+                    snapshot.active = snapshot.orientation_valid = snapshot.orientation_tracked = false;
+                    snapshot.views_valid = snapshot.native_views_valid = false;
+                } else if (step == 0 || step == 600 || step == 900 || step == XR_BENCH_HEAD_STEPS - 1)
+                    XRLOG("benchmark head step=%llu present=%llu yaw-deg=%.1f pitch-deg=%.1f\n", (unsigned long long)step,
+                          (unsigned long long)xr.bench_last_present, yaw * 57.29577951308232, pitch * 57.29577951308232);
+            }
+        }
+        pthread_mutex_lock(&pose_lock);
+        if (epoch == atomic_load(&reset_epoch) && !atomic_load(&stop_requested)) published = snapshot;
+        pthread_mutex_unlock(&pose_lock);
+    }
+    // 4. Submit the latest eye pair's layers (none when there is no pair in this game boot and LOCAL definition, or the
     // session is not visible or should not render; held through lost tracking, D101), then end the frame. The
     // submission is dropped if a reset or a stop came in meanwhile (LOCAL is redefined only on this thread).
     XrCompositionLayerProjection projection = {.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -736,7 +820,7 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
         else if (epoch != atomic_load(&reset_epoch) || atomic_load(&stop_requested)) outcome = FRAME_CANCELLED;
         else if (!frame.shouldRender) outcome = FRAME_NO_RENDER;
         else if (!visible) outcome = FRAME_NOT_VISIBLE;
-        else if (xr.pending_reference_change || located_generation != atomic_load(&reference_generation)) outcome = FRAME_REFERENCE;
+        else if (xr.pending_reference_change || frame_generation != atomic_load(&reference_generation)) outcome = FRAME_REFERENCE;
         else if (!native_views_valid) outcome = FRAME_TRACKING;
         else outcome = eye_gpu.zero_outcome;
     }
@@ -788,13 +872,9 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
     // What the submitted layers show (scripts/start-pc-vr.ps1 counts the frame lines by it).
     const char *content = !image_submitted ? "none" : eye_gpu.layer_panel ? "panel" :
         eye_gpu.layer_over ? "over-scene" : eye_gpu.layer_hud ? "hud" : "scene";
-    // 4. Publish the tracking sample. Poll focus and loss changes first, so a just-lost session cannot leave a valid
-    // sample until the next game present.
+    // 5. Poll focus and loss changes: an event that came in during this frame invalidates the sample published in
+    // step 3, so a session just lost does not leave it valid until the next display frame.
     poll_events();
-    valid = valid && xr.running && !xr.terminal &&
-        (xr.state == XR_SESSION_STATE_VISIBLE || xr.state == XR_SESSION_STATE_FOCUSED) &&
-        !atomic_load(&stop_requested) && epoch == atomic_load(&reset_epoch) &&
-        !xr.pending_reference_change && located_generation == atomic_load(&reference_generation);
     if (!game_present_id) {
         if (xr.frame_id <= 5 || xr.frame_id % 120 == 0)
             XRLOG("display frame=%llu predicted=%lld layers=%d content=%s game-eye-submissions=%llu copied-pairs=%llu\n",
@@ -802,61 +882,6 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
                 (unsigned long long)eye_gpu.submitted, (unsigned long long)eye_gpu.copied);
         if (!xr.display_rate_tracking) return;
     }
-    if (valid != xr.last_good) {
-        invalidate_pose(valid ? "tracking recovered; calibration kept" : "tracking unavailable", true);
-        xr.last_good = valid;
-        if (valid && native_views_valid)
-            XRLOG("eye views fov_lrud=%.4f,%.4f,%.4f,%.4f/%.4f,%.4f,%.4f,%.4f separation=%.5f\n",
-                views[0].fov.angleLeft, views[0].fov.angleRight, views[0].fov.angleUp, views[0].fov.angleDown,
-                views[1].fov.angleLeft, views[1].fov.angleRight, views[1].fov.angleUp, views[1].fov.angleDown,
-                sqrt(pow(views[1].pose.position.x - views[0].pose.position.x, 2) +
-                     pow(views[1].pose.position.y - views[0].pose.position.y, 2) +
-                     pow(views[1].pose.position.z - views[0].pose.position.z, 2)));
-    }
-    XrPoseSnapshot snapshot = {.frame_id = xr.frame_id, .game_present_id = game_present_id,
-        .generation = atomic_load(&reference_generation), .published_monotonic_ns = located_monotonic_ns,
-        .predicted_display_time_ns = frame.predictedDisplayTime,
-        .orientation_xyzw = {head.pose.orientation.x, head.pose.orientation.y, head.pose.orientation.z, head.pose.orientation.w},
-        .active = valid, .focused = xr.state == XR_SESSION_STATE_FOCUSED,
-        .orientation_valid = valid, .orientation_tracked = valid, .views_valid = valid,
-        .native_views_valid = valid && native_views_valid, .calibration = xr.calibration, .local_definition = local};
-    // The runtime owns velocity estimation. Never inspect members without the
-    // corresponding flag, and never publish a rate from a discarded pose/frame.
-    if (valid && (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
-        snapshot.angular_velocity_xyz[0] = velocity.angularVelocity.x;
-        snapshot.angular_velocity_xyz[1] = velocity.angularVelocity.y;
-        snapshot.angular_velocity_xyz[2] = velocity.angularVelocity.z;
-        snapshot.angular_velocity_valid = true;
-    }
-    for (unsigned i = 0; i < 2; ++i) {
-        snapshot.eyes[i] = (XrEyeSnapshot){
-            .orientation_xyzw = {views[i].pose.orientation.x, views[i].pose.orientation.y,
-                                 views[i].pose.orientation.z, views[i].pose.orientation.w},
-            .position_xyz = {views[i].pose.position.x, views[i].pose.position.y, views[i].pose.position.z},
-            .fov_left_right_up_down = {views[i].fov.angleLeft, views[i].fov.angleRight,
-                                       views[i].fov.angleUp, views[i].fov.angleDown}};
-    }
-    if (game_present_id) xr.bench_last_present = game_present_id;
-    if (xr.bench_head_start && valid && xr.bench_last_present >= xr.bench_head_start) {
-        // Benchmark only: turn the sample before anything reads it. Calibration above used the real pose; the
-        // eyes rendered with this sample are submitted with it, and the compositor reprojects to the real head.
-        const uint64_t step = xr.bench_last_present - xr.bench_head_start;
-        double yaw, pitch;
-        if (xr_bench_head_turn(step, &yaw, &pitch)) {
-            // The headset's rate is not the script's: no consumer may extrapolate the turned pose with it.
-            snapshot.angular_velocity_valid = false;
-            memset(snapshot.angular_velocity_xyz, 0, sizeof snapshot.angular_velocity_xyz);
-            if (!xr_bench_head_apply(yaw, pitch, snapshot.orientation_xyzw, snapshot.eyes)) {
-                snapshot.active = snapshot.orientation_valid = snapshot.orientation_tracked = false;
-                snapshot.views_valid = snapshot.native_views_valid = false;
-            } else if (step == 0 || step == 600 || step == 900 || step == XR_BENCH_HEAD_STEPS - 1)
-                XRLOG("benchmark head step=%llu present=%llu yaw-deg=%.1f pitch-deg=%.1f\n", (unsigned long long)step,
-                      (unsigned long long)xr.bench_last_present, yaw * 57.29577951308232, pitch * 57.29577951308232);
-        }
-    }
-    pthread_mutex_lock(&pose_lock);
-    if (epoch == atomic_load(&reset_epoch) && !atomic_load(&stop_requested)) published = snapshot;
-    pthread_mutex_unlock(&pose_lock);
     if (xr.frame_id <= 5 || xr.frame_id % 120 == 0)
         XRLOG("tracking frame=%llu game-present=%llu predicted=%lld generation=%llu valid=%d angular-velocity-valid=%d zero-layers=%d content=%s game-eye-submissions=%llu copied-pairs=%llu\n",
             (unsigned long long)xr.frame_id, (unsigned long long)game_present_id, (long long)frame.predictedDisplayTime,
