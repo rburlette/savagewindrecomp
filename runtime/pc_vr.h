@@ -15,6 +15,11 @@ extern "C" {
 // Strict, process-latched opt-in shared by launcher, game hooks and renderer (pc_vr_config()->enabled).
 bool pc_vr_enabled(void);
 
+// The controller keeps working while the game's desktop window lacks the focus (runtime/hle/input.c): in PC VR the
+// headset is the display, and a desktop window brought to the front would otherwise silence the controller mid-play.
+// The keyboard and mouse still follow the window's focus.
+bool pc_vr_controller_without_focus(void);
+
 // The exact raster size for both eye rendering and submission, PC VR only: SAVAGEWIND_PC_VR_EYE_SIZE=WxH (each axis
 // 128..4096, process-latched), else the eye scale's pixels in the OpenXR runtime's view shape once discovery has run
 // (pc_vr_eye_size.h). False: the eye targets keep Labo's shape (EyeScale alone, or none). Poses/FOV remain runtime-derived.

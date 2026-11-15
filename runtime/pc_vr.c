@@ -31,6 +31,8 @@
 
 bool pc_vr_enabled(void) { return pc_vr_config()->enabled; }
 
+bool pc_vr_controller_without_focus(void) { return pc_vr_enabled(); }
+
 // EYE_SIZE when given; else, in PC VR with an eye scale, that scale's pixels in the OpenXR runtime's view shape
 // (pc_vr_eye_size_for_view), known from discovery on, which comes before the Vulkan device and any render target.
 bool pc_vr_eye_size(unsigned *width, unsigned *height) {
