@@ -33,6 +33,7 @@ typedef struct {
     uint64_t frame_id;         // the XR owner's display frame that located it
     uint64_t game_present_id;  // the game present it was published for (0: a display-rate refresh)
     uint64_t generation;       // changes on a recenter, a session state change, tracking loss or recovery, a reset
+    uint64_t local_definition; // the definition of LOCAL the poses are in: a new one per session and applied recenter
     // When it was located, on xr_runtime_pose_clock_ns()'s clock, whose epoch differs from plat_now_ns(): never
     // compare those two clocks directly.
     uint64_t published_monotonic_ns;
@@ -88,7 +89,6 @@ bool xr_bench_head_apply(double yaw, double pitch, float head_xyzw[4], XrEyeSnap
 typedef enum {
     XR_POSE_UNAVAILABLE = 0,
     XR_POSE_VALID = 1,
-    XR_POSE_BUSY = 2
 } XrPoseReadResult;
 
 // Original guest present only, never desktop re-presentation. Nonblocking,
@@ -109,10 +109,12 @@ typedef struct {
     const uint32_t *indices;
 } XrMaskArea;
 const XrMaskArea *xr_runtime_mask_area(unsigned eye, bool hidden);
-// No XR calls and no blocking lock; BUSY must not reset consumer calibration.
-// VALID requires visible, tracked orientation and a publication age <=250ms.
+// The latest published sample, copied under a lock the publisher holds only for a copy; no XR call. VALID: visible,
+// tracked orientation, whatever its age (D101: a stalled publisher's last sample is still the head's last known
+// pose). UNAVAILABLE still fills *out with the publication, invalidated: its LOCAL definition is the current one from
+// the moment it changes (zeros before the first publication).
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out);
-// Same monotonic clock/epoch used for snapshot publication and freshness.
+// Same monotonic clock/epoch used for snapshot publication.
 // Returns zero in an OpenXR-disabled build. No XR call or lock is performed.
 uint64_t xr_runtime_pose_clock_ns(void);
 // Called after stopping guest threads; drops old notifications and calibration.

@@ -1112,15 +1112,23 @@ def _marker_wheel_flag(site_number, follows):
 # draw covers only Labo's lens-shaped polygon, and Labo's depth mask covers the area outside it. The runtime notes the
 # call while it runs, so the draw recorded meanwhile carries the lens flag (runtime/hle/pc_vr_render_trace.h
 # PC_VR_LAYER_DRAW_LENS, or PC_VR_LAYER_DRAW_LENS_HIDDEN for the depth mask), and the renderer draws the headset's
-# visible or hidden area there instead (runtime/nvn/vulkan/vr_lens_mask.h).
-def _lens_draw(hidden, what):
+# visible or hidden area there instead (runtime/nvn/vulkan/vr_lens_mask.h). flag_register: the register that still
+# holds the mask flag at the bl (the screen-quad draw's site chooses the polygon or the engine's shared full-screen
+# triangle by it): the call is tagged only when the flag is set, so the renderer never takes the full-screen triangle
+# for the lens polygon (it then replaced every later full-screen triangle's geometry: the pause menu's backdrop, whose
+# shrink derives its texture coordinates from the positions, came out a quarter-size picture smeared to the edges).
+def _lens_draw(hidden, what, flag_register=None):
     def patch(gen, address):
         word = _word(gen, address)
         assert word >> 26 == 0x25, hex(word)  # bl
         target = address + sext(word & 0x3ffffff, 26) * 4
+        if flag_register is not None:  # (ldrb w<flag>, [x8, x9]: the flag's load opens the site; nothing between writes it)
+            assert _word(gen, address - 24) & ~0x1f == 0x38696900 and _word(gen, address - 24) & 0x1f == flag_register
+        tagged = f'(uint32_t)c->x[{flag_register}] != 0' if flag_register is not None else '1'
         return (f'{{ extern void f_{target:x}(Cpu *); extern uint32_t rt_lens_draw_begin(uint32_t); '
-                f'extern void rt_layer_draw_end(uint32_t); uint32_t prev = rt_lens_draw_begin({hidden}); '
-                f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); rt_layer_draw_end(prev); }}'
+                f'extern void rt_layer_draw_end(uint32_t); const int tagged = {tagged}; '
+                f'const uint32_t prev = tagged ? rt_lens_draw_begin({hidden}) : 0; '
+                f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); if (tagged) rt_layer_draw_end(prev); }}'
                 f'  /* {address:#x}: bl ({what}) */')
     return patch
 
@@ -1149,6 +1157,19 @@ def _rune_test(gen, address):
     return (f'{{ extern void f_{target:x}(Cpu *); extern void rt_rune_test(uint64_t, uint64_t); '
             f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); rt_rune_test(LD64(c->x[21] + 0x10), c->x[29] - 0x18); }}'
             f'  /* {address:#x}: bl (rune target test: the Labo adjustment of its screen position) */')
+
+
+# ... and the test's draw (1.9.0 0x700126fb68, called once per frame a rune is raised): the runtime notes it while the
+# call runs, so the draws recorded meanwhile carry the rune test's flag (runtime/hle/pc_vr_render_trace.h
+# PC_VR_LAYER_DRAW_RUNE_TEST) and the renderer knows them by the code that issues them, not by a window of frames.
+def _rune_test_draw(gen, address):
+    word = _word(gen, address)
+    assert word >> 26 == 0x25, hex(word)  # bl
+    target = address + sext(word & 0x3ffffff, 26) * 4
+    return (f'{{ extern void f_{target:x}(Cpu *); extern uint32_t rt_rune_test_draw_begin(void); '
+            f'extern void rt_layer_draw_end(uint32_t); const uint32_t prev = rt_rune_test_draw_begin(); '
+            f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); rt_layer_draw_end(prev); }}'
+            f'  /* {address:#x}: bl (the rune target test\'s draw) */')
 
 
 # PC VR's eye images (runtime/hle/pc_vr_render_trace.h): the game finishes every render layer with one call of its
@@ -1213,8 +1234,10 @@ PATCHES = {
     'pcvr_marker_wheel_follow': _marker_wheel_flag(10, True),
     'pcvr_marker_wheel_flat': _marker_wheel_flag(11, False),
     'pcvr_rune_test': _rune_test,
+    'pcvr_rune_test_draw': _rune_test_draw,
     'pcvr_ui_parallax': _ui_parallax,
-    'pcvr_lens_draw': _lens_draw(0, "the eye scenes' screen-quad draw: Labo's lens polygon"),
+    # (the site: ldrb w9 the mask flag, cmp w9, #0, csel the full-screen triangle or the polygon, then the bl)
+    'pcvr_lens_draw': _lens_draw(0, "the eye scenes' screen-quad draw: Labo's lens polygon", flag_register=9),
     'pcvr_lens_depth_draw': _lens_draw(1, "Labo's depth mask: the area outside its lens"),
     'pcvr_layer_final_draw': _layer_draw(1, "a render layer's finished image"),
     'pcvr_layer_placement_draw': _layer_draw(2, "a render layer's image placed in the final image"),

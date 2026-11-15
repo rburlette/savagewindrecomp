@@ -459,6 +459,10 @@ SITES = [
          '910603e0 94000000/fc000000', 0),
     Site('pcvr_display_copy_draw', 'code', '910563e2 94000000/fc000000 14000000/fc000000', 1),
     Site('pcvr_rune_test', 'code', '94000000/fc000000 2d7d07a0 2d0227ea 910023e3 aa1503e0 2a1f03e2 2a1f03e4 52800025', 0),
+    # ... and the call of the test's draw function (1.9.0 0x700126fb68: x0 the manager, x1 the draw context, x2 the
+    # view), from its only caller 0x700126aa78: the test's screen-quad draws are recorded during it
+    Site('pcvr_rune_test_draw', 'code', '94000000/fc000000 aa1303e0 aa1403e1 2a1f03e2 94000000/fc000000 14000000/fc000000',
+         0),
     # sead::LookAtCamera::doUpdateMatrix (tools/patches.py _lookat_update): its first load of the eye (+0x38); eye,
     # at (+0x44) and up (+0x50) make the view matrix written to x1 (free camera, runtime/hle/freecam.c)
     Site('lookat_update', 'code', '2d470801 2d480c00 1e232020 2d491404 1e240440 1e250400 54000000/ff00001f 1e233823', 0),
@@ -553,7 +557,7 @@ OPTIONAL_GROUPS = [
     ('pcvr_marker_store_1', 'pcvr_marker_store_2', 'pcvr_marker_store_3', 'pcvr_marker_store_4', 'pcvr_marker_store_5',
      'pcvr_marker_store_6', 'pcvr_marker_store_7', 'pcvr_marker_store_8', 'pcvr_marker_component_call',
      'pcvr_marker_wheel_follow', 'pcvr_marker_wheel_flat'),  # (1.9.0 only)
-    ('pcvr_rune_test',),
+    ('pcvr_rune_test', 'pcvr_rune_test_draw'),
     ('pcvr_ui_parallax',),
     ('pcvr_layer_final_draw', 'pcvr_layer_placement_draw', 'pcvr_display_lens_draw', 'pcvr_display_copy_draw'),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
@@ -811,6 +815,7 @@ KNOWN = {
         'pcvr_marker_wheel_follow': 0x7000e1b288,
         'pcvr_marker_wheel_flat': 0x7000e1aeb4,
         'pcvr_rune_test': 0x700126f798,
+        'pcvr_rune_test_draw': 0x700126acbc,
         'pcvr_ui_parallax': 0x7000eeee50,
         'pcvr_layer_final_draw': 0x700126c080,
         'pcvr_layer_placement_draw': 0x7000fec358,

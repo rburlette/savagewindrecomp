@@ -113,8 +113,8 @@ bool pc_vr_ui_centred(void);
 // game is about to write into it (two floats, 0 to 1).
 void rt_rune_test(uint64_t constants, uint64_t position);
 
-// Whether the constants block at this guest address is the rune target test's, set up in the last few presented
-// frames. The renderer asks for each fragment constant block it binds (exec.c vr_rune_aim_patch).
+// Whether the constants block at this guest address is one the rune target test's setup filled. The renderer asks for
+// the fragment constant blocks of the test's draws (exec.c vr_rune_aim_patch).
 bool pc_vr_rune_test_constants(uint64_t address);
 
 // What a UI pane is to PC VR, by the game's own names for the pane and its screen (runtime/pc_vr_hud.c

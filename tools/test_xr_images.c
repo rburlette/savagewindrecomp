@@ -333,8 +333,7 @@ static void test_display_only_owned_pose(void) {
     for (unsigned i = 0; i < 4; ++i) {
         ++mock.predicted;
         tracking_frame(0);
-        CHECK(eye_gpu.layer_published_ns == retained.published_monotonic_ns &&
-              eye_gpu.layer_predicted == retained.predicted_display_time_ns);
+        CHECK(eye_gpu.layer_local == retained.local_definition);
         CHECK(!published.game_present_id && published.frame_id > retained.frame_id);
     }
     CHECK(eye_gpu.submitted == 4 && eye_gpu.copied == 1 && gpu_mock.copies == 2 &&
@@ -354,14 +353,9 @@ static void test_image_admission(void) {
     REJECT(bad.width = 0); REJECT(bad.height = UINT32_MAX); REJECT(bad.format = VK_FORMAT_D32_SFLOAT);
     REJECT(bad.format = VK_FORMAT_R8G8B8A8_UNORM); // only the sRGB images the producer makes
     REJECT(bad.game_present_id = 0); REJECT(bad.release = NULL);
-    REJECT(bad.render_pose.frame_id = 0); REJECT(++bad.render_pose.generation);
-    REJECT(bad.render_pose.published_monotonic_ns = 0);
+    REJECT(bad.render_pose.frame_id = 0); REJECT(++bad.render_pose.local_definition);
+    REJECT(bad.render_pose.local_definition = 0);
     REJECT(bad.render_pose.native_views_valid = false); REJECT(bad.render_pose.active = false);
-    // A pose xrEndFrame would refuse: not finite, not unit, or an inverted FOV.
-    REJECT(bad.render_pose.eyes[0].orientation_xyzw[0] = NAN);
-    REJECT(bad.render_pose.eyes[1].position_xyz[2] = INFINITY);
-    REJECT(bad.render_pose.eyes[0].orientation_xyzw[3] = 0.5f);
-    REJECT(bad.render_pose.eyes[1].fov_left_right_up_down[0] = bad.render_pose.eyes[1].fov_left_right_up_down[1]);
 #undef REJECT
     CHECK(gpu_mock.retirements == 0 && gpu_mock.creates == 0 && gpu_mock.submits == 0);
     CHECK(xr_runtime_offer_eye_pair(&pair));
@@ -369,7 +363,7 @@ static void test_image_admission(void) {
     CHECK(gpu_mock.retirements == 0);
     xr_runtime_reset_game();
     CHECK(gpu_mock.retirements == 0); // reset does not prematurely free producer work
-    eye_retire_obsolete();
+    eye_retire_obsolete(true);
     CHECK(gpu_mock.retirements == 1 && gpu_mock.producer_waits == 1 && gpu_mock.submits == 0);
     image_close();
     // A newer publication does not invalidate the pose the eyes rendered with.
@@ -377,14 +371,12 @@ static void test_image_admission(void) {
     tracking_frame(2);
     CHECK(xr_runtime_eye_images_enabled() && xr_runtime_offer_eye_pair(&pair));
     image_close();
-    // Anchored 2D content (menus): an old latched sample is placement, not a render
-    // pose; freshness restarts at the offer.
+    // D101: a pose of any age is shown (a slow frame; anchored 2D content's latched sample), and so is one of an
+    // earlier tracking generation in the same LOCAL definition (tracking lost and recovered, a session state change).
     pair = image_prepare();
     SDL_Delay(260);
-    CHECK(!xr_runtime_offer_eye_pair(&pair));
-    pair.anchored = true;
+    ++pair.render_pose.generation;
     CHECK(xr_runtime_offer_eye_pair(&pair));
-    CHECK(eye_gpu.pending[0].render_pose.published_monotonic_ns + 1000000 > xr_runtime_pose_clock_ns());
     mock.expected_layers = 1;
     tracking_frame(0);
     CHECK(eye_gpu.submitted == 1 && eye_gpu.layer_valid);
@@ -417,13 +409,25 @@ static void test_image_copy_and_resize(void) {
 }
 
 static void test_image_drops(void) {
-    for (unsigned scenario = 0; scenario < 7; ++scenario) {
+    // D101: held, not dropped: a render pose older than 250 ms by the first display frame, one predicted after this
+    // display frame, tracking lost at the copy, a session state change (a new tracking generation).
+    for (unsigned scenario = 0; scenario < 4; ++scenario) {
         XrOwnedEyePair pair = image_prepare();
         CHECK(xr_runtime_offer_eye_pair(&pair));
-        if (scenario == 0) SDL_Delay(260); // render pose too old by the first display frame
-        if (scenario == 1) atomic_fetch_add(&reference_generation, 1);
-        if (scenario == 2) --mock.predicted, --mock.predicted; // render pose lies in future
-        if (scenario == 3) mock.view_flags &= ~XR_VIEW_STATE_POSITION_TRACKED_BIT;
+        if (scenario == 0) SDL_Delay(260);
+        if (scenario == 1) --mock.predicted, --mock.predicted;
+        if (scenario == 2) mock.view_flags &= ~XR_VIEW_STATE_POSITION_TRACKED_BIT;
+        if (scenario == 3) atomic_fetch_add(&reference_generation, 1);
+        mock.expected_layers = 1;
+        tracking_frame(pair.game_present_id);
+        CHECK(gpu_mock.retirements == 1 && eye_gpu.submitted == 1 && eye_gpu.copied == 1);
+        image_close();
+    }
+    for (unsigned scenario = 1; scenario < 7; ++scenario) {
+        if (scenario == 2 || scenario == 3) continue;
+        XrOwnedEyePair pair = image_prepare();
+        CHECK(xr_runtime_offer_eye_pair(&pair));
+        if (scenario == 1) atomic_fetch_add(&local_definition, 1);  // a recenter applied: LOCAL redefined
         if (scenario == 4) gpu_mock.unsupported = true;
         if (scenario == 5) gpu_mock.reset_at_fence = true;
         if (scenario == 6) gpu_mock.reset_at_release = true;
@@ -439,8 +443,19 @@ static void test_image_drops(void) {
     pair = image_prepare();
     CHECK(xr_runtime_offer_eye_pair(&pair));
     SDL_Delay(260);
-    eye_retire_obsolete();
+    eye_retire_obsolete(true);  // not by age
+    CHECK(gpu_mock.retirements == 0);
+    atomic_fetch_add(&local_definition, 1);
+    eye_retire_obsolete(true);
     CHECK(gpu_mock.retirements == 1 && gpu_mock.creates == 0);
+    // A pair offered while the session does not run (the headset taken off) goes back unshown: it would otherwise hold
+    // its producer's slot until the session ran again, and then be shown minutes old.
+    pair = image_prepare();
+    CHECK(xr_runtime_offer_eye_pair(&pair));
+    eye_retire_obsolete(true);
+    CHECK(gpu_mock.retirements == 0);  // (running: it stays queued)
+    eye_retire_obsolete(false);
+    CHECK(gpu_mock.retirements == 1 && gpu_mock.creates == 0 && !eye_gpu.current_valid && !eye_gpu.pending_count);
     image_close();
 }
 
@@ -532,8 +547,8 @@ static void test_image_late_copy(void) {
     pair = image_prepare();
     CHECK(xr_runtime_offer_eye_pair(&pair));
     gpu_mock.producer_result = VK_TIMEOUT;
-    SDL_Delay(260);  // (the pair's pose is too old to show)
-    eye_retire_obsolete();
+    atomic_fetch_add(&local_definition, 1);  // (a recenter: the pair's pose is in the old LOCAL)
+    eye_retire_obsolete(true);
     CHECK(!xr.terminal && eye_gpu.current_valid && gpu_mock.retirements == 0 && eye_gpu.late_producers == 1);
     tracking_frame(0);
     CHECK(!xr.terminal && eye_gpu.current_valid && gpu_mock.retirements == 0 && gpu_mock.submits == 0);
@@ -628,20 +643,18 @@ static void test_image_resubmission(void) {
     // poses (image_inspect_end checks them against the shifted locate).
     for (unsigned n = 0; n < 3; ++n) { ++mock.predicted; tracking_frame(0); }
     CHECK(eye_gpu.submitted == 4 && gpu_mock.copies == 2 && gpu_mock.acquires == 2 && gpu_mock.releases == 2);
-    // Lost tracking skips a frame's layer without dropping the pair.
+    // Lost tracking, and its recovery's new tracking generation, keep the layer (D101).
     mock.view_flags &= ~XR_VIEW_STATE_POSITION_TRACKED_BIT;
-    mock.expected_layers = 0;
     tracking_frame(0);
     mock.view_flags |= XR_VIEW_STATE_POSITION_TRACKED_BIT;
-    mock.expected_layers = 1;
     tracking_frame(0);
-    CHECK(eye_gpu.submitted == 5);
-    // Recenter and reset end re-submission; so does age.
-    atomic_fetch_add(&reference_generation, 1);
+    CHECK(eye_gpu.submitted == 6 && xr.outcomes[FRAME_TRACKING] == 0);
+    // A recenter (LOCAL redefined) and a reset end re-submission; age does not.
+    atomic_fetch_add(&local_definition, 1);
     mock.expected_layers = 0;
     tracking_frame(0);
-    CHECK(!eye_gpu.layer_valid && eye_gpu.submitted == 5);
-    CHECK(xr.outcomes[FRAME_REFERENCE] == 1 && xr.outcomes[FRAME_TRACKING] == 1);
+    CHECK(!eye_gpu.layer_valid && eye_gpu.submitted == 6);
+    CHECK(xr.outcomes[FRAME_REFERENCE] == 1);
     image_close();
     pair = image_prepare();
     CHECK(xr_runtime_offer_eye_pair(&pair));
@@ -657,15 +670,13 @@ static void test_image_resubmission(void) {
     mock.expected_layers = 1;
     tracking_frame(0);
     SDL_Delay(510);
+    tracking_frame(0);
+    CHECK(eye_gpu.layer_valid && eye_gpu.submitted == 2);
+    xr_runtime_reset_game();
     mock.expected_layers = 0;
     tracking_frame(0);
-    CHECK(!eye_gpu.layer_valid && eye_gpu.submitted == 1);
-    CHECK(xr.outcomes[FRAME_LAYER_AGE] == 1);
     tracking_frame(0);
-    CHECK(xr.outcomes[FRAME_LAYER_AGE] == 1 && xr.outcomes[FRAME_NO_PAIR] == 2);
-    xr_runtime_reset_game();
-    tracking_frame(0);
-    CHECK(xr.outcomes[FRAME_LAYER_AGE] == 1 && xr.outcomes[FRAME_NO_PAIR] == 3);
+    CHECK(!eye_gpu.layer_valid && eye_gpu.submitted == 2 && xr.outcomes[FRAME_NO_PAIR] >= 1);
     image_close();
 }
 
@@ -864,13 +875,11 @@ static void test_offer_rejection_diagnostics(void) {
     CHECK(atomic_load(&eye_offer_rejects[reason]) == count + 1); \
     CHECK(!memcmp(&before, &bad, sizeof bad) && !eye_gpu.pending_count); \
 } while (0)
-    DIAGNOSTIC(OFFER_POSE_AGE, bad.render_pose.published_monotonic_ns = xr_runtime_pose_clock_ns() - 300000000);
-    DIAGNOSTIC(OFFER_GENERATION, ++bad.render_pose.generation);
-    DIAGNOSTIC(OFFER_EYES, bad.render_pose.eyes[0].position_xyz[0] = NAN);
+    DIAGNOSTIC(OFFER_LOCAL, ++bad.render_pose.local_definition);
     DIAGNOSTIC(OFFER_POSE_IDENTITY, bad.render_pose.active = false);
     // Exhausting the reporting budget never changes the rejection itself.
     atomic_store(&eye_offer_log_count, EYE_OFFER_LOG_CAP);
-    DIAGNOSTIC(OFFER_POSE_AGE, bad.render_pose.published_monotonic_ns = xr_runtime_pose_clock_ns() - 300000000);
+    DIAGNOSTIC(OFFER_POSE_IDENTITY, bad.render_pose.frame_id = 0);
     CHECK(atomic_load(&eye_offer_log_count) == EYE_OFFER_LOG_CAP + 1);
 #undef DIAGNOSTIC
     CHECK(xr_runtime_offer_eye_pair(&pair));

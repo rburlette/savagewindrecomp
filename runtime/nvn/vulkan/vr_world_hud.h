@@ -47,10 +47,12 @@
 // checks them, and against the code they came from (exec.c at ca3cd86), without the renderer.
 //
 // Rules by shape that remain (D088 left them; replacing one wants the game's own word for it): nn::ui2d's blocks are
-// told by their projection's constants (vr_hud_marker_block, vr_hud_fade_block); a marker's panes are smaller than
-// VR_WORLD_HUD_PANE_MAX layout units; a draw into one half is told by its viewport's width, and its eye by the
-// viewport's centre (vr_hud_one_half, vr_hud_eye_of_half); the fade covers the whole layer (it is found by its pane's
-// role first).
+// told by their projection's constants (vr_hud_marker_block); a draw into one half is told by its viewport's width,
+// and its eye by the viewport's centre (vr_hud_one_half, vr_hud_eye_of_half): the half the game itself draws that
+// view into. HUD draws carry no render certificate to name the eye instead (they are recorded outside any eye layer's
+// render scope: none of 16,384 placed draws had one, simulator run of 6cb77d7); a tag would need a game hook where the
+// UI's per-view draw begins. The fade is known by its pane's role alone, and a marker's panes by the binding or the
+// role, not by their size (backlog 9).
 //
 // Open, from the records, and not addressed here: the HUD's depth through the camera's zoom and the world scale (the
 // UI camera's FOV is taken as fixed, VR_UI_TAN_X, and a marker's size follows Link's distance), and the depth of
@@ -69,7 +71,7 @@
 #define VR_WORLD_HUD_SIZE_MIN 0.4      // a marker's size against its size at Link's distance: at least
 #define VR_WORLD_HUD_SIZE_MAX 1.5      // and at most
 #define VR_AIM_SIZE_MIN 0.6            // the crosshair's least size (it must stay big enough to aim with)
-#define VR_WORLD_HUD_PANE_MAX 400.0f   // layout units: a marker's panes are smaller than this
+#define VR_WORLD_HUD_PANE_LARGE 400.0f // layout units: a placed pane larger is logged (the size cap before backlog 9)
 #define VR_UI_TAN_X 0.82904            // the UI camera's horizontal half-FOV as a tangent: tan(25 degrees) * 16 / 9
 #define VR_HUD_LAYER_X 0.92f           // Labo's HUD layer: the layout's scale (square in the half's pixels)
 #define VR_HUD_LAYER_Y 0.46f
@@ -226,11 +228,12 @@ static inline unsigned vr_hud_eye_of_half(const float *viewport, float half_widt
 
 // Whether a HUD draw's vertex constants c3 (block, block_size bytes, at least 64) are nn::ui2d's for a piece that can
 // be a marker's: a pane of the HUD's 40-degree 16:9 layer (its projection's constants, then the pane's view rows and
-// its rectangle) smaller than VR_WORLD_HUD_PANE_MAX layout units, or a text's 16:9 matrix (the projection and its view
-// in one, flat, maybe turned: the arrow count). (A full-screen pass that tests Link's depth for his silhouette also
-// has a matrix there.) Writes origin, where the pane's (or the text's) origin is in the layer's NDC before the Labo
-// offset (for the log), when the block is one of them; a pane whose origin is not ahead is none.
-static inline bool vr_hud_marker_block(const float *block, uint64_t block_size, float origin[2]) {
+// its rectangle), or a text's 16:9 matrix (the projection and its view in one, flat, maybe turned: the arrow count).
+// (A full-screen pass that tests Link's depth for his silhouette also has a matrix there.) Writes origin, where the
+// pane's (or the text's) origin is in the layer's NDC before the Labo offset, and pane_size, the pane's larger side in
+// layout units (0: a text), both for the log, when the block is one of them; a pane whose origin is not ahead is none.
+// Which draws are a marker's is the binding's word (vr_draw_marker) or the pane's role, not the pane's size.
+static inline bool vr_hud_marker_block(const float *block, uint64_t block_size, float origin[2], float *pane_size) {
     const bool flat = block[0] > 0 && fabsf(fabsf(block[5]) / block[0] - 16.0f / 9.0f) < 0.002f;
     float size = 0;  // the pane's larger side in layout units (0: a text)
     if (flat && block[5] > 0 && fabsf(block[5] - 2.74748f) < 0.001f && block[14] == -1 && block[15] == 0 &&
@@ -248,7 +251,8 @@ static inline bool vr_hud_marker_block(const float *block, uint64_t block_size, 
         origin[0] = block[3] / block[15];
         origin[1] = block[7] / block[15];
     } else return false;
-    return !(size > VR_WORLD_HUD_PANE_MAX);  // (a screen-sized pane is no marker's)
+    *pane_size = size;
+    return true;
 }
 
 // A marker report as its panes are drawn: Labo's HUD layer scales the whole layout about its centre (VR_HUD_LAYER_X/Y,
@@ -381,29 +385,6 @@ static inline void vr_hud_marker_move(const VrHudMarkerView *seen, const PcVrHud
     placed->scale[0] = grow * scale_x;
     placed->scale[1] = grow * scale_y;
     vr_hud_move_place(move, viewport, labo_offset, placed->anchor, placed->eye_at, placed->scale, image_up);
-}
-
-// Whether a pane's vertex constants c3 (nn::ui2d's block, at least 34 x 16 bytes) are a pane of the HUD's 40-degree
-// 16:9 layer that covers all of it, as hud_patch projects its corners (to 0.98 of its NDC each way): the fade's.
-static inline bool vr_hud_fade_block(const float *block) {
-    const float *model_view = block + 16, *rect = block + 33 * 4;
-    if (!(block[0] > 0 && fabsf(block[5] - 2.74748f) < 0.001f && fabsf(block[5] / block[0] - 16.0f / 9.0f) < 0.002f &&
-          block[14] == -1 && block[15] == 0) || !(rect[0] > 0 && rect[1] > 0)) return false;
-    float min_x = 1e9f, max_x = -1e9f, min_y = 1e9f, max_y = -1e9f;
-    for (int corner = 0; corner < 4; corner++) {
-        const float corner_x = (corner & 1) * rect[0] + rect[2], corner_y = rect[3] - (corner >> 1) * rect[1];
-        const float corner_depth = -(model_view[8] * corner_x + model_view[9] * corner_y + model_view[11]);
-        if (!(corner_depth > 0)) return false;
-        const float ndc_x =
-            block[0] * (model_view[0] * corner_x + model_view[1] * corner_y + model_view[3]) / corner_depth;
-        const float ndc_y =
-            block[5] * (model_view[4] * corner_x + model_view[5] * corner_y + model_view[7]) / corner_depth;
-        min_x = fminf(min_x, ndc_x);
-        max_x = fmaxf(max_x, ndc_x);
-        min_y = fminf(min_y, ndc_y);
-        max_y = fmaxf(max_y, ndc_y);
-    }
-    return min_x <= -0.98f && max_x >= 0.98f && min_y <= -0.98f && max_y >= 0.98f;
 }
 
 // The fade's move into the half with this viewport: enlarged VR_FADE_GROW times about the half's centre, upright.

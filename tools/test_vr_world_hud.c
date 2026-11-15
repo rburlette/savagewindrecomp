@@ -51,7 +51,6 @@ static uint32_t vr_draw_marker;
 static PcVrPaneRole vr_draw_role;
 static struct { double distance; uint64_t frame; } vr_aim_result;
 static uint64_t present_count;
-static uint64_t renderer_present_count(void) { return present_count; }
 static bool report_found;  // (pc_vr_hud_point_by_seq finds the draw's report)
 static PcVrHudPoint report;
 bool pc_vr_hud_point_by_seq(uint32_t seq, PcVrHudPoint *out) {
@@ -100,7 +99,6 @@ static int old_fade_eye;
 #define VR_WORLD_HUD_SIZE_MIN_BEFORE 0.4
 #define VR_WORLD_HUD_SIZE_MAX_BEFORE 1.5
 #define VR_AIM_SIZE_MIN_BEFORE 0.6
-#define VR_WORLD_HUD_PANE_MAX_BEFORE 400.0f
 #define VR_UI_TAN_X_BEFORE 0.82904
 #define VR_HUD_LAYER_X_BEFORE 0.92f
 #define VR_HUD_LAYER_Y_BEFORE 0.46f
@@ -180,7 +178,8 @@ static bool world_hud_draw_before(void) {
         origin_x = block[3] / block[15];
         origin_y = block[7] / block[15];
     } else return false;
-    if (size > VR_WORLD_HUD_PANE_MAX_BEFORE) return false;  // (a screen-sized pane is no marker's)
+    (void)size;  // (ca3cd86 left a pane larger than 400 layout units on the panel; since backlog 9 the binding or
+                 // the role alone says it is a marker's, here as in exec.c)
     const float *viewport = st.viewport[0], half_width = st.rt.color[0]->width * 0.5f;
     if (fabsf(viewport[2] - half_width) > 1 || !(viewport[3] > 0)) return false;  // (a draw over one half only)
     const unsigned eye = viewport[0] + viewport[2] * 0.5f >= half_width;
@@ -198,8 +197,8 @@ static bool world_hud_draw_before(void) {
         marker = &linked;
         how = "pane";
         ++old_hud.exact;
-    } else if (vr_draw_role == PC_VR_PANE_RETICLE && vr_aim_result.distance > 0 &&
-               vr_aim_result.frame + 8 >= renderer_present_count()) {
+    } else if (vr_draw_role == PC_VR_PANE_RETICLE && vr_aim_result.distance > 0) {  // (ca3cd86 also wanted it at most
+        // 8 presents old; since backlog 9 the last is held, here as in exec.c)
         linked = (PcVrHudPoint){.camera = {0, 0, -(float)vr_aim_result.distance}};
         marker = &linked;
         how = "reticle";
@@ -283,28 +282,9 @@ static bool world_hud_draw_before(void) {
 }
 
 static bool hud_fade_before(void) {
-    if (!st.rt.color[0] || vr_draw_role != PC_VR_PANE_FADE) return false;  // (the screen Fade's black pane)
-    const Range pane_constants = st.ubuf[0][0];
-    if (!pane_constants.addr || pane_constants.size < 34 * 16 || st.ds[0]) return false;
-    const float *block = (const float *)(uintptr_t)pane_constants.addr, *model_view = block + 16,
-                *rect = block + 33 * 4;
-    if (!(block[0] > 0 && fabsf(block[5] - 2.74748f) < 0.001f && fabsf(block[5] / block[0] - 16.0f / 9.0f) < 0.002f &&
-          block[14] == -1 && block[15] == 0) || !(rect[0] > 0 && rect[1] > 0)) return false;
-    float min_x = 1e9f, max_x = -1e9f, min_y = 1e9f, max_y = -1e9f;
-    for (int k = 0; k < 4; k++) {
-        const float corner_x = (k & 1) * rect[0] + rect[2], corner_y = rect[3] - (k >> 1) * rect[1];
-        const float corner_depth = -(model_view[8] * corner_x + model_view[9] * corner_y + model_view[11]);
-        if (!(corner_depth > 0)) return false;
-        const float ndc_x =
-            block[0] * (model_view[0] * corner_x + model_view[1] * corner_y + model_view[3]) / corner_depth;
-        const float ndc_y =
-            block[5] * (model_view[4] * corner_x + model_view[5] * corner_y + model_view[7]) / corner_depth;
-        min_x = fminf(min_x, ndc_x);
-        max_x = fmaxf(max_x, ndc_x);
-        min_y = fminf(min_y, ndc_y);
-        max_y = fmaxf(max_y, ndc_y);
-    }
-    if (!(min_x <= -0.98f && max_x >= 0.98f && min_y <= -0.98f && max_y >= 0.98f)) return false;
+    // (ca3cd86 also wanted the pane's constants to cover the HUD's whole layer; the fade is known by its role alone
+    // since backlog 9, here as in exec.c)
+    if (!st.rt.color[0] || vr_draw_role != PC_VR_PANE_FADE || st.ds[0]) return false;
     const float *viewport = st.viewport[0], half_width = st.rt.color[0]->width * 0.5f;
     if (fabsf(viewport[2] - half_width) > 1 || !(viewport[3] > 0)) return false;
     const Range offset_constants = st.ubuf[0][10];
@@ -390,7 +370,8 @@ static bool world_hud_draw_now(void) {
         st.ds[0])
         return false;  // (no depth test: ui2d's)
     float origin[2];  // where the pane's (or the text's) origin is, in the layer's NDC before the Labo offset (the log)
-    if (!vr_hud_marker_block((const float *)(uintptr_t)pane_constants.addr, pane_constants.size, origin))
+    float pane_size;
+    if (!vr_hud_marker_block((const float *)(uintptr_t)pane_constants.addr, pane_constants.size, origin, &pane_size))
         return false;
     const float *viewport = st.viewport[0], half_width = st.rt.color[0]->width * 0.5f;
     if (!vr_hud_one_half(viewport, half_width)) return false;  // (a draw over one half only)
@@ -408,8 +389,7 @@ static bool world_hud_draw_now(void) {
         marker = &linked;
         how = "pane";
         ++vr_world_hud.exact;
-    } else if (vr_draw_role == PC_VR_PANE_RETICLE && vr_aim_result.distance > 0 &&
-               vr_aim_result.frame + 8 >= renderer_present_count()) {
+    } else if (vr_draw_role == PC_VR_PANE_RETICLE && vr_aim_result.distance > 0) {
         linked = vr_hud_reticle_point(vr_aim_result.distance);
         marker = &linked;
         how = "reticle";
@@ -444,10 +424,7 @@ static bool world_hud_draw_now(void) {
 }
 
 static bool hud_fade_now(void) {
-    if (!st.rt.color[0] || vr_draw_role != PC_VR_PANE_FADE) return false;  // (the screen Fade's black pane)
-    const Range pane_constants = st.ubuf[0][0];
-    if (!pane_constants.addr || pane_constants.size < 34 * 16 || st.ds[0]) return false;
-    if (!vr_hud_fade_block((const float *)(uintptr_t)pane_constants.addr)) return false;
+    if (!st.rt.color[0] || vr_draw_role != PC_VR_PANE_FADE || st.ds[0]) return false;  // (by its role alone)
     const float *viewport = st.viewport[0], half_width = st.rt.color[0]->width * 0.5f;
     if (!vr_hud_one_half(viewport, half_width)) return false;
     const Range offset_constants = st.ubuf[0][10];
@@ -924,19 +901,20 @@ int main(void) {
         // (linked by pane: behind the camera, behind the eye, no width)
         CHECK(!memcmp(&vr_world_hud.move, &before.move, sizeof before.move) && vr_world_hud.exact == 3);
         set_eyes(no_turn, calibration_origin, no_turn, 0.064, flat_fov, 10, 1);
-        // (and a pane too large to be a marker's, or the flat piece, is not one: nothing counted)
+        // (a pane larger than the old cap is placed all the same: the binding says it is the marker's; the flat piece
+        // is not one: nothing counted)
         pane_block(pane_constants_block, 1000, 1, 0, 0, 0, 450, 40, -20, 20);
-        CHECK(!world_hud_draw_now() && vr_world_hud.exact == 3);
+        CHECK(world_hud_draw_now() && vr_world_hud.exact == 4 && vr_world_hud.draws == 1);
         pane_block(pane_constants_block, 1000, 1, 0, 0, 0, 40, 40, -20, 20);
         vr_draw_marker = PC_VR_MARKER_FLAT;
-        CHECK(!world_hud_draw_now() && vr_world_hud.exact == 3);
+        CHECK(!world_hud_draw_now() && vr_world_hud.exact == 4);
         vr_draw_marker = 7;
-        CHECK(world_hud_draw_now() && vr_world_hud.exact == 4 && vr_world_hud.draws == 1 && vr_world_hud.frame_draws == 1);
+        CHECK(world_hud_draw_now() && vr_world_hud.exact == 5 && vr_world_hud.draws == 2 && vr_world_hud.frame_draws == 2);
     }
 
     // ---- By hand: the fade, in the left half with a Labo offset of 0.13: 1.3 times about the half's centre, which
-    // on clip coordinates (the offset added after them) is x' = 1.3 x + 0.3 x 0.13 w, y' = 1.3 y. A pane that does
-    // not cover the layer is no fade.
+    // on clip coordinates (the offset added after them) is x' = 1.3 x + 0.3 x 0.13 w, y' = 1.3 y. The pane is known
+    // by its role: one that does not cover the layer is the fade all the same, one of another role is not.
     {
         const float viewport[4] = {0, 0, 1000, 1000};
         memcpy(st.viewport[0], viewport, sizeof viewport);
@@ -958,6 +936,8 @@ int main(void) {
         vr_hud_move_rscale(move, rscale);
         CHECK(rscale[0] == 2.6f && fabs(rscale[2] - (10 + 2 * move->flat_offset[0])) < 1e-3 && rscale[3] == 2 * move->flat_offset[1]);
         pane_block(pane_constants_block, 1000, 1, 0, 0, 0, 1000, 800, -500, 400);  // (0.77 of the layer's width)
+        CHECK(hud_fade_now());
+        vr_draw_role = PC_VR_PANE_BOX;
         CHECK(!hud_fade_now());
         offset_constants_block[0] = 0;
     }

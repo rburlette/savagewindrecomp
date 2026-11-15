@@ -36,23 +36,9 @@ typedef struct {
     PcVrNativeViewContracts contracts;
 } PcVrNativeViewPair;
 
-static inline bool pc_vr_native_view_unit_quaternion(const float in[4], double out[4]) {
-    double norm2 = 0;
-    for (unsigned i = 0; i < 4; ++i) {
-        if (!isfinite(in[i])) return false;
-        norm2 += (double)in[i] * in[i];
-    }
-    if (!(norm2 > 0.99 && norm2 < 1.01)) return false;
-    const double inverse = 1.0 / sqrt(norm2);
-    for (unsigned i = 0; i < 4; ++i) out[i] = in[i] * inverse;
-    return true;
-}
-
-static inline bool pc_vr_native_view_fov_valid(const float fov[4]) {
-    for (unsigned i = 0; i < 4; ++i)
-        if (!isfinite(fov[i]) || !(fov[i] > -1.5707963267948966 && fov[i] < 1.5707963267948966)) return false;
-    // The original game's positive-aspect perspective supports unflipped FOV.
-    return fov[0] < fov[1] && fov[3] < fov[2];
+// D116: OpenXR's orientations are unit quaternions, used as given.
+static inline void pc_vr_native_view_quaternion(const float in[4], double out[4]) {
+    for (unsigned i = 0; i < 4; ++i) out[i] = in[i];
 }
 
 static inline void pc_vr_native_view_basis_vector(const double right[3], const double up[3],
@@ -114,8 +100,7 @@ static inline bool pc_vr_native_view_build_pair(const PcVrHeadLookCamera *center
         reference->generation != snapshot->calibration.epoch ||
         memcmp(reference->orientation_xyzw, snapshot->calibration.heading_xyzw, sizeof reference->orientation_xyzw) ||
         memcmp(reference->origin_xyz, snapshot->calibration.origin_xyz, sizeof reference->origin_xyz) ||
-        !isfinite(reference->origin_xyz[0]) || !isfinite(reference->origin_xyz[1]) ||
-        !isfinite(reference->origin_xyz[2]) || !snapshot->frame_id ||
+        !snapshot->frame_id ||
         !snapshot->published_monotonic_ns || !snapshot->active ||
         !snapshot->orientation_valid || !snapshot->orientation_tracked ||
         !snapshot->views_valid || !snapshot->native_views_valid) return false;
@@ -130,28 +115,18 @@ static inline bool pc_vr_native_view_build_pair(const PcVrHeadLookCamera *center
     const double up_length = pc_vr_native_view_length(original_up);
     if (!isfinite(radius) || !isfinite(up_length) || !(radius > 0 && up_length > 0)) return false;
     double neutral[4], central[4], optical[2][4];
-    if (!pc_vr_native_view_unit_quaternion(reference->orientation_xyzw, neutral) ||
-        !pc_vr_native_view_unit_quaternion(snapshot->orientation_xyzw, central)) return false;
-    for (unsigned side = 0; side < 2; ++side) {
-        if (!pc_vr_native_view_unit_quaternion(snapshot->eyes[side].orientation_xyzw, optical[side]) ||
-            !pc_vr_native_view_fov_valid(snapshot->eyes[side].fov_left_right_up_down)) return false;
-        for (unsigned i = 0; i < 3; ++i) if (!isfinite(snapshot->eyes[side].position_xyz[i])) return false;
-    }
+    pc_vr_native_view_quaternion(reference->orientation_xyzw, neutral);
+    pc_vr_native_view_quaternion(snapshot->orientation_xyzw, central);
+    for (unsigned side = 0; side < 2; ++side)
+        pc_vr_native_view_quaternion(snapshot->eyes[side].orientation_xyzw, optical[side]);
     const double inverse_neutral[4] = {-neutral[0], -neutral[1], -neutral[2], neutral[3]};
     double midpoint[3], native_baseline[3];
     for (unsigned i = 0; i < 3; ++i) {
         midpoint[i] = 0.5 * ((double)snapshot->eyes[0].position_xyz[i] + snapshot->eyes[1].position_xyz[i]);
         native_baseline[i] = (double)snapshot->eyes[1].position_xyz[i] - snapshot->eyes[0].position_xyz[i];
     }
-    const double native_separation = pc_vr_native_view_length(native_baseline);
-    const double game_separation = native_separation * game_units_per_meter;
-    if (!isfinite(game_separation) || !(native_separation > 0 && game_separation > 0)) return false;
-    const double local_right[3] = {1, 0, 0};
-    double native_right[3];
-    pc_vr_head_look_rotate(central, local_right, native_right);
-    // PRIMARY_STEREO indices retain left/right identity under head rotation.
-    // Check only the sign, with no fixed IPD or assumed perfect collinearity.
-    if (!(pc_vr_head_look_dot(native_baseline, native_right) > 0)) return false;
+    // (PRIMARY_STEREO's view 0 is the left eye: D116, as given)
+    const double game_separation = pc_vr_native_view_length(native_baseline) * game_units_per_meter;
 
     PcVrNativeViewPair result = {0};
     double intended_forward[2][3], intended_up[2][3];

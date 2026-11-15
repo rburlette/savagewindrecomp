@@ -356,16 +356,14 @@ uint32_t rt_ui_parallax(uint32_t amount_bits) {
 // held in a small constants block. The game sets the test up each frame a rune is raised (1.9.0 0x700126f6a8, its
 // only caller 0x70012679a4): it takes the next of the test's two constants blocks, lets the Labo VR object adjust the
 // position (0.5625, 0.5 in Labo mode) and fills the block. The patched call of that adjustment reports the block
-// here, so the renderer knows the test's draw by the constants it binds, whatever the draw looks like.
+// here. The test's draws are known by the call that issues them (PC_VR_LAYER_DRAW_RUNE_TEST); of their constants,
+// the block reported here is the one with the position (backlog 9: no window of frames).
 #define RUNE_TEST_BLOCKS 4  // the newest blocks kept (the game alternates between two)
-#define RUNE_TEST_FRAMES 3  // a block counts as the test's for this many presented frames after its setup
-// Written on the game thread, read on the render thread for every fragment constants block it binds: plain atomics,
-// and the last setup's frame first, so the answer is one load while no rune is raised.
+// Written on the game thread, read on the render thread for the fragment constants blocks of the test's draws.
 static struct {
     _Atomic uint64_t constants;  // the block's guest address (0: unused)
-    _Atomic uint64_t frame;      // renderer_present_count() at its last setup
+    _Atomic uint64_t frame;      // renderer_present_count() at its last setup (which slot is replaced next)
 } rune_test_blocks[RUNE_TEST_BLOCKS];
-static _Atomic uint64_t rune_test_frame;  // renderer_present_count() + 1 at the last setup of any block (0: never)
 
 void rt_rune_test(uint64_t constants, uint64_t position) {
     if (!pc_vr_enabled() || !guest(constants, 32)) return;
@@ -381,7 +379,6 @@ void rt_rune_test(uint64_t constants, uint64_t position) {
     }
     atomic_store(&rune_test_blocks[slot].frame, now);
     atomic_store(&rune_test_blocks[slot].constants, constants);
-    atomic_store(&rune_test_frame, now + 1);
     static unsigned logged;
     if (logged < 4 && guest(position, 8)) {
         ++logged;
@@ -393,19 +390,13 @@ void rt_rune_test(uint64_t constants, uint64_t position) {
 }
 
 bool pc_vr_rune_test_constants(uint64_t address) {
-    const uint64_t last = atomic_load_explicit(&rune_test_frame, memory_order_relaxed);
-    if (!last || !address) return false;
-    const uint64_t now = renderer_present_count();
-    if (last + RUNE_TEST_FRAMES <= now) return false;  // (no rune raised)
-    for (unsigned i = 0; i < RUNE_TEST_BLOCKS; ++i) {
-        if (atomic_load(&rune_test_blocks[i].constants) == address)
-            return atomic_load(&rune_test_blocks[i].frame) + RUNE_TEST_FRAMES >= now;
-    }
+    if (!address) return false;
+    for (unsigned i = 0; i < RUNE_TEST_BLOCKS; ++i)
+        if (atomic_load(&rune_test_blocks[i].constants) == address) return true;
     return false;
 }
 
 RT_ON_RESET(pc_vr_rune_test_reset) {
-    atomic_store(&rune_test_frame, 0);
     for (unsigned i = 0; i < RUNE_TEST_BLOCKS; ++i) {
         atomic_store(&rune_test_blocks[i].constants, 0);
         atomic_store(&rune_test_blocks[i].frame, 0);

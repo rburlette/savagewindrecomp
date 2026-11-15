@@ -1,28 +1,25 @@
-// PC VR native eye views and render certificates (D042, D043, D048). Started from a bounded, read-only investigation
-// of how the game builds its Labo eye cameras' perspective; three jobs now share it:
+// PC VR native eye views and render certificates (D042, D043, D048; one frame record, D115 step 5c).
 //
-//  1. Traversals. The game renders its two Labo eye layers in one call chain: a root layer (one eye) and its sibling
-//     (the other). The two are recognised as one traversal by their saved frame pointers and return addresses
-//     (PROJ_ROOT_RETURN, PROJ_SIBLING_RETURN), and the root latches one complete pose snapshot that both eyes use
-//     (projection_observe_traversal). What is seen of each eye layer (its camera, projection object, side) is kept
-//     in a ProjectionNote. The same stack and link tests on the display's calls alone, before head look has bound the
-//     game's camera, make the two eye layers known (projection_display_pair), so that a layer's draws are told an
-//     eye's or another layer's from the first frame after a load (render_scope_eye_layer). Only until an eye note
-//     exists: the display also shows the pause menu's own pair of layers through the same calls.
-//  2. Native view and FOV. The eye camera's view becomes the headset eye's pose relative to the D053 calibration, at
-//     a world scale of game units per metre (pc_vr_projection_trace_native_view, called from head look; D042), and
-//     the eye projection's parameters become the eye's own asymmetric FOV (projection_prepare_native_fov, on the
-//     game's projection builder; D043). The game's original logical and device projection writers always run, once;
-//     the matrices they write are checked against what the new parameters must give (projection_matrix_contract).
+//  1. The frame record. The game renders its two Labo eye layers in one call chain: a root layer (one eye) and its
+//     sibling (the other), told apart by their saved frame pointers and return addresses (PROJ_ROOT_RETURN,
+//     PROJ_SIBLING_RETURN). Head look calls pc_vr_projection_trace_eye for each, before the game's look-at builder
+//     runs: the root's call starts the record with the base camera and the frame's pose, and builds both eyes' views
+//     from them (pc_vr_native_view_build_pair); each call writes its eye's view into the eye camera. The same stack
+//     and link tests on the display's calls alone, before head look has bound the game's camera, make the two eye
+//     layers known (projection_display_pair), so that a layer's draws are told an eye's or another layer's from the
+//     first frame after a load (render_scope_eye_layer). Only until the record knows an eye layer: the display also
+//     shows the pause menu's own pair of layers through the same calls.
+//  2. The native FOV. On the game's projection builder for an eye of the record, its parameters become the eye's own
+//     asymmetric FOV (projection_write_native_fov; D043). The game's original logical and device writers always run,
+//     once; the logical matrix is checked to give the eye's frustum (projection_logical_built).
 //  3. Render certificates. The render layer's begin and end are wrapped (render_begin_wrapper, render_end_wrapper)
 //     to know which eye layer the current thread is rendering. When the command recorder records a draw
-//     (pc_vr_render_trace_record), a draw in a layer whose native view and FOV were verified gets that eye's
-//     certificate id: which eye, which traversal, which pose snapshot. The eye-image producer uses it to admit eye images.
+//     (pc_vr_render_trace_record), a draw in an eye layer whose view and FOV are as written gets that eye's
+//     certificate id: which eye, which record (frame), which pose. The eye-image producer admits eye images by it.
 //
 // The PC VR play configuration (runtime/pc_vr_config.h) runs all of it, continuously, at its world scale
-// (pc_vr_projection_trace_init): no traversal, time or certificate budget. A failed or partial traversal yields no
-// certificate pair and the next traversal starts afresh; a failed guest write (restored) stops the writes until the
-// trace is armed again. Logs carry metadata only, never game data.
+// (pc_vr_projection_trace_init). An eye whose view or FOV could not be given this frame has no certificate, and the
+// next frame starts afresh; why is counted (pc_vr_guards.h). Logs carry metadata only, never game data.
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -48,7 +45,6 @@
 #define PROJ_BASE_VTABLE g_site.pcvr_base_vtable
 #define PROJ_ROOT_RETURN g_site.pcvr_proj_root_return
 #define PROJ_SIBLING_RETURN g_site.pcvr_proj_sibling_return
-#define PROJ_POSE_MAX_AGE_NS UINT64_C(250000000)
 #define RENDER_BEGIN g_site.pcvr_render_begin
 // The layer's end: no code calls it directly (vtable +0x68), and it follows begin (vtable +0x50) at +0x58 in 1.8.2 and
 // 1.9.0 alike, the same 4 instructions.
@@ -57,88 +53,69 @@
 #define RENDER_SCOPE_CAP 8          // a thread's open render scopes (RenderScopes)
 #define RENDER_CERTIFICATE_SLOTS 64 // the certificate store: a slot is reused after 64 newer certificates
 
-// What was seen of one eye layer in the current traversal, and what was done to it.
+// One eye of the frame record: its layer, and what its certificate carries. Replaced at that eye's next call, so a
+// draw of this frame recorded after the next frame's other eye call still finds it.
 typedef struct {
-    // The guest objects: the eye layer, the base camera it copies, its projection object, the layer's configuration
-    // and its sibling layer (the other eye).
-    uint64_t layer, base, projection, config, sibling;
-    // The head-look latch it was built with (sequence, frame, generation), this note's number, when, a hash of the
-    // base camera, and the traversal it belongs to.
-    uint64_t sequence, frame, generation, note, time_ns, base_hash, traversal_serial;
-    unsigned side;
-    bool latch_valid;
-    // The eye camera against the base camera (pc_vr_projection_eye_basis), and whether the eye's native FOV can be
-    // written at all (projection_native_fov_ready).
-    PcVrProjectionEyeBasis basis;
-    bool basis_read, native_fov_ready;
-    // What happened: head look acknowledged; the native FOV attempted, applied, and its logical and device matrices
-    // verified; the native view attempted, written and verified; and whether the camera, logical projection and device
-    // projection still match what the certificate describes.
-    bool head_acknowledged, fov_attempted, fov_applied, fov_logical_ok, fov_device_ok;
-    bool native_view_attempted, native_fields_applied, native_view_verified;
-    bool render_view_current, render_logical_current, render_device_current;
-    uint64_t render_certificate, render_camera_hash, render_view_hash;
-    // The native FOV: which runtime eye, the game's projection parameters written, the eye's angles (left, right, up,
-    // down) and the near and far planes.
-    int fov_native_index;
-    float fov_mapped[9], fov_angles[4], fov_depth[2];
-} ProjectionNote;
+    uint64_t layer;           // 0: not an eye layer of the bound composition (yet)
+    uint64_t serial;          // the record (frame) it was written in
+    pthread_t thread;         // the camera thread; the eye's projection builder runs on it
+    unsigned native_index;    // the runtime eye: 0 left, 1 right
+    double units_per_meter;   // the world scale its view was built at
+    XrPoseSnapshot pose;      // the frame's pose: the eye's FOV, and the certificate's snapshot
+    bool view_written, fov_attempted, fov_written, logical_ok;
+    // Whether the eye's camera, logical and device projections are as written and checked; a builder call for the
+    // eye clears them (pc_vr_render_trace_invalidate_camera, render_invalidate_projection).
+    bool view_current, logical_current, device_current;
+    uint64_t certificate;
+} RecordEye;
 
-// The current traversal: its root eye, where and on which thread it runs, the one pose snapshot both eyes use, and
-// the progress of the native FOV and view (masks: a bit per eye).
+// The frame record: the root's call, on its thread and frame, with the base camera it copies, the frame's pose and
+// the two eyes' views built from them; open until its sibling's call. Under projection_lock.
 typedef struct {
-    ProjectionNote root;
-    uint64_t frame_pointer, serial;
+    uint64_t serial;          // 0: none yet; never reused (projection_root_serial)
+    bool open;
     pthread_t thread;
-    XrPoseSnapshot native_snapshot;
-    bool open;            // the root was seen and its sibling not yet
-    bool native_latched;  // native_snapshot holds the root's pose sample
-    bool native_pair;     // the sibling came while that sample was still current
-    bool fov_admitted, fov_failed, fov_finished;
-    unsigned fov_written_mask, fov_logical_mask, fov_device_mask;
-    PcVrNativeViewPair view_pair;
-    bool view_skipped, view_admitted, view_failed, view_finished;
-    unsigned view_written_mask, view_verified_mask;
-} ProjectionTraversal;
+    uint64_t frame_pointer, root_layer, sibling, config, base;
+    unsigned root_side;
+    int root_offset_sign;     // which way the root's eye sits along the base camera's right
+    PcVrHeadLookCamera base_camera;
+    XrPoseSnapshot pose;
+    PcVrNativeViewPair pair;
+    RecordEye eyes[2];        // by side (the layer's +0x90 flag 0x1000)
+} FrameRecord;
 
+// The record, the published certificates and the display's pair change only under it.
 static pthread_mutex_t projection_lock = PTHREAD_MUTEX_INITIALIZER;
-// What a draw's certificate depends on, beyond its own render scope, changes only under projection_lock: the eye
-// notes, the traversal, the published certificates and whether the trace is armed. Everything that takes the lock to
-// change any of it takes it with projection_lock_for_change, which moves this version on; a render scope keeps the
-// answer it got for a command buffer for as long as the version stands (pc_vr_render_trace_record). The two that take
-// the lock only to read (render_record_evaluate, render_scope_eye_layer) leave it alone. The display's pair of eye
-// layers (pc_vr_projection_trace_eye_layer) moves it on only when the pair changes (D095: kept answers refresh), and
-// the game's camera and projection builders only for an eye note's camera or projection (projection_note_layer).
-static atomic_uint_fast64_t render_state_version;
-static void projection_lock_for_change(void) {
-    pthread_mutex_lock(&projection_lock);
-    atomic_fetch_add_explicit(&render_state_version, 1, memory_order_release);
-}
 static atomic_bool projection_enabled;
 static bool projection_registered;
 static GuestFn projection_original, projection_device_original;
-static ProjectionNote projection_notes[2];
-// The two eye notes' layers (0: no note), kept with projection_notes under projection_lock and read without it: the
-// game builds every camera and projection through the same two builders, and one that is not an eye note's takes
-// neither the lock nor a new state version (pc_vr_render_trace_invalidate_camera, render_invalidate_projection). A
-// note that is not yet here has nothing to invalidate: a new note starts with no verification and no certificate.
-static _Atomic uint64_t projection_note_layers[2];
-static void projection_note_layers_update_locked(void) {
+static FrameRecord projection_record;
+// The record's eye layers (0: none), kept with it under projection_lock and read without it: the game builds every
+// camera and projection through the same two builders, and one that is not an eye's takes no lock
+// (pc_vr_render_trace_invalidate_camera, render_invalidate_projection).
+static _Atomic uint64_t record_eye_layers[2];
+static void record_eye_layers_update_locked(void) {
     for (unsigned side = 0; side < 2; ++side)
-        atomic_store_explicit(&projection_note_layers[side], projection_notes[side].note ? projection_notes[side].layer : 0,
-                              memory_order_release);
+        atomic_store_explicit(&record_eye_layers[side], projection_record.eyes[side].layer, memory_order_release);
 }
-static bool projection_note_layer(uint64_t layer) {
-    return layer && (atomic_load_explicit(&projection_note_layers[0], memory_order_acquire) == layer ||
-                     atomic_load_explicit(&projection_note_layers[1], memory_order_acquire) == layer);
+static bool record_eye_layer(uint64_t layer) {
+    return layer && (atomic_load_explicit(&record_eye_layers[0], memory_order_acquire) == layer ||
+                     atomic_load_explicit(&record_eye_layers[1], memory_order_acquire) == layer);
 }
-// The note numbers, and the count that bounds the bound-eye log line.
-static uint64_t projection_note_count, projection_rejected;
-static ProjectionTraversal projection_traversal;
+static bool record_eyes_known_locked(void) {
+    return projection_record.eyes[0].layer || projection_record.eyes[1].layer;
+}
+// The record's eye drawn through this layer's projection object (NULL: none).
+static RecordEye *record_eye_of_projection_locked(uint64_t object) {
+    for (unsigned side = 0; side < 2; ++side)
+        if (projection_record.eyes[side].layer && projection_record.eyes[side].layer + 0x288 == object)
+            return &projection_record.eyes[side];
+    return NULL;
+}
 // The Labo display's pair of eye layers, known from its own calls for them (pc_vr_projection_trace_eye_layer): the
-// root call for one eye layer, then the sibling call for the other, by the same stack and link tests as a traversal's,
-// without head look's camera binding. It tells the eye layers' draws from other layers' while there is no eye note yet
-// (render_scope_eye_layer). Under projection_lock; cleared at each arming and at the game reset.
+// root call for one eye layer, then the sibling call for the other, by the same stack and link tests as the record's,
+// without head look's camera binding. It tells the eye layers' draws from other layers' while the record knows no eye
+// layer yet (render_scope_eye_layer). Under projection_lock; cleared at each arming and at the game reset.
 typedef struct {
     // The root call seen and its sibling's not yet: the root's layer, configuration, side, frame pointer and thread.
     bool open;
@@ -150,18 +127,12 @@ typedef struct {
 } ProjectionDisplayPair;
 static ProjectionDisplayPair projection_display_pair;
 static uint64_t projection_display_pairs;  // the pairs recognised that differed from the one before (for the log)
-// Never reset this identity at re-arm/reset: reused guest stack addresses and
-// render-layer objects are not traversal identities. Zero is always invalid.
+// Never reset: reused guest stack addresses and render-layer objects are not frame identities. Zero is no record.
 static uint64_t projection_root_serial;
-// The counts that bound the traversal's and the writes' log lines to the first few.
-static uint64_t projection_roots, projection_traversal_pairs, projection_stack_rejected;
-static uint64_t projection_fov_rejected, projection_view_rejected;
-// The native FOV and view writes, on while the trace is armed; a failed write (restored) turns them off.
-static atomic_bool projection_fov_writes_on, projection_view_writes_on;
+// The counts that bound the records' and the refusals' log lines to the first few.
+static uint64_t projection_records, projection_refused;
 static double projection_view_scale, projection_launch_scale; // (live: pc_vr_world_scale)
 static _Atomic double projection_focus_m; // the camera's target distance at the last built pair (D057)
-static bool projection_matrix_contract(const float params[9], const float matrix[16]);
-static bool projection_near(double actual, double expected);
 
 // Immutable append-only storage outlives observation and queued command lists, reset and re-arm included. A slot is
 // reused after 64 newer certificates; its ID field acts as a sequence lock.
@@ -171,15 +142,11 @@ static atomic_bool render_enabled, render_collecting;
 static atomic_uint_fast64_t render_epoch;
 static GuestFn render_begin_original, render_end_original;
 // One render layer being rendered on this thread (between the layer's begin and end): the layer, its render info,
-// context and command buffer, its camera and projection, and the certificate last checked for it.
+// context and command buffer, its camera and projection.
 typedef struct {
-    uint64_t layer, rinfo, context, cb, camera, projection, checked_certificate;
+    uint64_t layer, rinfo, context, cb, camera, projection;
     uint32_t pass;
     bool readable, identity;
-    // The certificate last worked out for a draw in this scope (0: none), the command buffer it was asked for and the
-    // state version it was worked out at (pc_vr_render_trace_record).
-    bool answered;
-    uint64_t answer, answer_command_buffer, answer_version;
 } RenderScope;
 // This thread's stack of open render scopes (layers render inside one another). poisoned: the stack overflowed or a
 // begin and end did not match, so no draw on this thread gets a certificate until render_epoch changes (the trace is
@@ -191,43 +158,22 @@ typedef struct {
     RenderScope scopes[RENDER_SCOPE_CAP];
 } RenderScopes;
 static _Thread_local RenderScopes render_scopes;
-static void render_publish_locked(ProjectionNote *note);
-
-// A traversal's end: its admitted native FOV and view pairs are finished, complete or not, so no later writer of this
-// traversal adds to them. A rendered first eye cannot be rolled back; a partial pair gets no certificate pair, and the
-// next traversal starts afresh.
-static void projection_fov_finish_locked(void) {
-    ProjectionTraversal *traversal = &projection_traversal;
-    if (traversal->fov_admitted) traversal->fov_finished = true;
-    if (traversal->view_admitted) traversal->view_finished = true;
-}
-
-static uint64_t projection_hash(const void *data, size_t size) {
-    const unsigned char *bytes = data;
-    uint64_t hash = UINT64_C(14695981039346656037);
-    for (size_t i = 0; i < size; ++i) {
-        hash ^= bytes[i];
-        hash *= UINT64_C(1099511628211);
-    }
-    return hash;
-}
-
 static bool projection_read(uint64_t address, void *out, size_t size) {
     return labo_guest_copy(address, out, size, false);
 }
 
-static bool projection_identity(const ProjectionNote *note) {
+// The layer is an eye layer of the composition bound to this base camera: an aligned guest object whose selected
+// projection (+0x220) is its own (+0x288, of the perspective projection class), whose camera (+0x228) is of the eye
+// camera class, and whose source camera (+0x80) is the base (of the base camera class). Read once per eye call.
+static bool projection_eye_identity(uint64_t layer, uint64_t base) {
     uint64_t vtable = 0, selected = 0, source = 0, eye_vtable = 0, base_vtable = 0;
-    uint16_t flags = 0;
-    return note->layer >= GUEST_LO && note->layer <= GUEST_HI - 0x448 && !(note->layer & 7) &&
-        note->base >= GUEST_LO && note->base <= GUEST_HI - 0x60 && !(note->base & 7) &&
-        note->projection == note->layer + 0x288 &&
-        projection_read(note->projection, &vtable, sizeof vtable) && vtable == PROJ_VTABLE &&
-        projection_read(note->layer + 0x220, &selected, sizeof selected) && selected == note->projection &&
-        projection_read(note->layer + 0x80, &source, sizeof source) && source == note->base &&
-        projection_read(note->layer + 0x228, &eye_vtable, sizeof eye_vtable) && eye_vtable == PROJ_EYE_VTABLE &&
-        projection_read(note->base, &base_vtable, sizeof base_vtable) && base_vtable == PROJ_BASE_VTABLE &&
-        projection_read(note->layer + 0x90, &flags, sizeof flags) && !!(flags & 0x1000) == note->side;
+    return layer >= GUEST_LO && layer <= GUEST_HI - 0x448 && !(layer & 7) &&
+        base >= GUEST_LO && base <= GUEST_HI - 0x60 && !(base & 7) &&
+        projection_read(layer + 0x288, &vtable, sizeof vtable) && vtable == PROJ_VTABLE &&
+        projection_read(layer + 0x220, &selected, sizeof selected) && selected == layer + 0x288 &&
+        projection_read(layer + 0x80, &source, sizeof source) && source == base &&
+        projection_read(layer + 0x228, &eye_vtable, sizeof eye_vtable) && eye_vtable == PROJ_EYE_VTABLE &&
+        projection_read(base, &base_vtable, sizeof base_vtable) && base_vtable == PROJ_BASE_VTABLE;
 }
 
 static bool projection_frame_address(uint64_t frame) {
@@ -270,70 +216,11 @@ bool pc_vr_projection_trace_root(uint64_t frame) {
     return projection_saved_frame(frame, saved) && saved[1] == PROJ_ROOT_RETURN;
 }
 
-static bool projection_native_quaternion(const float rotation[4]) {
-    double norm = 0;
-    for (unsigned i = 0; i < 4; ++i) {
-        if (!isfinite(rotation[i])) return false;
-        norm += (double)rotation[i] * rotation[i];
-    }
-    return norm > 0.99 && norm < 1.01;
-}
-
-static bool projection_native_pose(const XrPoseSnapshot *pose, uint64_t now) {
-    if (!pose->active || !pose->orientation_valid || !pose->orientation_tracked ||
-        !pose->views_valid || !pose->native_views_valid || !pose->frame_id || !pose->generation ||
-        !pose->published_monotonic_ns || now < pose->published_monotonic_ns ||
-        now - pose->published_monotonic_ns > PROJ_POSE_MAX_AGE_NS ||
-        !projection_native_quaternion(pose->orientation_xyzw)) return false;
-    for (unsigned side = 0; side < 2; ++side) {
-        const XrEyeSnapshot *eye = &pose->eyes[side];
-        if (!projection_native_quaternion(eye->orientation_xyzw)) return false;
-        for (unsigned i = 0; i < 3; ++i) {
-            if (!isfinite(eye->position_xyz[i])) return false;
-            if (pose->angular_velocity_valid && !isfinite(pose->angular_velocity_xyz[i])) return false;
-        }
-        const float *fov = eye->fov_left_right_up_down;
-        for (unsigned i = 0; i < 4; ++i) if (!isfinite(fov[i])) return false;
-        if (!(fov[0] < fov[1] && fov[3] < fov[2] && fov[0] > -1.5707963f &&
-              fov[1] < 1.5707963f && fov[3] > -1.5707963f && fov[2] < 1.5707963f)) return false;
-    }
-    return true;
-}
-
-// A publication can occur after the caller's earlier clock read. Validate
-// both samples against time read AFTER copying current tracking, otherwise a
-// valid newer publication is falsely classified as future. Keep the rendered
-// sample immutable; current tracking only gates its continued eligibility.
-// Each refusal is counted by its reason (pc_vr_guards.h).
-static bool projection_pose_current(const XrPoseSnapshot *retained) {
-    XrPoseSnapshot current = {0};
-    const XrPoseReadResult read = xr_runtime_get_pose(&current);
-    if (read != XR_POSE_VALID) {
-        pc_vr_guard_count(read == XR_POSE_BUSY ? PC_VR_GUARD_POSE_BUSY : PC_VR_GUARD_POSE_UNAVAILABLE);
-        return false;
-    }
-    const uint64_t checked_now = xr_runtime_pose_clock_ns();
-    if (!projection_native_pose(retained, checked_now) || !projection_native_pose(&current, checked_now)) {
-        const bool aged = (retained->published_monotonic_ns && checked_now >= retained->published_monotonic_ns &&
-                           checked_now - retained->published_monotonic_ns > PROJ_POSE_MAX_AGE_NS) ||
-                          (current.published_monotonic_ns && checked_now >= current.published_monotonic_ns &&
-                           checked_now - current.published_monotonic_ns > PROJ_POSE_MAX_AGE_NS);
-        pc_vr_guard_count(aged ? PC_VR_GUARD_POSE_AGE : PC_VR_GUARD_POSE_INVALID);
-        return false;
-    }
-    if (current.generation != retained->generation) {
-        pc_vr_guard_count(PC_VR_GUARD_POSE_GENERATION);
-        return false;
-    }
-    return true;
-}
-
-static ProjectionNote *projection_find_note(uint64_t object) {
-    ProjectionNote *note = NULL;
-    for (unsigned i = 0; i < 2; ++i)
-        if (projection_notes[i].note && projection_notes[i].projection == object &&
-            (!note || projection_notes[i].note > note->note)) note = &projection_notes[i];
-    return note;
+// A pose with native views: what the eyes are rendered with and xrEndFrame is given. Its flags, not its values (D116:
+// OpenXR's poses and FOVs are used as given), nor its age (D101: the frame keeps the pose head look took).
+static bool projection_native_pose(const XrPoseSnapshot *pose) {
+    return pose->active && pose->orientation_valid && pose->orientation_tracked && pose->views_valid &&
+        pose->native_views_valid && pose->frame_id && pose->generation && pose->calibration.epoch;
 }
 
 bool pc_vr_render_trace_enabled(void) {
@@ -424,58 +311,41 @@ static void render_end_wrapper(Cpu *cpu) {
     }
 }
 
-static void render_publish_locked(ProjectionNote *note) {
-    if (!atomic_load_explicit(&render_collecting, memory_order_relaxed) || note->render_certificate ||
-        !note->native_view_verified || !note->fov_logical_ok || !note->fov_device_ok ||
-        !note->render_view_current || !note->render_logical_current || !note->render_device_current) return;
+static void render_publish_locked(RecordEye *eye) {
+    if (!atomic_load_explicit(&render_collecting, memory_order_relaxed) || eye->certificate ||
+        !eye->view_current || !eye->logical_current || !eye->device_current) return;
     const unsigned count = atomic_load_explicit(&render_certificate_count, memory_order_relaxed);
     if (count == UINT32_MAX) return;  // (ids never wrap: an old id must not resolve to a new certificate)
-    float parameters[9], logical[16], device[16];
-    if (!projection_read(note->projection + 0x98, parameters, sizeof parameters) ||
-        !projection_read(note->projection + 0xc, logical, sizeof logical) ||
-        !projection_read(note->projection + 0x4c, device, sizeof device)) return;
-    const ProjectionTraversal *traversal = &projection_traversal;
-    PcVrRenderCertificate certificate = {.id = count + 1, .traversal = traversal->serial, .frame = note->frame,
-        .generation = note->generation, .native_index = (uint32_t)note->fov_native_index,
-        .units_per_meter = projection_view_scale,
-        .camera_hash = note->render_camera_hash, .view_hash = note->render_view_hash,
-        .parameters_hash = projection_hash(parameters, sizeof parameters),
-        .logical_hash = projection_hash(logical, sizeof logical),
-        .device_hash = projection_hash(device, sizeof device),
+    float parameters[9], device[16];
+    if (!projection_read(eye->layer + 0x288 + 0x98, parameters, sizeof parameters) ||
+        !projection_read(eye->layer + 0x288 + 0x4c, device, sizeof device)) return;
+    PcVrRenderCertificate certificate = {.id = count + 1, .traversal = eye->serial, .frame = eye->pose.frame_id,
+        .generation = eye->pose.generation, .native_index = eye->native_index,
+        .units_per_meter = eye->units_per_meter,
         .depth_terms = {device[10], device[11], device[14], device[15]}, .near_far = {parameters[0], parameters[1]},
-        .native_snapshot = traversal->native_snapshot};
+        .native_snapshot = eye->pose};
     render_certificate_store(&certificate);
     atomic_store_explicit(&render_certificate_count, count + 1, memory_order_release);
-    note->render_certificate = certificate.id;
+    eye->certificate = certificate.id;
 }
 
-static bool render_fingerprint(const ProjectionNote *note, const PcVrRenderCertificate *cert) {
-    PcVrHeadLookCamera camera;
-    float view[12], parameters[9], logical[16], device[16];
-    uint16_t dirty = UINT16_MAX;
-    return projection_read(note->layer + 0x260, &camera, sizeof camera) &&
-        projection_read(note->layer + 0x230, view, sizeof view) &&
-        projection_read(note->projection + 8, &dirty, sizeof dirty) && !dirty &&
-        projection_read(note->projection + 0x98, parameters, sizeof parameters) &&
-        projection_read(note->projection + 0xc, logical, sizeof logical) &&
-        projection_read(note->projection + 0x4c, device, sizeof device) &&
-        projection_hash(&camera, sizeof camera) == cert->camera_hash &&
-        projection_hash(view, sizeof view) == cert->view_hash &&
-        projection_hash(parameters, sizeof parameters) == cert->parameters_hash &&
-        projection_hash(logical, sizeof logical) == cert->logical_hash &&
-        projection_hash(device, sizeof device) == cert->device_hash;
+// The record's eye drawn by this render scope: the scope is the eye layer's, through its own camera and projection.
+static const RecordEye *record_eye_of_scope_locked(const RenderScope *scope) {
+    for (unsigned side = 0; side < 2; ++side) {
+        const RecordEye *eye = &projection_record.eyes[side];
+        if (eye->layer && eye->layer == scope->layer && scope->camera == eye->layer + 0x228 &&
+            scope->projection == eye->layer + 0x288) return eye;
+    }
+    return NULL;
 }
 
-// The layer's guest state against the certificate, a mismatch counted (pc_vr_guards.h).
-static bool render_fingerprint_counted(const ProjectionNote *note, const PcVrRenderCertificate *cert) {
-    const bool same = projection_identity(note) && render_fingerprint(note, cert);
-    if (!same) pc_vr_guard_count(PC_VR_GUARD_FINGERPRINT_MISMATCH);
-    return same;
-}
-
-// Works a draw's certificate out in full: the draw's render scope against the layer's guest state now, then the eye
-// note, the traversal and the certificate under projection_lock.
-static uint64_t render_record_evaluate(uint64_t command_buffer) {
+// The certificate of a draw being recorded on this thread into this command buffer (0: none), asked for every draw
+// the game records: the draw's render scope against the layer's render info now, then the record's eye under
+// projection_lock. The eye's camera and projection change only through the game's two builders, and each call for an
+// eye takes its certificate away (pc_vr_render_trace_invalidate_camera, render_invalidate_projection), so the
+// certificate stands for them as they are. Render callbacks can record on a worker other than the camera thread.
+uint64_t pc_vr_render_trace_record(uint64_t command_buffer) {
+    if (!atomic_load_explicit(&render_collecting, memory_order_relaxed)) return 0;
     RenderScopes *tls = render_tls();
     if (tls->poisoned || !tls->depth || !tls->scopes[tls->depth - 1].identity) return 0;
     RenderScope *scope = &tls->scopes[tls->depth - 1];
@@ -483,86 +353,43 @@ static uint64_t render_record_evaluate(uint64_t command_buffer) {
     if (!command_buffer || command_buffer != scope->cb || command_buffer != current_scope.cb) return 0;
     if (!render_scope_matches(scope, &current_scope)) return 0;
     pthread_mutex_lock(&projection_lock);
-    const ProjectionNote *note = projection_find_note(scope->projection);
-    const ProjectionTraversal *traversal = &projection_traversal;
-    uint64_t id = 0;
-    // Render callbacks can record on a worker different from the verified
-    // camera-construction thread. Scope/object/generation/readback evidence is
-    // required here; root/sibling construction still requires the same thread.
-    // In order: the scope is the eye layer's own camera and projection; the trace is armed and the note's traversal
-    // the current one, admitted, not failed and not skipped for warmup; the eye's view and FOV are verified and still
-    // current, with a certificate.
-    const bool ready = note && note->layer == scope->layer && scope->camera == note->layer + 0x228 &&
-        atomic_load_explicit(&projection_enabled, memory_order_relaxed) &&
-        traversal->serial && note->traversal_serial == traversal->serial &&
-        traversal->view_admitted && !traversal->view_failed && !traversal->fov_failed && !traversal->view_skipped &&
-        note->native_view_verified && note->fov_applied && note->fov_logical_ok && note->fov_device_ok &&
-        note->render_view_current && note->render_logical_current && note->render_device_current &&
-        note->render_certificate;
-    // The note's certificate, still in the store, and the layer's guest state still matching it (checked once per
-    // certificate in a render scope). (The certificate is made from this note under projection_lock, and an eye call
-    // replaces the note whole with no certificate, so its traversal, frame, generation and eye are the note's: the
-    // validation review's step 3 removed comparing them again.)
-    PcVrRenderCertificate cert;
-    if (ready && pc_vr_render_trace_resolve(note->render_certificate, &cert) &&
-        (scope->checked_certificate == cert.id || render_fingerprint_counted(note, &cert))) {
-        scope->checked_certificate = cert.id;
-        id = cert.id;
-    }
+    const RecordEye *eye = record_eye_of_scope_locked(scope);
+    const uint64_t id = eye && atomic_load_explicit(&projection_enabled, memory_order_relaxed) ? eye->certificate : 0;
     pthread_mutex_unlock(&projection_lock);
     return id;
 }
 
-// The certificate of a draw being recorded on this thread into this command buffer (0: none). Asked for every draw
-// the game records. A render scope keeps the answer worked out for its command buffer and gives it again until
-// render_state_version moves: nothing a certificate depends on has changed since, so working it out again (guest
-// reads, the lock) would give the same. What the kept answer does not see is the game rewriting the layer's own render
-// info in guest memory in the middle of the layer's rendering; the scope's end still checks that it matches its begin.
-uint64_t pc_vr_render_trace_record(uint64_t command_buffer) {
-    if (!atomic_load_explicit(&render_collecting, memory_order_relaxed)) return 0;
-    RenderScopes *tls = render_tls();
-    RenderScope *scope = !tls->poisoned && tls->depth && tls->scopes[tls->depth - 1].identity ?
-        &tls->scopes[tls->depth - 1] : NULL;
-    const uint64_t version = atomic_load_explicit(&render_state_version, memory_order_acquire);
-    if (scope && scope->answered && scope->answer_command_buffer == command_buffer && scope->answer_version == version)
-        return scope->answer;
-    const uint64_t id = render_record_evaluate(command_buffer);
-    if (!scope) return id;
-    // (version was read before the evaluation: a change during it leaves the answer already out of date)
-    scope->answered = true;
-    scope->answer = id;
-    scope->answer_command_buffer = command_buffer;
-    scope->answer_version = version;
-    return id;
-}
-
 // Whether the layer this thread is rendering (its innermost render scope) is one of the two eye layers, drawn through
-// that layer's own camera and projection: an eye note's layer, or, while there is no eye note yet (after the first
-// load, until head look binds the game's camera), one of the display's pair of eye layers (projection_display_pair,
-// known from the display's own calls). Unlike a certificate it does not depend on
-// the eye's view and FOV having been verified for this frame. Returns PC_VR_LAYER_DRAW_EYE when it is, 0 when it is
-// another layer (the pause menu's) once a pair or a note is known, and PC_VR_LAYER_DRAW_MAYBE_EYE when that cannot be
-// told: neither a pair nor a note is known yet, or this thread's render scopes are not to be trusted.
+// that layer's own camera and projection: an eye layer of the record, or, while the record knows none yet (after the
+// first load, until head look binds the game's camera), one of the display's pair of eye layers
+// (projection_display_pair, known from the display's own calls). Unlike a certificate it does not depend on the eye's
+// view and FOV for this frame. Returns PC_VR_LAYER_DRAW_EYE when it is, 0 when it is another layer (the pause menu's)
+// once a pair or an eye layer is known, and PC_VR_LAYER_DRAW_MAYBE_EYE when that cannot be told: neither is known
+// yet, or this thread's render scopes are not to be trusted; with PC_VR_LAYER_DRAW_UNBOUND when the layer is drawn
+// with the game's own camera.
 static uint32_t render_scope_eye_layer(void) {
     RenderScopes *tls = render_tls();
     if (!tls->poisoned && !tls->depth) return 0;  // (not rendering a layer)
     if (tls->poisoned || !tls->scopes[tls->depth - 1].identity) return PC_VR_LAYER_DRAW_MAYBE_EYE;
     const RenderScope *scope = &tls->scopes[tls->depth - 1];
     pthread_mutex_lock(&projection_lock);
-    const ProjectionNote *note = projection_find_note(scope->projection);
-    const bool note_layer = note && note->layer == scope->layer && scope->camera == note->layer + 0x228;
+    const RecordEye *eye = record_eye_of_scope_locked(scope);
+    const bool record_layer = eye != NULL;
     const ProjectionDisplayPair *pair = &projection_display_pair;
-    const bool notes_known = projection_notes[0].note || projection_notes[1].note;
-    // The display's pair speaks only until an eye note exists: while the pause menu is open the display alternates
-    // between the world's pair and the menu's own pair of layers through the same calls (Link, 2026-11-12), which only
-    // an eye note's base camera (the play camera) tells apart. (As an eye note's layer: the scope's camera and
-    // projection are the layer's own.)
-    const bool pair_known = !notes_known && pair->layers[0] && pair->layers[1];
+    const bool record_known = record_eyes_known_locked();
+    // The display's pair speaks only until the record knows an eye layer: while the pause menu is open the display
+    // alternates between the world's pair and the menu's own pair of layers through the same calls (Link,
+    // 2026-11-12), which only the record's base camera (the play camera) tells apart.
+    const bool pair_known = !record_known && pair->layers[0] && pair->layers[1];
     const bool pair_layer = pair_known && (scope->layer == pair->layers[0] || scope->layer == pair->layers[1]) &&
         scope->camera == scope->layer + 0x228 && scope->projection == scope->layer + 0x288;
-    const bool none_known = !pair_known && !notes_known;
+    const bool none_known = !pair_known && !record_known;
+    // Drawn with the game's own camera: the record's eye without its view this frame (its call refused or not the
+    // record's; a builder call takes view_current away until the record's own build), or no record eye at all.
+    const bool unbound = record_layer ? !eye->view_current : pair_layer || none_known;
     pthread_mutex_unlock(&projection_lock);
-    return note_layer || pair_layer ? PC_VR_LAYER_DRAW_EYE : none_known ? PC_VR_LAYER_DRAW_MAYBE_EYE : 0;
+    const uint32_t flags = unbound ? PC_VR_LAYER_DRAW_UNBOUND : 0;
+    return record_layer || pair_layer ? PC_VR_LAYER_DRAW_EYE | flags : none_known ? PC_VR_LAYER_DRAW_MAYBE_EYE | flags : 0;
 }
 
 // The kind of draw this thread is recording (pc_vr_render_trace.h PcVrLayerDraw, with its layer's flag).
@@ -588,428 +415,227 @@ uint32_t rt_lens_draw_begin(uint32_t hidden) {
     return previous;
 }
 
+uint32_t rt_rune_test_draw_begin(void) {
+    const uint32_t previous = render_layer_draw;
+    if (pc_vr_enabled()) render_layer_draw = previous | PC_VR_LAYER_DRAW_RUNE_TEST;
+    return previous;
+}
+
 void rt_layer_draw_end(uint32_t previous) { render_layer_draw = previous; }
 
 uint32_t pc_vr_layer_draw_recording(void) { return render_layer_draw; }
 
 void pc_vr_render_trace_invalidate_camera(uint64_t camera) {
-    if (!atomic_load_explicit(&render_collecting, memory_order_relaxed) || !projection_note_layer(camera - 0x228))
+    if (!atomic_load_explicit(&render_collecting, memory_order_relaxed) || !record_eye_layer(camera - 0x228))
         return;
-    projection_lock_for_change();
-    for (unsigned i = 0; i < 2; ++i) {
-        ProjectionNote *note = &projection_notes[i];
-        if (note->note && camera == note->layer + 0x228) {
-            note->render_view_current = false; note->render_certificate = 0;
-        }
+    pthread_mutex_lock(&projection_lock);
+    for (unsigned side = 0; side < 2; ++side) {
+        RecordEye *eye = &projection_record.eyes[side];
+        if (eye->layer && camera == eye->layer + 0x228) { eye->view_current = false; eye->certificate = 0; }
     }
     pthread_mutex_unlock(&projection_lock);
 }
 
 static void render_invalidate_projection(uint64_t object, bool device) {
-    if (!atomic_load_explicit(&render_collecting, memory_order_relaxed) || !projection_note_layer(object - 0x288))
+    if (!atomic_load_explicit(&render_collecting, memory_order_relaxed) || !record_eye_layer(object - 0x288))
         return;
-    projection_lock_for_change();
-    ProjectionNote *note = projection_find_note(object);
-    if (note) {
-        note->render_device_current = false; note->render_certificate = 0;
-        if (!device) note->render_logical_current = false;
+    pthread_mutex_lock(&projection_lock);
+    RecordEye *eye = record_eye_of_projection_locked(object);
+    if (eye) {
+        eye->device_current = false; eye->certificate = 0;
+        if (!device) eye->logical_current = false;
     }
     pthread_mutex_unlock(&projection_lock);
 }
 
-static void projection_view_reject_locked(unsigned reason) {
-    ProjectionTraversal *traversal = &projection_traversal;
-    if (traversal->view_failed) return;
-    traversal->view_failed = traversal->fov_failed = true;
-    ++projection_view_rejected;
-    pc_vr_guard_count(PC_VR_GUARD_VIEW_HEAD_LOOK_NOT_APPLIED + (reason - 1));  // (reasons 1 to 4, in the enum's order)
-    if (projection_view_rejected <= 4)
-        LOG("[pc-vr-native-view] rejected=%llu reason=%u\n",
-            (unsigned long long)projection_view_rejected, reason);
-    if (traversal->view_written_mask || traversal->fov_written_mask) projection_fov_finish_locked();
-}
-
-void pc_vr_projection_trace_head_result(uint64_t layer, uint64_t sequence, bool applied) {
-    if (!atomic_load_explicit(&projection_fov_writes_on, memory_order_relaxed)) return;
-    projection_lock_for_change();
-    ProjectionNote *note = projection_find_note(layer + 0x288);
-    if (note && note->layer == layer && note->sequence == sequence && !note->head_acknowledged) {
-        note->head_acknowledged = true;
-        if (!applied && note->traversal_serial == projection_traversal.serial &&
-            !projection_traversal.view_skipped) projection_view_reject_locked(1);
-    }
-    pthread_mutex_unlock(&projection_lock);
-}
-
-static void projection_fov_reject_locked(unsigned reason) {
-    ++projection_fov_rejected;
-    projection_traversal.fov_failed = true;
-    pc_vr_guard_count(PC_VR_GUARD_FOV_PRECONDITION + (reason - 1));  // (reasons 1 to 3, in the enum's order)
-    if (projection_fov_rejected <= 4)
-        LOG("[pc-vr-native-fov] rejected=%llu reason=%u\n",
-            (unsigned long long)projection_fov_rejected, reason);
-    if (projection_traversal.fov_written_mask || projection_traversal.view_written_mask)
-        projection_fov_finish_locked();
-}
-
-PcVrNativeViewResult pc_vr_projection_trace_native_view(uint64_t layer, uint64_t sequence,
-    const PcVrHeadLookCamera *center, const PcVrHeadLookCamera *original_eye,
-    const PcVrNativeViewReference *reference, PcVrNativeViewToken *token) {
-    if (!atomic_load_explicit(&projection_view_writes_on, memory_order_relaxed))
-        return PC_VR_NATIVE_VIEW_LEGACY;
-    projection_lock_for_change();
-    ProjectionTraversal *traversal = &projection_traversal;
-    ProjectionNote *note = projection_find_note(layer + 0x288);
-    if (!atomic_load_explicit(&projection_view_writes_on, memory_order_relaxed) ||
-        !atomic_load_explicit(&projection_enabled, memory_order_relaxed)) {
-        pthread_mutex_unlock(&projection_lock); return PC_VR_NATIVE_VIEW_LEGACY;
-    }
-    const bool identity = note && note->layer == layer && note->sequence == sequence &&
-        note->traversal_serial && note->traversal_serial == traversal->serial &&
-        pthread_equal(traversal->thread, pthread_self());
-    const bool root = identity && note->note == traversal->root.note;
-    // The root decides warmup for both eyes. A legacy root can establish q0,
-    // but its sibling must not start half a native pair using that new q0.
-    if (identity && (traversal->view_skipped || (root && !reference && !traversal->view_admitted))) {
-        traversal->view_skipped = true;
-        pthread_mutex_unlock(&projection_lock); return PC_VR_NATIVE_VIEW_SKIPPED;
-    }
-    const uint64_t now = xr_runtime_pose_clock_ns();
-    ProjectionNote *root_note = &projection_notes[traversal->root.side];
-    bool valid = identity && center && original_eye && reference && token && !note->native_view_attempted &&
-        !note->head_acknowledged && !traversal->view_failed && !traversal->fov_failed && traversal->native_latched &&
-        note->native_fov_ready && note->latch_valid && note->frame == traversal->native_snapshot.frame_id &&
-        note->generation == traversal->native_snapshot.generation &&
-        projection_hash(center, sizeof *center) == note->base_hash && now >= note->time_ns &&
-        now - note->time_ns <= PROJ_POSE_MAX_AGE_NS &&
-        projection_native_pose(&traversal->native_snapshot, now) && projection_identity(note) &&
-        projection_pose_current(&traversal->native_snapshot);
-    if (identity) note->native_view_attempted = true;
-    valid = valid && (root ? (traversal->open && !traversal->view_admitted) :
-        (traversal->view_admitted && !traversal->view_finished && traversal->native_pair && !traversal->open &&
-         root_note->note == traversal->root.note && root_note->native_view_verified &&
-         root_note->sequence == sequence && root_note->basis.offset_sign == -note->basis.offset_sign &&
-         !memcmp(reference, &traversal->view_pair.reference, sizeof *reference) &&
-         traversal->view_written_mask == (1u << traversal->root.side)));
-    // Reject already-known FOV incompatibilities before changing a camera.
-    // The original logical writer repeats these guards at its actual call.
-    float perspective[9], logical[16], depth[2];
-    uint16_t dirty = 0;
-    uint32_t posture = UINT32_MAX;
-    if (valid) valid = projection_read(note->projection + 0x98, perspective, sizeof perspective) &&
-        pc_vr_projection_logical(perspective, logical) && projection_matrix_contract(perspective, logical) &&
-        projection_read(note->projection + 8, &dirty, sizeof dirty) && (dirty & 0xff) == 1 && (dirty >> 8) <= 1 &&
-        projection_read(note->projection + 0x8c, &posture, sizeof posture) && posture == 0 &&
-        projection_read(note->projection + 0x90, depth, sizeof depth) && isfinite(depth[0]) && isfinite(depth[1]);
-    if (valid && root) valid = pc_vr_native_view_build_pair(center, reference,
-        &traversal->native_snapshot, projection_view_scale, &traversal->view_pair);
-    if (valid && root) {
-        double focus = 0;
-        for (unsigned i = 0; i < 3; ++i) focus += pow((double)center->target[i] - center->position[i], 2);
-        focus = sqrt(focus) / projection_view_scale;
-        if (isfinite(focus)) atomic_store_explicit(&projection_focus_m, focus, memory_order_relaxed);
-    }
-    PcVrHeadLookCamera original, readback;
-    const uint64_t camera_fields = layer + 0x260;
-    if (valid) valid = projection_read(camera_fields, &original, sizeof original) &&
-        !memcmp(&original, original_eye, sizeof original);
-    if (!valid) {
-        projection_view_reject_locked(2);
-        pthread_mutex_unlock(&projection_lock); return PC_VR_NATIVE_VIEW_REJECTED;
-    }
-    if (root) traversal->view_admitted = true;
-    const int native_index = note->basis.offset_sign < 0 ? 0 : 1;
-    PcVrHeadLookCamera *mapped = &traversal->view_pair.eyes[native_index];
-    const bool written = labo_guest_copy(camera_fields, mapped, sizeof *mapped, true);
-    const bool verified = written && projection_read(camera_fields, &readback, sizeof readback) &&
-        !memcmp(&readback, mapped, sizeof readback);
-    if (!verified) {
-        // A failed host copy may touch a prefix. Restore the original fresh
-        // camera before its original builder runs; never repair its matrix.
-        const bool restored = labo_guest_copy(camera_fields, &original, sizeof original, true) &&
-            projection_read(camera_fields, &readback, sizeof readback) &&
-            !memcmp(&readback, &original, sizeof readback);
-        atomic_store_explicit(&projection_view_writes_on, false, memory_order_release);
-        atomic_store_explicit(&projection_fov_writes_on, false, memory_order_release);
-        projection_view_reject_locked(3);
-        pthread_mutex_unlock(&projection_lock);
-        if (!restored) FATAL("native view could not restore owned camera after a failed write\n");
-        return PC_VR_NATIVE_VIEW_REJECTED;
-    }
-    note->native_fields_applied = true;
-    traversal->view_written_mask |= 1u << note->side;
-    *token = (PcVrNativeViewToken){.note = note->note, .traversal_serial = traversal->serial,
-        .layer = layer, .sequence = sequence, .reference = *reference};
-    pthread_mutex_unlock(&projection_lock);
-    return PC_VR_NATIVE_VIEW_APPLIED;
-}
-
-bool pc_vr_projection_trace_native_view_built(const PcVrNativeViewToken *token,
-    bool calibration_current) {
-    if (!token || !token->note) return false;
-    projection_lock_for_change();
-    ProjectionTraversal *traversal = &projection_traversal;
-    ProjectionNote *note = projection_find_note(token->layer + 0x288);
-    const uint64_t now = xr_runtime_pose_clock_ns();
-    bool valid = calibration_current && note && note->note == token->note && note->layer == token->layer &&
-        note->sequence == token->sequence && note->traversal_serial == token->traversal_serial &&
-        token->traversal_serial == traversal->serial && traversal->view_admitted && !traversal->view_failed &&
-        !traversal->view_finished && note->native_fields_applied && !note->native_view_verified &&
-        pthread_equal(traversal->thread, pthread_self()) &&
-        !memcmp(&token->reference, &traversal->view_pair.reference, sizeof token->reference) &&
-        projection_identity(note) && projection_native_pose(&traversal->native_snapshot, now) &&
-        projection_pose_current(&traversal->native_snapshot);
-    PcVrHeadLookCamera readback;
-    float matrix[12];
-    double origin_residual = 0;
-    if (valid) {
-        const unsigned native_index = note->basis.offset_sign < 0 ? 0 : 1;
-        double baseline[3];
-        for (unsigned i = 0; i < 3; ++i)
-            baseline[i] = (double)traversal->view_pair.eyes[1].position[i] - traversal->view_pair.eyes[0].position[i];
-        valid = projection_read(token->layer + 0x260, &readback, sizeof readback) &&
-            !memcmp(&readback, &traversal->view_pair.eyes[native_index], sizeof readback) &&
-            projection_read(token->layer + 0x230, matrix, sizeof matrix) &&
-            pc_vr_native_view_matrix_matches(&readback, matrix, pc_vr_native_view_length(baseline), &origin_residual);
-    }
-    if (!valid) {
-        // Field writes have already happened and the original builder has run.
-        // No second builder invocation or guessed matrix repair is permitted.
-        // This traversal is left without a certificate.
-        projection_view_reject_locked(4);
-    } else {
-        note->native_view_verified = true;
-        note->render_view_current = true;
-        note->render_camera_hash = projection_hash(&readback, sizeof readback);
-        note->render_view_hash = projection_hash(matrix, sizeof matrix);
-        traversal->view_verified_mask |= 1u << note->side;
-    }
-    pthread_mutex_unlock(&projection_lock);
-    return valid;
-}
-
-// Returns a note token only after one verified 28-byte parameter mutation.
-// The caller invokes the original writer exactly once, regardless of outcome.
-static uint64_t projection_prepare_native_fov(uint64_t object) {
-    if (!atomic_load_explicit(&projection_fov_writes_on, memory_order_relaxed)) return 0;
-    projection_lock_for_change();
-    ProjectionNote *note = projection_find_note(object);
-    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed) ||
-        !atomic_load_explicit(&projection_fov_writes_on, memory_order_relaxed) || !note || note->fov_attempted) {
-        pthread_mutex_unlock(&projection_lock); return 0;
-    }
-    ProjectionTraversal *traversal = &projection_traversal;
-    if (traversal->view_skipped && note->traversal_serial == traversal->serial) {
-        pthread_mutex_unlock(&projection_lock); return 0;
-    }
-    note->fov_attempted = true;
-    const bool root = traversal->root.note == note->note;
-    const uint64_t now = xr_runtime_pose_clock_ns();
-    const unsigned side_bit = 1u << note->side;
-    const int native_index = note->basis.offset_sign < 0 ? 0 : 1;
-    ProjectionNote *root_note = &projection_notes[traversal->root.side];
-    ProjectionNote *sibling_note = &projection_notes[1 - traversal->root.side];
-    // (the FOV follows the native view: each eye's camera must be its verified native view)
-    const bool current_camera = traversal->view_admitted && !traversal->view_failed && note->native_view_verified;
-    const bool closed_pair_ready = traversal->native_pair && sibling_note->note == traversal->root.note + 1 &&
-        sibling_note->traversal_serial == traversal->serial && sibling_note->native_view_verified &&
-        sibling_note->native_fov_ready && sibling_note->latch_valid &&
-        sibling_note->sequence == note->sequence && sibling_note->frame == note->frame &&
-        sibling_note->generation == note->generation &&
-        sibling_note->basis.offset_sign == -note->basis.offset_sign && projection_identity(sibling_note);
-    bool valid = !traversal->fov_failed && note->traversal_serial && note->traversal_serial == traversal->serial &&
-        traversal->native_latched && pthread_equal(traversal->thread, pthread_self()) && note->native_fov_ready &&
-        current_camera && note->latch_valid && note->frame == traversal->native_snapshot.frame_id &&
-        note->generation == traversal->native_snapshot.generation && now >= note->time_ns &&
-        now - note->time_ns <= PROJ_POSE_MAX_AGE_NS &&
-        projection_native_pose(&traversal->native_snapshot, now) && projection_identity(note) &&
-        projection_pose_current(&traversal->native_snapshot);
-    // Camera setup may finish both siblings before either projection writer.
-    // `open` tracks observation, not rendering; a verified closed native pair
-    // is equally eligible for its root's first writer.
-    valid = valid && (root ? ((traversal->open || closed_pair_ready) && !traversal->fov_admitted) :
-        (traversal->fov_admitted && traversal->native_pair && !traversal->open && !traversal->fov_finished &&
-         root_note->note == traversal->root.note && root_note->fov_device_ok &&
-         root_note->sequence == note->sequence && root_note->fov_native_index != native_index &&
-         traversal->fov_device_mask == (1u << traversal->root.side) && !(traversal->fov_written_mask & side_bit)));
-    float original[9], mapped[9], original_logical[16], depth[2];
-    uint16_t dirty = 0;
-    uint32_t posture = UINT32_MAX;
-    if (valid) valid = projection_read(object + 0x98, original, sizeof original) &&
-        projection_read(object + 8, &dirty, sizeof dirty) && (dirty & 0xff) == 1 && (dirty >> 8) <= 1 &&
-        projection_read(object + 0x8c, &posture, sizeof posture) && posture == 0 &&
-        projection_read(object + 0x90, depth, sizeof depth) && isfinite(depth[0]) && isfinite(depth[1]);
-    // The only initial device posture admitted is the source/live-verified
-    // unrotated posture 0. All conversion fields remain owned by the game.
-    if (valid)
-        valid = pc_vr_projection_logical(original, original_logical) &&
-            pc_vr_projection_from_fov(traversal->native_snapshot.eyes[native_index].fov_left_right_up_down, original,
-                                      mapped);
-    if (!valid) {
-        projection_fov_reject_locked(1);
-        pthread_mutex_unlock(&projection_lock); return 0;
-    }
-    if (root) traversal->fov_admitted = true;
-    memcpy(note->fov_mapped, mapped, sizeof mapped);
-    memcpy(note->fov_angles, traversal->native_snapshot.eyes[native_index].fov_left_right_up_down,
-           sizeof note->fov_angles);
-    memcpy(note->fov_depth, depth, sizeof depth);
-    note->fov_native_index = native_index;
-    float readback[9];
-    uint16_t dirty_after = 0;
-    const bool written = labo_guest_copy(object + 0xa0, mapped + 2, 7 * sizeof(float), true);
-    const bool verified = written && projection_read(object + 0x98, readback, sizeof readback) &&
-        !memcmp(readback, mapped, sizeof mapped) && projection_read(object + 8, &dirty_after, sizeof dirty_after) &&
-        dirty_after == dirty;
-    if (!verified) {
-        // A failed OS copy may have changed a prefix. Restore and verify the
-        // exact original fields before letting the original writer continue.
-        const bool restored = labo_guest_copy(object + 0xa0, original + 2, 7 * sizeof(float), true) &&
-            projection_read(object + 0x98, readback, sizeof readback) && !memcmp(readback, original, sizeof original) &&
-            projection_read(object + 8, &dirty_after, sizeof dirty_after) && dirty_after == dirty;
-        atomic_store_explicit(&projection_fov_writes_on, false, memory_order_release);
-        projection_fov_reject_locked(2);
-        pthread_mutex_unlock(&projection_lock);
-        if (!restored) FATAL("native FOV could not restore owned parameters after a failed write\n");
-        return 0;
-    }
-    note->fov_applied = true;
-    traversal->fov_written_mask |= side_bit;
-    const uint64_t token = note->note;
-    pthread_mutex_unlock(&projection_lock);
-    return token;
-}
-
-static void projection_verify_native_fov(uint64_t object, bool device, uint64_t token) {
-    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed)) return;
-    projection_lock_for_change();
-    ProjectionNote *note = projection_find_note(object);
-    if (!note || !note->fov_applied || (token && token != note->note) ||
-        (device ? note->fov_device_ok : note->fov_logical_ok)) {
-        pthread_mutex_unlock(&projection_lock); return;
-    }
-    ProjectionTraversal *traversal = &projection_traversal;
-    float parameters[9], logical[16], converted[16], depth[2];
-    uint32_t posture = UINT32_MAX;
-    bool valid = note->traversal_serial == traversal->serial && !traversal->fov_failed && projection_identity(note) &&
-        projection_read(object + 0x98, parameters, sizeof parameters) &&
-        !memcmp(parameters, note->fov_mapped, sizeof parameters) &&
-        projection_read(object + 0xc, logical, sizeof logical) &&
-        projection_matrix_contract(parameters, logical) && pc_vr_projection_native_rays(note->fov_angles, logical);
-    if (device && valid) {
-        valid = note->fov_logical_ok && projection_read(object + 0x4c, converted, sizeof converted) &&
-            projection_read(object + 0x8c, &posture, sizeof posture) && posture == 0 &&
-            projection_read(object + 0x90, depth, sizeof depth) && !memcmp(depth, note->fov_depth, sizeof depth);
-        if (valid) for (unsigned i = 0; i < 16; ++i) valid &= isfinite(converted[i]);
-        if (valid) for (unsigned i = 0; i < 8; ++i) valid &= projection_near(converted[i], logical[i]);
-        if (valid) for (unsigned i = 12; i < 16; ++i) valid &= projection_near(converted[i], logical[i]);
-        valid = valid && projection_near(converted[8], depth[0] * (double)logical[8]) &&
-            projection_near(converted[9], depth[0] * (double)logical[9]) &&
-            projection_near(converted[10], depth[0] * ((double)logical[10] + depth[1] * logical[14])) &&
-            projection_near(converted[11], logical[11] * (double)depth[0] + depth[1] * logical[15]);
-    }
-    if (!valid) {
-        if (projection_fov_rejected < 4)  // (the stage of the first few, as projection_fov_reject_locked logs them)
-            LOG("[pc-vr-native-fov] verified_stage=%s eye=%llu\n", device ? "device" : "logical",
-                (unsigned long long)note->note);
-        projection_fov_reject_locked(3);
-    } else if (device) {
-        note->fov_device_ok = true; traversal->fov_device_mask |= 1u << note->side;
-        note->render_device_current = true;
-        render_publish_locked(note);
-        if (traversal->fov_device_mask == 3) projection_fov_finish_locked();
-    } else {
-        note->fov_logical_ok = true; traversal->fov_logical_mask |= 1u << note->side;
-        note->render_logical_current = true;
-    }
-    pthread_mutex_unlock(&projection_lock);
-}
-
-static void projection_traversal_reject(PcVrGuard reason) {
-    ++projection_stack_rejected;
+// A refusal: counted by reason, and the first few logged.
+static void projection_refuse_locked(PcVrGuard reason) {
     pc_vr_guard_count(reason);
-    memset(&projection_traversal, 0, sizeof projection_traversal);
-    if (projection_stack_rejected <= 3)
-        LOG("[pc-vr-traversal] rejected=%llu pending_cleared=1\n",
-            (unsigned long long)projection_stack_rejected);
+    if (++projection_refused <= 8)
+        LOG("[pc-vr-native-view] refused=%llu reason=%s\n", (unsigned long long)projection_refused,
+            pc_vr_guard_name(reason));
 }
 
-// The pinned ddb820 frame saves FP/LR at SP+0x40/+0x48 and sets FP=SP+0x40.
-// At the fresh-eye virtual call, root LR is dde6f0; direct sibling recursion
-// saves LR ddbdd8 and the root FP. No guest address or raw snapshot is logged.
-static void projection_observe_traversal(ProjectionNote *note, uint64_t frame, const XrPoseSnapshot *head_pose) {
-    uint64_t saved[2] = {0};
-    if (!projection_saved_frame(frame, saved)) {
-        projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE); return;
+bool pc_vr_projection_trace_eye(uint64_t layer, uint64_t base, const PcVrHeadLookCamera *base_camera, bool fresh,
+    const XrPoseSnapshot *pose, uint64_t guest_frame_pointer) {
+    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed)) return false;
+    // The call's own guest state, read before the lock: its frame record, the layer's objects, side, configuration
+    // and sibling link, the base camera's stored right row and the eye camera the game just copied from it.
+    uint64_t saved[2] = {0}, config = 0, sibling = 0;
+    uint16_t flags = 0;
+    float right[3];
+    PcVrHeadLookCamera eye_camera;
+    const bool framed = projection_saved_frame(guest_frame_pointer, saved);
+    const bool root = framed && saved[1] == PROJ_ROOT_RETURN;
+    const bool readable = projection_eye_identity(layer, base) &&
+        projection_read(layer + 0x90, &flags, sizeof flags) && projection_read(layer + 0x210, &config, sizeof config) &&
+        projection_read(layer + 0x208, &sibling, sizeof sibling) && projection_read(base + 8, right, sizeof right) &&
+        projection_read(layer + 0x260, &eye_camera, sizeof eye_camera);
+    const unsigned side = !!(flags & 0x1000);
+    pthread_mutex_lock(&projection_lock);
+    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed)) {
+        pthread_mutex_unlock(&projection_lock); return false;
     }
-    if (saved[1] == PROJ_ROOT_RETURN) {
-        memset(&projection_traversal, 0, sizeof projection_traversal);  // (an open earlier root is abandoned)
-        // Fail closed on identity exhaustion; wrapping would permit old IDs.
-        if (projection_root_serial == UINT64_MAX) {
-            projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_SERIAL_EXHAUSTED);
-            return;
+    FrameRecord *record = &projection_record;
+    PcVrGuard refused = PC_VR_GUARD_COUNT;
+    bool counted = true;  // (a sibling of a root already refused is not counted again)
+    if (!framed || (!root && saved[1] != PROJ_SIBLING_RETURN)) {
+        record->open = false;
+        refused = PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE;
+    } else if (root) {
+        // A new frame: the record starts afresh (an open earlier root is abandoned).
+        record->open = false;
+        record->serial = ++projection_root_serial;
+        if (!readable || !projection_config_address(config) || sibling == layer || (sibling & 7) ||
+            sibling < GUEST_LO || sibling > GUEST_HI - 0x448) refused = PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY;
+        else if (!fresh) refused = PC_VR_GUARD_VIEW_NOT_FRESH;
+        else if (!pose || !projection_native_pose(pose)) refused = PC_VR_GUARD_VIEW_NO_POSE;
+        else {
+            // (the D053 calibration of this LOCAL definition: the heading and origin the views are relative to)
+            PcVrNativeViewReference reference = {.generation = pose->calibration.epoch};
+            memcpy(reference.orientation_xyzw, pose->calibration.heading_xyzw, sizeof reference.orientation_xyzw);
+            memcpy(reference.origin_xyz, pose->calibration.origin_xyz, sizeof reference.origin_xyz);
+            if (!pc_vr_native_view_build_pair(base_camera, &reference, pose, projection_view_scale, &record->pair))
+                refused = PC_VR_GUARD_VIEW_PAIR;
+            else {
+                record->open = true;
+                record->thread = pthread_self();
+                record->frame_pointer = guest_frame_pointer;
+                record->root_layer = layer;
+                record->sibling = sibling;
+                record->config = config;
+                record->base = base;
+                record->root_side = side;
+                record->base_camera = *base_camera;
+                record->pose = *pose;
+                double focus = 0;
+                for (unsigned i = 0; i < 3; ++i) focus += pow((double)base_camera->target[i] - base_camera->position[i], 2);
+                focus = sqrt(focus) / projection_view_scale;
+                if (isfinite(focus)) atomic_store_explicit(&projection_focus_m, focus, memory_order_relaxed);
+                if (++projection_records <= 4)
+                    LOG("[pc-vr-traversal] record=%llu serial=%llu (the first few: the frames have started)\n",
+                        (unsigned long long)projection_records, (unsigned long long)record->serial);
+            }
         }
-        note->traversal_serial = ++projection_root_serial;
-        ++projection_roots;
-        if (!projection_config_address(note->config) || note->sibling == note->layer || (note->sibling & 7) ||
-            note->sibling < GUEST_LO || note->sibling > GUEST_HI - 0x448) {
-            projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY); return;
-        }
-        ProjectionTraversal *traversal = &projection_traversal;
-        traversal->root = *note;
-        traversal->frame_pointer = frame;
-        traversal->serial = note->traversal_serial;
-        traversal->thread = pthread_self();
-        traversal->open = true;
-        // Retain the base camera's complete sample. A display-rate publication
-        // between the base and this root must not substitute another pose/FOV.
-        // Still check current tracking/generation so loss or recenter fails closed.
-        const bool head_matches = head_pose && note->latch_valid &&
-            head_pose->frame_id == note->frame && head_pose->generation == note->generation;
-        if (head_matches && projection_pose_current(head_pose)) {
-            traversal->native_snapshot = *head_pose; // Exactly once for this traversal.
-            traversal->native_latched = true;
-        }
-        if (projection_roots <= 4)  // (the first few: the traversals have started)
-            LOG("[pc-vr-traversal] root=%llu serial=%llu root_return=1 native_latched=%d native_matches_head=%d\n",
-                (unsigned long long)projection_roots, (unsigned long long)traversal->serial,
-                traversal->native_latched, traversal->native_latched && note->latch_valid &&
-                head_matches);
-        return;
+    } else {
+        // The sibling's call (one use: a duplicate or delayed sibling cannot take the record again): the root's
+        // sibling layer on the other side, called from the root's call on its thread, with the same configuration and
+        // the base camera as it was at the root.
+        counted = record->open;
+        const bool linked = record->open && readable && layer == record->sibling &&
+            side != record->root_side && config == record->config && base == record->base &&
+            projection_sibling_call(saved, record->frame_pointer, record->thread) &&
+            !memcmp(base_camera, &record->base_camera, sizeof *base_camera) &&
+            projection_live_link(record->root_layer, record->frame_pointer, layer, config);
+        if (!linked) refused = PC_VR_GUARD_TRAVERSAL_NOT_SIBLING;
+        else if (!fresh) refused = PC_VR_GUARD_VIEW_NOT_FRESH;
+        record->open = false;
     }
-    ProjectionTraversal *traversal = &projection_traversal;
-    const ProjectionNote *root = &traversal->root;
-    const bool stack_link = traversal->open &&
-        projection_sibling_call(saved, traversal->frame_pointer, traversal->thread);
-    const bool layer_link = stack_link && root->sibling == note->layer && root->side != note->side &&
-        root->note + 1 == note->note && root->config == note->config && root->base == note->base &&
-        root->base_hash == note->base_hash;
-    if (!layer_link) {
-        projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_NOT_SIBLING);
-        return;
+    // Which runtime eye this layer's camera is: the game's copy sits to one side of the base camera along its right,
+    // the root's to the other; the runtime's view 0 is the left eye (PRIMARY_STEREO, used as given: D116).
+    PcVrProjectionEyeBasis basis = {0};
+    if (refused == PC_VR_GUARD_COUNT &&
+        (!pc_vr_projection_eye_basis(&record->base_camera, &eye_camera, right, &basis) || !basis.right_matches ||
+         !basis.parallel_eye || !basis.lateral_eye || !basis.offset_sign ||
+         (!root && basis.offset_sign != -record->root_offset_sign))) refused = PC_VR_GUARD_VIEW_PLACEMENT;
+    const unsigned native_index = basis.offset_sign < 0 ? 0 : 1;
+    // One write (D115 step 5c), not read back: labo_guest_copy refuses a page that is not writable before it copies,
+    // and the eye layer is the game's heap object. A refused write leaves the eye without a certificate this frame.
+    if (refused == PC_VR_GUARD_COUNT &&
+        !labo_guest_copy(layer + 0x260, &record->pair.eyes[native_index], sizeof(PcVrHeadLookCamera), true))
+        refused = PC_VR_GUARD_VIEW_WRITE_FAILED;
+    if (refused == PC_VR_GUARD_COUNT && root) record->root_offset_sign = basis.offset_sign;
+    if (refused != PC_VR_GUARD_COUNT) {
+        if (root) record->open = false;
+        if (counted) projection_refuse_locked(refused);
     }
-    // Revalidate the root's still-live guest relation. The original sibling
-    // may have no reverse link; require the source-backed root->sibling link.
-    if (!projection_identity(root) ||
-        !projection_live_link(root->layer, traversal->frame_pointer, note->layer, note->config)) {
-        projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_LINK_GONE); return;
+    // This side's eye, replaced by its own call: an eye layer of the composition, written or not. A call that cannot
+    // say its side (its objects unreadable), or a refused second call on a side this record already wrote (the root's),
+    // leaves the eyes as they are.
+    RecordEye *eye = &record->eyes[side];
+    const bool replaces = readable &&
+        (root || refused == PC_VR_GUARD_COUNT || !eye->view_written || eye->serial != record->serial);
+    if (replaces) *eye = (RecordEye){.layer = layer};
+    if (replaces && refused == PC_VR_GUARD_COUNT) {
+        eye->serial = record->serial;
+        eye->thread = pthread_self();
+        eye->native_index = native_index;
+        eye->units_per_meter = record->pair.game_units_per_meter;
+        eye->pose = record->pose;
+        eye->view_written = true;
     }
-    note->traversal_serial = traversal->serial;
-    traversal->open = false; // A duplicate/delayed sibling cannot consume it again.
-    ++projection_traversal_pairs;
-    // A new publication in the same generation must not replace the root
-    // snapshot. Lost tracking, recenter/reset, BUSY or age reject the pair.
-    if (traversal->native_latched) traversal->native_pair = projection_pose_current(&traversal->native_snapshot);
-    if (projection_traversal_pairs <= 4)  // (the first few: the pairs are recognised)
-        LOG("[pc-vr-traversal] pair=%llu serial=%llu saved_frame_link=1 exact_layer_config_base=1 opposite_sides=1 same_base_pose=1 same_head_latch=%d native_snapshot_retained=%d native_pair_valid=%d\n",
-            (unsigned long long)projection_traversal_pairs, (unsigned long long)traversal->serial,
-            root->sequence && root->sequence == note->sequence && root->frame == note->frame &&
-            root->generation == note->generation && root->latch_valid && note->latch_valid,
-            traversal->native_latched, traversal->native_pair);
+    record_eye_layers_update_locked();
+    pthread_mutex_unlock(&projection_lock);
+    return refused == PC_VR_GUARD_COUNT;
 }
 
-// A layer that is an eye layer by its own objects, without the base camera an eye note also checks
-// (projection_identity): an aligned guest object whose selected projection (+0x220) is its own (+0x288, of the
+void pc_vr_projection_trace_eye_built(uint64_t layer) {
+    pthread_mutex_lock(&projection_lock);
+    for (unsigned side = 0; side < 2; ++side) {
+        RecordEye *eye = &projection_record.eyes[side];
+        if (eye->layer == layer && eye->view_written && pthread_equal(eye->thread, pthread_self()))
+            eye->view_current = true;
+    }
+    pthread_mutex_unlock(&projection_lock);
+}
+
+// On the game's projection builder for an eye of the record whose view is written and built: its parameters become
+// the eye's FOV, keeping the near and far planes (pc_vr_projection_from_fov). Once per eye per frame. True: written,
+// the logical matrix to be checked after the original builder.
+static bool projection_write_native_fov(uint64_t object) {
+    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed) || !record_eye_layer(object - 0x288))
+        return false;
+    pthread_mutex_lock(&projection_lock);
+    RecordEye *eye = record_eye_of_projection_locked(object);
+    if (!eye || !eye->view_written || eye->fov_attempted) {
+        pthread_mutex_unlock(&projection_lock); return false;
+    }
+    eye->fov_attempted = true;
+    float original[9], mapped[9];
+    PcVrGuard refused = PC_VR_GUARD_COUNT;
+    if (!eye->view_current || !pthread_equal(eye->thread, pthread_self()) ||
+        !projection_read(object + 0x98, original, sizeof original) ||
+        !pc_vr_projection_from_fov(eye->pose.eyes[eye->native_index].fov_left_right_up_down, original, mapped))
+        refused = PC_VR_GUARD_FOV_PRECONDITION;
+    // One write, not read back (as the camera's in pc_vr_projection_trace_eye).
+    else if (!labo_guest_copy(object + 0xa0, mapped + 2, 7 * sizeof(float), true)) refused = PC_VR_GUARD_FOV_WRITE_FAILED;
+    if (refused != PC_VR_GUARD_COUNT) projection_refuse_locked(refused);
+    else eye->fov_written = true;
+    pthread_mutex_unlock(&projection_lock);
+    return refused == PC_VR_GUARD_COUNT;
+}
+
+// The one post-condition (D115 step 5c): the logical matrix the game's writer built from the parameters written gives
+// the eye's own frustum (pc_vr_projection_native_rays).
+static void projection_logical_built(uint64_t object) {
+    pthread_mutex_lock(&projection_lock);
+    RecordEye *eye = record_eye_of_projection_locked(object);
+    float logical[16];
+    if (eye && eye->fov_written && !eye->logical_ok) {
+        if (projection_read(object + 0xc, logical, sizeof logical) &&
+            pc_vr_projection_native_rays(eye->pose.eyes[eye->native_index].fov_left_right_up_down, logical))
+            eye->logical_ok = eye->logical_current = true;
+        else projection_refuse_locked(PC_VR_GUARD_FOV_CONVERSION_MISMATCH);
+    }
+    pthread_mutex_unlock(&projection_lock);
+}
+
+// The device stage: the game's fixed conversion of the logical matrix. The certificate reads its depth terms. A device
+// stage built again (its certificate taken away by render_invalidate_projection) certifies the eye again while its
+// view and logical matrix are still as written.
+static void projection_device_built(uint64_t object) {
+    if (!record_eye_layer(object - 0x288)) return;
+    pthread_mutex_lock(&projection_lock);
+    RecordEye *eye = record_eye_of_projection_locked(object);
+    if (eye && eye->logical_ok) {
+        eye->device_current = true;
+        render_publish_locked(eye);
+    }
+    pthread_mutex_unlock(&projection_lock);
+}
+
+// A layer that is an eye layer by its own objects, without the base camera an eye of the record also checks
+// (projection_eye_identity): an aligned guest object whose selected projection (+0x220) is its own (+0x288, of the
 // perspective projection class) and whose camera (+0x228) is of the eye camera class.
 static bool projection_eye_layer_objects(uint64_t layer) {
     uint64_t vtable = 0, selected = 0, eye_vtable = 0;
@@ -1034,10 +660,9 @@ void pc_vr_projection_trace_eye_layer(uint64_t layer, uint64_t guest_frame_point
     const unsigned side = !!(flags & 0x1000);
     pthread_mutex_lock(&projection_lock);
     ProjectionDisplayPair *pair = &projection_display_pair;
-    // Once an eye note exists the notes decide (render_scope_eye_layer): the pair is no longer followed, so the pause
-    // menu's own pair, shown through the same calls, does not replace it.
-    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed) || projection_notes[0].note ||
-        projection_notes[1].note) {
+    // Once the record knows an eye layer it decides (render_scope_eye_layer): the pair is no longer followed, so the
+    // pause menu's own pair, shown through the same calls, does not replace it.
+    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed) || record_eyes_known_locked()) {
         pair->open = false;
         pthread_mutex_unlock(&projection_lock);
         return;
@@ -1062,122 +687,14 @@ void pc_vr_projection_trace_eye_layer(uint64_t layer, uint64_t guest_frame_point
     layers[pair->root_side] = pair->root_layer;
     layers[side] = layer;
     if (linked && (layers[0] != pair->layers[0] || layers[1] != pair->layers[1])) {
-        atomic_fetch_add_explicit(&render_state_version, 1, memory_order_release);
         pair->layers[0] = layers[0];
         pair->layers[1] = layers[1];
         ++projection_display_pairs;
         if (projection_display_pairs <= 8)
-            LOG("[pc-vr-traversal] eye layers known from the display's pair (pair %llu of at most 8 logged; eye notes "
-                "known=%d)\n", (unsigned long long)projection_display_pairs,
-                projection_notes[0].note || projection_notes[1].note);
+            LOG("[pc-vr-traversal] eye layers known from the display's pair (pair %llu of at most 8 logged)\n",
+                (unsigned long long)projection_display_pairs);
     }
     pthread_mutex_unlock(&projection_lock);
-}
-
-// Whether an eye's native view and FOV can be written at all, decided once at its eye call (native_fov_ready, which
-// both writes require): the traversal has latched its pose sample for this eye, the sample's eyes are in stereo order
-// along its right axis, the eye camera is the base camera moved along its right axis to one side, the projection's
-// logical stage is dirty, and the eye's FOV maps onto the projection's parameters. The writes check the traversal and
-// the dirty flag again at their own calls, the stereo order and the eye camera's basis nowhere else, and the mapping
-// only at the FOV's write, after the camera's. (The mapping keeps the near and far planes and checks the logical
-// matrix it gives itself.)
-static bool projection_native_fov_ready(const ProjectionNote *note) {
-    const ProjectionTraversal *traversal = &projection_traversal;
-    const XrPoseSnapshot *pose = &traversal->native_snapshot;
-    const bool latched = note->traversal_serial && note->traversal_serial == traversal->serial &&
-        traversal->native_latched && ((traversal->open && traversal->root.note == note->note) || traversal->native_pair);
-    if (!latched || !note->basis_read || !note->basis.right_matches || !note->basis.parallel_eye ||
-        !note->basis.lateral_eye || !note->basis.offset_sign ||
-        !pc_vr_projection_native_order(pose->orientation_xyzw, pose->eyes[0].position_xyz, pose->eyes[1].position_xyz))
-        return false;
-    const int native_index = note->basis.offset_sign < 0 ? 0 : 1;
-    float original[9], mapped[9];
-    uint16_t dirty = 0;
-    return projection_read(note->projection + 0x98, original, sizeof original) &&
-        projection_read(note->projection + 8, &dirty, sizeof dirty) && (dirty & 0xff) != 0 &&
-        pc_vr_projection_from_fov(pose->eyes[native_index].fov_left_right_up_down, original, mapped);
-}
-
-void pc_vr_projection_trace_eye(uint64_t layer, uint64_t bound_base,
-    uint64_t sequence, uint64_t frame, uint64_t generation, bool latch_valid, uint64_t guest_frame_pointer,
-    const XrPoseSnapshot *head_pose) {
-    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed)) return;
-    projection_lock_for_change();
-    if (!atomic_load_explicit(&projection_enabled, memory_order_relaxed)) {
-        pthread_mutex_unlock(&projection_lock); return;
-    }
-    const uint64_t now = xr_runtime_pose_clock_ns();
-    ProjectionNote note = {.layer = layer, .base = bound_base, .projection = layer + 0x288,
-        .sequence = sequence, .frame = frame, .generation = generation, .latch_valid = latch_valid,
-        .time_ns = now};
-    uint16_t flags = 0;
-    float base_pose[9], eye_position[3], right[3];
-    bool valid = layer >= GUEST_LO && layer <= GUEST_HI - 0x448 &&
-        projection_read(layer + 0x90, &flags, sizeof flags);
-    note.side = !!(flags & 0x1000);
-    valid = valid && projection_identity(&note) &&
-        projection_read(layer + 0x210, &note.config, sizeof note.config) &&
-        projection_read(layer + 0x208, &note.sibling, sizeof note.sibling) &&
-        projection_read(bound_base + 0x38, base_pose, sizeof base_pose) &&
-        projection_read(bound_base + 8, right, sizeof right) &&
-        projection_read(layer + 0x260, eye_position, sizeof eye_position);
-    if (valid) for (unsigned i = 0; i < 3; ++i)
-        valid &= isfinite(base_pose[i]) && isfinite(right[i]) && isfinite(eye_position[i]);
-    if (valid) for (unsigned i = 0; i < 9; ++i) valid &= isfinite(base_pose[i]);
-    if (!valid) {
-        projection_traversal_reject(PC_VR_GUARD_TRAVERSAL_BOUND_EYE);
-        ++projection_rejected;
-        if (projection_rejected <= 3) LOG("[pc-vr-projection] bound-eye rejected=%llu\n",
-            (unsigned long long)projection_rejected);
-        pthread_mutex_unlock(&projection_lock);
-        return;
-    }
-    note.base_hash = projection_hash(base_pose, sizeof base_pose);
-    note.note = ++projection_note_count;
-    if (note.note <= 4) {
-        uint64_t vtable = 0, begin = 0, end = 0;
-        const uint64_t main_end = g_site.main_end;
-        const bool callbacks = projection_read(layer, &vtable, sizeof vtable) &&
-            vtable >= MAIN_BASE && vtable <= main_end - 0x70 && !(vtable & 7) &&
-            projection_read(vtable + 0x50, &begin, sizeof begin) &&
-            projection_read(vtable + 0x68, &end, sizeof end) &&
-            begin >= MAIN_BASE && begin < main_end && !(begin & 3) &&
-            end >= MAIN_BASE && end < main_end && !(end & 3);
-        LOG("[pc-vr-render-scope] eye=%llu side_bit=%u callbacks_in_pinned_main=%d begin_offset=%llx end_offset=%llx live_rinfo_join=0\n",
-            (unsigned long long)note.note, note.side, callbacks,
-            (unsigned long long)(callbacks ? begin - MAIN_BASE : 0),
-            (unsigned long long)(callbacks ? end - MAIN_BASE : 0));
-    }
-    PcVrHeadLookCamera original_base, original_eye;
-    memcpy(&original_base, base_pose, sizeof original_base);
-    note.basis_read = projection_read(layer + 0x260, &original_eye, sizeof original_eye) &&
-        pc_vr_projection_eye_basis(&original_base, &original_eye, right, &note.basis);
-    projection_observe_traversal(&note, guest_frame_pointer, head_pose);
-    note.native_fov_ready = projection_native_fov_ready(&note);
-    projection_notes[note.side] = note;
-    projection_note_layers_update_locked();
-    pthread_mutex_unlock(&projection_lock);
-}
-
-static bool projection_near(double actual, double expected) {
-    return isfinite(actual) && isfinite(expected) && fabs(actual - expected) <= 0.00002 * fmax(1.0, fabs(expected));
-}
-
-// Class fields n,f,fovy,sinHalf,cosHalf,tanHalf,aspect,centerX,centerY.
-// Validate their relationships without logging any raw field/matrix payload.
-static bool projection_matrix_contract(const float params[9], const float matrix[16]) {
-    for (unsigned i = 0; i < 9; ++i) if (!isfinite(params[i])) return false;
-    if (!(params[0] > 0 && params[1] > params[0] && params[2] > 0 && params[2] < 3.14159265 &&
-          params[5] > 0 && params[6] > 0)) return false;
-    if (!projection_near(params[3], sin(params[2] * 0.5)) ||
-        !projection_near(params[4], cos(params[2] * 0.5)) ||
-        !projection_near(params[5], tan(params[2] * 0.5))) return false;
-    const double near_plane = params[0], far_plane = params[1];
-    const double expected[16] = {1.0 / (params[5] * (double)params[6]), 0, 2.0 * params[7], 0,
-        0, 1.0 / params[5], 2.0 * params[8], 0, 0, 0, -(far_plane + near_plane) / (far_plane - near_plane),
-        -2.0 * far_plane * near_plane / (far_plane - near_plane), 0, 0, -1, 0};
-    for (unsigned i = 0; i < 16; ++i) if (!projection_near(matrix[i], expected[i])) return false;
-    return true;
 }
 
 // (diagnostic) SAVAGEWIND_PC_VR_PROJECTION_LIST=1: each perspective projection the game builds, by object, with its
@@ -1210,9 +727,9 @@ static void projection_builder_wrapper(Cpu *cpu) {
     const uint64_t object = cpu->x[0], caller = cpu->x[30];
     render_invalidate_projection(object, false);
     const bool exact = cpu->x[30] == PROJ_BUILD_CALLER && cpu->x[1] == object + 0xc;
-    const uint64_t fov_token = exact ? projection_prepare_native_fov(object) : 0;
+    const bool written = exact && projection_write_native_fov(object);
     projection_original(cpu);
-    if (fov_token) projection_verify_native_fov(object, false, fov_token);
+    if (written) projection_logical_built(object);
     projection_list(object, caller);
 }
 
@@ -1221,7 +738,7 @@ static void projection_device_wrapper(Cpu *cpu) {
     render_invalidate_projection(object, true);
     const bool exact = cpu->x[30] == PROJ_DEVICE_CALLER && cpu->x[1] == object + 0x4c && cpu->x[2] == object + 0xc;
     projection_device_original(cpu);
-    if (exact) projection_verify_native_fov(object, true, 0);
+    if (exact) projection_device_built(object);
 }
 
 double pc_vr_camera_focus_distance(void) {
@@ -1229,14 +746,14 @@ double pc_vr_camera_focus_distance(void) {
 }
 
 bool pc_vr_world_scale_active(void) {
-    return atomic_load_explicit(&projection_view_writes_on, memory_order_acquire);
+    return atomic_load_explicit(&projection_enabled, memory_order_acquire);
 }
 
 // Under projection_lock: the root eye builds its pair with one value, and its sibling uses that pair.
 double pc_vr_world_scale(double factor) {
-    projection_lock_for_change();
+    pthread_mutex_lock(&projection_lock);
     double scale = 0;
-    if (atomic_load_explicit(&projection_view_writes_on, memory_order_relaxed) && projection_view_scale > 0) {
+    if (atomic_load_explicit(&projection_enabled, memory_order_relaxed) && projection_view_scale > 0) {
         projection_view_scale = factor > 0 ? fmin(100.0, fmax(0.1, projection_view_scale * factor)) : projection_launch_scale;
         scale = projection_view_scale;
     }
@@ -1246,10 +763,9 @@ double pc_vr_world_scale(double factor) {
 }
 
 // PC VR on is the play configuration: all of it, continuously, at the configured world scale. Armed at each head look
-// init, afresh: the eye notes, the traversal and the counts start over; published certificates stay resolvable. None of
-// it is armed when a part cannot run (no PC VR sites for this game version, an original projection writer or render
-// scope callback missing, a world scale that is not finite and above 0): head look then composes the eyes itself
-// (PC_VR_NATIVE_VIEW_LEGACY) and no draw gets a certificate.
+// init, afresh: the frame record and the counts start over; published certificates stay resolvable. None of it is
+// armed when a part cannot run (no PC VR sites for this game version, an original projection writer or render scope
+// callback missing): the eyes are then left as the game makes them, and no draw gets a certificate.
 void pc_vr_projection_trace_init(void) {
     atomic_store_explicit(&render_collecting, false, memory_order_release);
     if (!pc_vr_enabled()) return;
@@ -1257,12 +773,8 @@ void pc_vr_projection_trace_init(void) {
         LOG("[pc-vr-projection] disabled: no PC VR sites for this game version\n");
         return;
     }
-    const double units_per_meter = pc_vr_config()->play.native_view_units_per_meter;
-    if (!isfinite(units_per_meter) || units_per_meter <= 0) {
-        LOG("[pc-vr-native-view] disabled: the world scale must be finite and above 0 game units per metre\n");
-        return;
-    }
-    projection_lock_for_change();
+    const double units_per_meter = pc_vr_config()->play.native_view_units_per_meter;  // (finite, above 0: its parse)
+    pthread_mutex_lock(&projection_lock);
     if (!projection_registered) {
         const GuestFn builder = dispatch_lookup(PROJ_BUILDER), device = dispatch_lookup(PROJ_DEVICE);
         const GuestFn begin = dispatch_lookup(RENDER_BEGIN), end = dispatch_lookup(RENDER_END);
@@ -1282,23 +794,17 @@ void pc_vr_projection_trace_init(void) {
         hle_override(RENDER_END, render_end_wrapper, "PcVrRenderScopeEnd");
         projection_registered = true;
     }
-    memset(projection_notes, 0, sizeof projection_notes);
-    projection_note_layers_update_locked();
-    memset(&projection_traversal, 0, sizeof projection_traversal);
+    memset(&projection_record, 0, sizeof projection_record);
+    record_eye_layers_update_locked();
     memset(&projection_display_pair, 0, sizeof projection_display_pair);
-    projection_display_pairs = 0;
-    projection_note_count = projection_rejected = 0;
-    projection_roots = projection_traversal_pairs = projection_stack_rejected = 0;
-    projection_fov_rejected = projection_view_rejected = 0;
+    projection_display_pairs = projection_records = projection_refused = 0;
     projection_view_scale = projection_launch_scale = units_per_meter;
     atomic_fetch_add_explicit(&render_epoch, 1, memory_order_release);
     atomic_store_explicit(&render_enabled, true, memory_order_release);
     atomic_store_explicit(&render_collecting, true, memory_order_release);
-    atomic_store_explicit(&projection_view_writes_on, true, memory_order_release);
-    atomic_store_explicit(&projection_fov_writes_on, true, memory_order_release);
     atomic_store_explicit(&projection_enabled, true, memory_order_release);
     pthread_mutex_unlock(&projection_lock);
-    LOG("[pc-vr-eyes] armed continuous native view/FOV/certificates game_units_per_meter=%.9g live_scale_keys=minus,equals,0 certificate_slots=%u scope_cap=%u original_builder_retained=1\n",
+    LOG("[pc-vr-eyes] armed continuous native view/FOV/certificates game_units_per_meter=%.9g live_scale_keys=minus,equals,0 certificate_slots=%u scope_cap=%u\n",
         units_per_meter, RENDER_CERTIFICATE_SLOTS, RENDER_SCOPE_CAP);
 }
 
@@ -1306,12 +812,9 @@ RT_ON_RESET(pc_vr_projection_trace_reset) {
     atomic_store_explicit(&render_collecting, false, memory_order_release);
     atomic_fetch_add_explicit(&render_epoch, 1, memory_order_release);
     atomic_store_explicit(&projection_enabled, false, memory_order_release);
-    projection_lock_for_change();
-    atomic_store_explicit(&projection_fov_writes_on, false, memory_order_release);
-    atomic_store_explicit(&projection_view_writes_on, false, memory_order_release);
-    memset(projection_notes, 0, sizeof projection_notes);
-    projection_note_layers_update_locked();
-    memset(&projection_traversal, 0, sizeof projection_traversal);
+    pthread_mutex_lock(&projection_lock);
+    memset(&projection_record, 0, sizeof projection_record);
+    record_eye_layers_update_locked();
     memset(&projection_display_pair, 0, sizeof projection_display_pair);
     pthread_mutex_unlock(&projection_lock);
 }

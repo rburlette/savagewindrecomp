@@ -227,9 +227,6 @@ static void test_rejection(void) {
     REJECT(++bad_snapshot.calibration.epoch);
     REJECT(bad_snapshot.calibration.heading_xyzw[1] = 0.01f);
     REJECT(bad_reference.origin_xyz[1] += 0.01f);
-    REJECT(bad_reference.origin_xyz[0] = bad_snapshot.calibration.origin_xyz[0] = NAN);
-    REJECT(bad_reference.origin_xyz[2] = bad_snapshot.calibration.origin_xyz[2] = INFINITY);
-    REJECT(bad_reference.orientation_xyzw[3] = bad_snapshot.calibration.heading_xyzw[3] = 0);
     REJECT(bad_snapshot.frame_id = 0);
     REJECT(bad_snapshot.published_monotonic_ns = 0);
     REJECT(bad_snapshot.active = false);
@@ -237,23 +234,7 @@ static void test_rejection(void) {
     REJECT(bad_snapshot.orientation_tracked = false);
     REJECT(bad_snapshot.views_valid = false);
     REJECT(bad_snapshot.native_views_valid = false);
-    REJECT(bad_reference.orientation_xyzw[3] = 0);
-    REJECT(bad_reference.orientation_xyzw[0] = INFINITY);
-    REJECT(bad_snapshot.orientation_xyzw[3] = 2);
-    REJECT(bad_snapshot.orientation_xyzw[1] = NAN);
-    for (unsigned side = 0; side < 2; ++side) {
-        for (unsigned i = 0; i < 4; ++i) {
-            REJECT(bad_snapshot.eyes[side].orientation_xyzw[i] = NAN);
-            REJECT(bad_snapshot.eyes[side].fov_left_right_up_down[i] = INFINITY);
-        }
-        for (unsigned i = 0; i < 3; ++i) REJECT(bad_snapshot.eyes[side].position_xyz[i] = NAN);
-    }
-    REJECT(bad_snapshot.eyes[0].fov_left_right_up_down[0] = 1.0f);
-    REJECT(bad_snapshot.eyes[1].fov_left_right_up_down[3] = 1.0f);
-    REJECT(bad_snapshot.eyes[0].fov_left_right_up_down[0] = -1.5707964f);
-    REJECT(bad_snapshot.eyes[1].fov_left_right_up_down[2] = 1.5707964f);
-    REJECT(memcpy(bad_snapshot.eyes[1].position_xyz, bad_snapshot.eyes[0].position_xyz, 3 * sizeof(float)));
-    REJECT(bad_snapshot.eyes[0].position_xyz[0] = 0.032f; bad_snapshot.eyes[1].position_xyz[0] = -0.032f);
+    // (D116: OpenXR's orientations, FOVs, eye positions and eye order are used as given, not checked)
     REJECT(bad_center.target[2] = 0);
     REJECT(bad_center.up[1] = 0; bad_center.up[2] = 1);
     REJECT(bad_center.position[0] = INFINITY);

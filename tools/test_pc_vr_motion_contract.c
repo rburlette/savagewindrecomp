@@ -39,7 +39,7 @@ bool pc_vr_labo_mode2_tracking(const Cpu *cpu) {
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
     assert(mock_sample_lock_held);
     assert(out);
-    *out = mock_pose_result == XR_POSE_BUSY ? (XrPoseSnapshot){0} : mock_pose;
+    *out = mock_pose;
     return mock_pose_result;
 }
 
@@ -380,10 +380,6 @@ static void test_answered_read(void) {
     CHECK(((LaboSensorSample *)buffer)->quaternion_30[2] > 0.18f);
     expect_sample(buffer, 3, 1);
 
-    // A nonblocking snapshot collision drops this read but preserves neutral.
-    mock_pose_result = XR_POSE_BUSY;
-    contract_call(READ_SEVEN, output, 1, site, 0, false);
-    CHECK(sample_serial == 3 && pose_orientation.referenced && pose_orientation.generation == 7 && pose_was_available);
     mock_pose_result = XR_POSE_VALID;
     mock_pose.orientation_xyzw[0] = NAN;
     contract_call(READ_SEVEN, output, 1, site, 0, false);
@@ -443,8 +439,8 @@ static void test_answered_read(void) {
     // Render head look must never feed head rotation/velocity into the original orbit helper, even with
     // unavailable or changing XR tracking.
     mock_head_look = true;
-    const XrPoseReadResult results[] = {XR_POSE_VALID, XR_POSE_BUSY, XR_POSE_UNAVAILABLE};
-    for (unsigned i = 0; i < 3; ++i) {
+    const XrPoseReadResult results[] = {XR_POSE_VALID, XR_POSE_UNAVAILABLE};
+    for (unsigned i = 0; i < 2; ++i) {
         mock_pose_result = results[i];
         mock_pose.orientation_xyzw[0] = NAN;
         mock_pose.angular_velocity_xyz[0] = NAN;

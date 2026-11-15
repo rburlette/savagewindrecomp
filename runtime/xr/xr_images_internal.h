@@ -40,20 +40,21 @@ static struct {
     uint64_t pending_epoch[EYE_QUEUE], current_epoch, current_taken_ns;
     unsigned pending_count;
     bool current_valid, producer_complete, copy_pending;
-    // The latest copied pair, re-submitted every display frame with the poses
-    // it was rendered with until a newer pair, reset, recenter or age ends it.
+    // The latest copied pair, re-submitted every display frame with the poses it was rendered with until a newer pair,
+    // a reset or a recenter ends it (D101: held through a hitch, a session state change or lost tracking; the
+    // compositor reprojects it).
     // A panel pair (D056) is re-submitted as its quad instead; a HUD pair
     // (D057) as the projection with its quad on top, as is an over-scene
     // panel (the quick menus) over the held scene's projection.
     XrCompositionLayerProjectionView layer_views[2];
     XrCompositionLayerQuad layer_quad;
-    uint64_t layer_epoch, layer_generation, layer_published_ns;
-    XrTime layer_predicted;
+    uint64_t layer_epoch, layer_local;
+    uint64_t layer_published_ns;  // when its pose was located: only the perf report's age, never a limit
     bool layer_valid, layer_panel, layer_hud, layer_over;  // layer_over: a panel over the held scene
     // The views of the last scene pair, whose images the eye swapchains still
     // hold as their last release: an over-scene panel is shown over them.
     XrCompositionLayerProjectionView scene_views[2];
-    uint64_t scene_epoch, scene_generation;
+    uint64_t scene_epoch, scene_local;
     bool scene_valid;
     uint64_t submitted, copied, skipped;
     FrameOutcome zero_outcome;
@@ -87,8 +88,6 @@ static pthread_mutex_t eye_submission_lock = PTHREAD_MUTEX_INITIALIZER;
 // submission, a producer since the owner took its pair) is a stalled GPU, and stops the owner as any timeout did
 // before.
 #define EYE_COPY_STALL_NS UINT64_C(5000000000)
-// Longest re-submission of one rendered pair; the compositor reprojects it.
-#define EYE_LAYER_MAX_AGE_NS UINT64_C(500000000)
 
 static bool eye_gpu_bind(VkDevice device, uint32_t queue_family) {
     eye_gpu.device = device;
@@ -100,18 +99,6 @@ static bool eye_gpu_bind(VkDevice device, uint32_t queue_family) {
     EYE_VK_PROCS(EYE_LOAD)
 #undef EYE_LOAD
     return true;
-}
-
-static bool eye_pose_finite(const XrEyeSnapshot *eye) {
-    float norm = 0;
-    for (unsigned i = 0; i < 4; ++i) {
-        if (!isfinite(eye->orientation_xyzw[i]) || !isfinite(eye->fov_left_right_up_down[i])) return false;
-        norm += eye->orientation_xyzw[i] * eye->orientation_xyzw[i];
-    }
-    for (unsigned i = 0; i < 3; ++i) if (!isfinite(eye->position_xyz[i])) return false;
-    const float *fov = eye->fov_left_right_up_down;
-    return norm > 0.99f && norm < 1.01f && fov[0] < fov[1] && fov[3] < fov[2] &&
-        fov[0] > -1.5707963f && fov[1] < 1.5707963f && fov[3] > -1.5707963f && fov[2] < 1.5707963f;
 }
 
 // One eye's image and a rectangle inside it; a finite, sized, unit-oriented pose.
@@ -134,8 +121,8 @@ bool xr_runtime_eye_images_enabled(void) { return eye_images_enabled; }
 // Optional bounded, numeric-only admission attribution. Counts and the log
 // budget last for the process; diagnostics never change ownership or guards.
 typedef enum {
-    OFFER_CONTRACT, OFFER_PANEL, OFFER_HUD, OFFER_POSE_IDENTITY, OFFER_POSE_AGE, OFFER_EYES,
-    OFFER_STOPPED, OFFER_RESET, OFFER_GENERATION, OFFER_MAILBOX,
+    OFFER_CONTRACT, OFFER_PANEL, OFFER_HUD, OFFER_POSE_IDENTITY,
+    OFFER_STOPPED, OFFER_RESET, OFFER_LOCAL, OFFER_MAILBOX,
     OFFER_REASON_COUNT
 } EyeOfferReject;
 _Static_assert(PC_VR_GUARD_OFFER_CONTRACT + OFFER_REASON_COUNT == PC_VR_GUARD_OFFER_MAILBOX + 1,
@@ -144,22 +131,19 @@ static atomic_bool eye_offer_trace;
 static atomic_uint_fast64_t eye_offer_rejects[OFFER_REASON_COUNT], eye_offer_log_count;
 #define EYE_OFFER_LOG_CAP 128
 
-static bool eye_offer_reject(const XrOwnedEyePair *pair, EyeOfferReject reason, uint64_t now) {
+static bool eye_offer_reject(const XrOwnedEyePair *pair, EyeOfferReject reason) {
     pc_vr_guard_count(PC_VR_GUARD_OFFER_CONTRACT + reason);  // (always: the reasons in EyeOfferReject's order)
     if (!atomic_load_explicit(&eye_offer_trace, memory_order_relaxed)) return false;
     const uint64_t count = atomic_fetch_add(&eye_offer_rejects[reason], 1) + 1;
     if (count > 4 && count % 120) return false;
     if (atomic_fetch_add(&eye_offer_log_count, 1) >= EYE_OFFER_LOG_CAP) return false;
     static const char *const names[OFFER_REASON_COUNT] = {
-        "contract", "panel", "hud", "pose-identity", "pose-age", "eyes", "stopped", "reset", "generation", "mailbox"
+        "contract", "panel", "hud", "pose-identity", "stopped", "reset", "local", "mailbox"
     };
-    const uint64_t published = pair ? pair->render_pose.published_monotonic_ns : 0;
-    XRLOG("offer-rejected reason=%s count=%llu present=%llu tracking-frame=%llu generation=%llu anchored=%d pose-age-ns=%llu pose-age-valid=%d offer-age-limit-ns=250000000\n",
+    XRLOG("offer-rejected reason=%s count=%llu present=%llu tracking-frame=%llu local=%llu anchored=%d\n",
         names[reason], (unsigned long long)count, (unsigned long long)(pair ? pair->game_present_id : 0),
         (unsigned long long)(pair ? pair->render_pose.frame_id : 0),
-        (unsigned long long)(pair ? pair->render_pose.generation : 0), pair && pair->anchored,
-        (unsigned long long)(published && now >= published ? now - published : 0),
-        published && now >= published);
+        (unsigned long long)(pair ? pair->render_pose.local_definition : 0), pair && pair->anchored);
     return false;
 }
 
@@ -179,42 +163,34 @@ bool xr_runtime_offer_eye_pair(const XrOwnedEyePair *pair) {
         pair->format != VK_FORMAT_R8G8B8A8_SRGB || !pair->ready_timeline || !pair->ready_value ||
         !pair->game_present_id || !pair->width || !pair->height || pair->width > INT32_MAX ||
         pair->height > INT32_MAX || !pair->render_pose.native_views_valid)
-        return eye_offer_reject(pair, OFFER_CONTRACT, 0);
-    if (pair->panel.valid && (!pair->anchored || !eye_panel_valid(&pair->panel, pair->width, pair->height))) return eye_offer_reject(pair, OFFER_PANEL, 0);
+        return eye_offer_reject(pair, OFFER_CONTRACT);
+    if (pair->panel.valid && (!pair->anchored || !eye_panel_valid(&pair->panel, pair->width, pair->height))) return eye_offer_reject(pair, OFFER_PANEL);
     if (pair->over_scene && (!pair->panel.valid || pair->hud.valid || !pair->hud_image ||
-        pair->hud_image == pair->images[0] || pair->hud_image == pair->images[1])) return eye_offer_reject(pair, OFFER_PANEL, 0);
+        pair->hud_image == pair->images[0] || pair->hud_image == pair->images[1])) return eye_offer_reject(pair, OFFER_PANEL);
     if (pair->hud.valid && (pair->anchored || !pair->hud_image || pair->hud_image == pair->images[0] ||
-        pair->hud_image == pair->images[1] || !eye_panel_valid(&pair->hud, pair->width, pair->height))) return eye_offer_reject(pair, OFFER_HUD, 0);
-    // The render pose need not be the latest publication: the display-rate
-    // owner publishes newer samples while the GPU renders. It must still be a
-    // fresh, valid sample of the current reference space.
+        pair->hud_image == pair->images[1] || !eye_panel_valid(&pair->hud, pair->width, pair->height))) return eye_offer_reject(pair, OFFER_HUD);
+    // The render pose need not be the latest publication, nor recent (D101: a slow frame is still shown, and the
+    // compositor reprojects it); it must be a valid sample in LOCAL's current definition.
     const XrPoseSnapshot *render = &pair->render_pose;
-    const uint64_t now = xr_runtime_pose_clock_ns();
-    if (!render->frame_id || !render->generation || !render->active ||
-        !render->published_monotonic_ns) return eye_offer_reject(pair, OFFER_POSE_IDENTITY, now);
-    if (!pair->anchored && now - render->published_monotonic_ns > 250000000)
-        return eye_offer_reject(pair, OFFER_POSE_AGE, now);
-    // A pose xrEndFrame would refuse ends the session: the projection views are these.
-    for (unsigned i = 0; i < 2; ++i)
-        if (!eye_pose_finite(&render->eyes[i])) return eye_offer_reject(pair, OFFER_EYES, now);
+    if (!render->frame_id || !render->local_definition || !render->active)
+        return eye_offer_reject(pair, OFFER_POSE_IDENTITY);
+    // (its eye poses and FOVs are OpenXR's, located with valid flags: used as given, D116)
     const uint64_t epoch = atomic_load(&reset_epoch);
     bool accepted = false;
     EyeOfferReject reason = OFFER_STOPPED;
     pthread_mutex_lock(&eye_mailbox_lock);
     if (!atomic_load(&accepting)) reason = OFFER_STOPPED;
     else if (epoch != atomic_load(&reset_epoch)) reason = OFFER_RESET;
-    else if (render->generation != atomic_load(&reference_generation)) reason = OFFER_GENERATION;
+    else if (render->local_definition != atomic_load(&local_definition)) reason = OFFER_LOCAL;
     else if (eye_gpu.pending_count == EYE_QUEUE || eye_images_queued(pair)) reason = OFFER_MAILBOX;
     else {
         XrOwnedEyePair *queued = &eye_gpu.pending[eye_gpu.pending_count];
         *queued = *pair;
-        // An anchored pose places 2D content; its freshness is this offer.
-        if (pair->anchored) queued->render_pose.published_monotonic_ns = now;
         eye_gpu.pending_epoch[eye_gpu.pending_count++] = epoch;
         accepted = true;
     }
     pthread_mutex_unlock(&eye_mailbox_lock);
-    return accepted ? true : eye_offer_reject(pair, reason, now);
+    return accepted ? true : eye_offer_reject(pair, reason);
 }
 
 // timeout zero polls: VK_TIMEOUT then means "not yet", never a failure.
@@ -398,26 +374,25 @@ static bool eye_take_pending(uint64_t *epoch) {
     return eye_gpu.current_valid;
 }
 
-static bool eye_pair_current(uint64_t epoch, XrTime display_time) {
-    const XrOwnedEyePair *pair = &eye_gpu.current;
-    const uint64_t now = xr_runtime_pose_clock_ns();
+// Shown only in the game boot and the LOCAL definition it was rendered in (D101: not refused by age or tracking).
+static bool eye_pair_current(uint64_t epoch) {
     return !xr.terminal && !atomic_load(&stop_requested) && epoch == atomic_load(&reset_epoch) &&
-        pair->render_pose.generation == atomic_load(&reference_generation) &&
-        pair->render_pose.predicted_display_time_ns <= display_time &&
-        now >= pair->render_pose.published_monotonic_ns && now - pair->render_pose.published_monotonic_ns <= 250000000;
+        eye_gpu.current.render_pose.local_definition == atomic_load(&local_definition);
 }
 
-static void eye_retire_obsolete(void) {
+// The pairs that can no longer be shown go back to their producer unshown: of another game boot or LOCAL definition,
+// or offered while the session does not run (running false: the headset taken off, before the session starts). Those
+// would otherwise keep their producer's slots until the session ran again, and then show a frame of minutes before
+// (the independent review of the cleanup, finding 2). A pair whose copy is in flight stays: its swapchain images are
+// released only by eye_copy_finish.
+static void eye_retire_obsolete(bool running) {
+    if (!running && !eye_gpu.copy_pending && !eye_retire_current()) return;
     for (unsigned slot = 0; slot < EYE_QUEUE; ++slot) {  // oldest first, while the owner waits on none
         bool obsolete = false;
         pthread_mutex_lock(&eye_mailbox_lock);
         if (eye_gpu.pending_count) {
-            const XrOwnedEyePair *oldest = &eye_gpu.pending[0];
-            const uint64_t now = xr_runtime_pose_clock_ns();
-            obsolete = eye_gpu.pending_epoch[0] != atomic_load(&reset_epoch) ||
-                oldest->render_pose.generation != atomic_load(&reference_generation) ||
-                now < oldest->render_pose.published_monotonic_ns ||
-                now - oldest->render_pose.published_monotonic_ns > 250000000;
+            obsolete = !running || eye_gpu.pending_epoch[0] != atomic_load(&reset_epoch) ||
+                eye_gpu.pending[0].render_pose.local_definition != atomic_load(&local_definition);
         }
         pthread_mutex_unlock(&eye_mailbox_lock);
         uint64_t epoch = 0;
@@ -480,7 +455,7 @@ static void eye_copy_finish(void) {
               (unsigned long long)((xr_runtime_pose_clock_ns() - eye_gpu.copy.submitted_ns) / 1000000));
     const bool copied = !xr.terminal;
     bool success = copied && epoch == atomic_load(&reset_epoch) &&
-        render_pose->generation == atomic_load(&reference_generation) && !atomic_load(&stop_requested);
+        render_pose->local_definition == atomic_load(&local_definition) && !atomic_load(&stop_requested);
     // [pc-vr-audit] (docs/vr-resolution-audit.md; SAVAGEWIND_AUDIT_SUBMIT=1 only): the projection views as submitted,
     // for the first two pairs and every size change.
     static int audit_submit = -1;
@@ -514,20 +489,19 @@ static void eye_copy_finish(void) {
         if (!panel) {  // a scene pair: its views stay with the eye images for later over-scene panels
             memcpy(eye_gpu.scene_views, eye_gpu.copy.views, sizeof eye_gpu.scene_views);
             eye_gpu.scene_epoch = epoch;
-            eye_gpu.scene_generation = render_pose->generation;
+            eye_gpu.scene_local = render_pose->local_definition;
             eye_gpu.scene_valid = true;
         }
         const bool held = over && eye_gpu.scene_valid && eye_gpu.scene_epoch == epoch &&
-            eye_gpu.scene_generation == render_pose->generation;
+            eye_gpu.scene_local == render_pose->local_definition;
         memcpy(eye_gpu.layer_views, over ? eye_gpu.scene_views : eye_gpu.copy.views, sizeof eye_gpu.layer_views);
         eye_gpu.layer_quad = eye_gpu.copy.quad;
         eye_gpu.layer_panel = panel && !held;
         eye_gpu.layer_hud = hud || held;
         eye_gpu.layer_over = held;
         eye_gpu.layer_epoch = epoch;
-        eye_gpu.layer_generation = render_pose->generation;
+        eye_gpu.layer_local = render_pose->local_definition;
         eye_gpu.layer_published_ns = render_pose->published_monotonic_ns;
-        eye_gpu.layer_predicted = render_pose->predicted_display_time_ns;
         eye_gpu.layer_valid = true;
         ++eye_gpu.copied;
     } else eye_gpu.layer_valid = false;
@@ -535,7 +509,7 @@ static void eye_copy_finish(void) {
 
 // Copies a newly admitted pair once into fresh swapchain images. A producer
 // that has not signalled yet keeps its pair for the next display frame, and so does a copy the GPU has not finished.
-static void eye_copy_pair(XrTime display_time, bool native_tracking_valid) {
+static void eye_copy_pair(bool may_render) {
     if (eye_gpu.copy_pending) {  // a copy from an earlier display frame, still in flight
         eye_copy_finish();
         return;
@@ -548,7 +522,7 @@ static void eye_copy_pair(XrTime display_time, bool native_tracking_valid) {
     XrCompositionLayerQuad quad = {.type = XR_TYPE_COMPOSITION_LAYER_QUAD};
     bool panel = false, hud = false, over = false;
     uint32_t index[3] = {0, 0, 0}, first = 0, images = 2;
-    if (!native_tracking_valid || !eye_pair_current(epoch, display_time)) goto done;
+    if (!may_render || !eye_pair_current(epoch)) goto done;
     const XrOwnedEyePair *pair = &eye_gpu.current;
     panel = pair->panel.valid;
     hud = pair->hud.valid;
@@ -665,8 +639,8 @@ done:
 // with the poses/FOV the eyes were rendered with (never the newer locate, so
 // the compositor reprojects them) and a HUD pair's quad on top, or a menu
 // panel's quad alone.
-static uint32_t eye_layer_current(XrTime display_time, bool native_tracking_valid,
-                                  XrCompositionLayerProjection *projection, const XrCompositionLayerBaseHeader *layers[2]) {
+static uint32_t eye_layer_current(bool may_render, XrCompositionLayerProjection *projection,
+                                  const XrCompositionLayerBaseHeader *layers[2]) {
     if (!eye_gpu.layer_valid) {
         // Age/reference count the frame that retires the retained layer.
         // Later frames have no current pair; do not carry an obsolete cause
@@ -674,27 +648,18 @@ static uint32_t eye_layer_current(XrTime display_time, bool native_tracking_vali
         eye_gpu.zero_outcome = eye_gpu.current_valid ? FRAME_PRODUCER_PENDING : FRAME_NO_PAIR;
         return 0;
     }
-    const uint64_t now = xr_runtime_pose_clock_ns();
     if (xr.terminal || atomic_load(&stop_requested)) {
         eye_gpu.zero_outcome = xr.terminal ? FRAME_TERMINAL : FRAME_CANCELLED;
         eye_gpu.layer_valid = false;
         return 0;
     }
     if (eye_gpu.layer_epoch != atomic_load(&reset_epoch) ||
-        eye_gpu.layer_generation != atomic_load(&reference_generation)) {
+        eye_gpu.layer_local != atomic_load(&local_definition)) {
         eye_gpu.zero_outcome = FRAME_REFERENCE;
         eye_gpu.layer_valid = false;
         return 0;
     }
-    if (now < eye_gpu.layer_published_ns || now - eye_gpu.layer_published_ns > EYE_LAYER_MAX_AGE_NS) {
-        eye_gpu.zero_outcome = FRAME_LAYER_AGE;
-        eye_gpu.layer_valid = false;
-        return 0;
-    }
-    if (!native_tracking_valid || eye_gpu.layer_predicted > display_time) {
-        eye_gpu.zero_outcome = !native_tracking_valid ? FRAME_TRACKING : FRAME_LAYER_FUTURE;
-        return 0;
-    }
+    if (!may_render) return 0;  // (run_frame names the outcome: not visible, or should not render)
     eye_gpu.zero_outcome = FRAME_NO_PAIR;
     if (eye_gpu.layer_panel) {
         layers[0] = (const XrCompositionLayerBaseHeader *)&eye_gpu.layer_quad;
@@ -708,10 +673,11 @@ static uint32_t eye_layer_current(XrTime display_time, bool native_tracking_vali
     return 2;
 }
 
-static uint32_t eye_submit_layers(XrTime display_time, bool native_tracking_valid,
-                                  XrCompositionLayerProjection *projection, const XrCompositionLayerBaseHeader *layers[2]) {
-    eye_copy_pair(display_time, native_tracking_valid);
-    return eye_layer_current(display_time, native_tracking_valid, projection, layers);
+// may_render: the session is visible and the runtime asks for this frame's layers.
+static uint32_t eye_submit_layers(bool may_render, XrCompositionLayerProjection *projection,
+                                  const XrCompositionLayerBaseHeader *layers[2]) {
+    eye_copy_pair(may_render);
+    return eye_layer_current(may_render, projection, layers);
 }
 
 static bool eye_gpu_shutdown(void) {

@@ -20,45 +20,27 @@
 #include <string.h>
 
 // Calibration (D053) from one tracked sample: the head's yaw only (where it looks, projected onto the level plane)
-// and the midpoint of the two eyes. Fails for an orientation that is not a unit quaternion or a head looking within
-// about 10 degrees of straight up or down (no usable heading).
+// and the midpoint of the two eyes. Fails for a head looking within about 10 degrees of straight up or down (no
+// usable heading). OpenXR's orientation and positions are used as given (D116).
 bool xr_calibration_capture(const float head_xyzw[4], const float left_xyz[3],
                             const float right_xyz[3], uint64_t epoch, XrCalibration *out) {
     if (!head_xyzw || !left_xyz || !right_xyz || !epoch || !out) return false;
-    double head[4], length_squared = 0;
-    for (unsigned i = 0; i < 4; ++i) {
-        if (!isfinite(head_xyzw[i])) return false;
-        head[i] = head_xyzw[i];
-        length_squared += head[i] * head[i];
-    }
-    if (!(length_squared > 0.99 && length_squared < 1.01)) return false;
-    for (unsigned i = 0; i < 4; ++i) head[i] /= sqrt(length_squared);
+    double head[4];
+    for (unsigned i = 0; i < 4; ++i) head[i] = head_xyzw[i];
     // Head forward head * (0,0,-1) * inverse(head), x and z components only.
     const double forward_x = -2 * (head[0] * head[2] + head[3] * head[1]);
     const double forward_z = -(1 - 2 * (head[0] * head[0] + head[1] * head[1]));
     if (!(hypot(forward_x, forward_z) > 0.17)) return false;
     const double yaw = atan2(-forward_x, -forward_z); // rotation about +Y taking (0,0,-1) to the horizontal forward
     XrCalibration result = {.epoch = epoch, .heading_xyzw = {0, (float)sin(0.5 * yaw), 0, (float)cos(0.5 * yaw)}};
-    for (unsigned i = 0; i < 3; ++i) {
-        const double midpoint = 0.5 * ((double)left_xyz[i] + right_xyz[i]);
-        if (!isfinite(midpoint)) return false;
-        result.origin_xyz[i] = (float)midpoint;
-    }
+    for (unsigned i = 0; i < 3; ++i) result.origin_xyz[i] = (float)(0.5 * ((double)left_xyz[i] + right_xyz[i]));
     *out = result;
     return true;
 }
 
-// in (x, y, z, w) normalized into out. False when it is not finite or not within 1% of unit length.
-static bool unit_quaternion(const float in[4], double out[4]) {
-    double length_squared = 0;
-    for (unsigned i = 0; i < 4; ++i) {
-        if (!isfinite(in[i])) return false;
-        out[i] = in[i];
-        length_squared += out[i] * out[i];
-    }
-    if (!(length_squared > 0.99 && length_squared < 1.01)) return false;
-    for (unsigned i = 0; i < 4; ++i) out[i] /= sqrt(length_squared);
-    return true;
+// in (x, y, z, w) into out: OpenXR's unit quaternions, or a heading taken from one, used as given (D116).
+static void quaternion_from(const float in[4], double out[4]) {
+    for (unsigned i = 0; i < 4; ++i) out[i] = in[i];
 }
 
 // out = first * second (rotation second, then first), xyzw, as Khronos xr_linear.h.
@@ -82,13 +64,13 @@ static void quaternion_rotate(const double rotation[4], const double vector[3], 
 bool xr_calibration_anchor(const XrPoseSnapshot *current, XrPoseSnapshot *out) {
     if (!current || !out || !current->calibration.epoch || !current->native_views_valid) return false;
     double head[4], heading[4];
-    if (!unit_quaternion(current->orientation_xyzw, head) ||
-        !unit_quaternion(current->calibration.heading_xyzw, heading)) return false;
+    quaternion_from(current->orientation_xyzw, head);
+    quaternion_from(current->calibration.heading_xyzw, heading);
     const double inverse_head[4] = {-head[0], -head[1], -head[2], head[3]};
     XrPoseSnapshot result = *current;
     for (unsigned side = 0; side < 2; ++side) {
         double eye[4], local_rotation[4], placed_rotation[4], offset[3], local[3], placed[3];
-        if (!unit_quaternion(current->eyes[side].orientation_xyzw, eye)) return false;
+        quaternion_from(current->eyes[side].orientation_xyzw, eye);
         for (unsigned i = 0; i < 3; ++i)
             offset[i] = (double)current->eyes[side].position_xyz[i] -
                 0.5 * ((double)current->eyes[0].position_xyz[i] + current->eyes[1].position_xyz[i]);
@@ -96,11 +78,8 @@ bool xr_calibration_anchor(const XrPoseSnapshot *current, XrPoseSnapshot *out) {
         quaternion_rotate(heading, local, placed);
         quaternion_multiply(inverse_head, eye, local_rotation);
         quaternion_multiply(heading, local_rotation, placed_rotation);
-        for (unsigned i = 0; i < 3; ++i) {
-            const double position = (double)current->calibration.origin_xyz[i] + placed[i];
-            if (!isfinite(position)) return false;
-            result.eyes[side].position_xyz[i] = (float)position;
-        }
+        for (unsigned i = 0; i < 3; ++i)
+            result.eyes[side].position_xyz[i] = (float)((double)current->calibration.origin_xyz[i] + placed[i]);
         for (unsigned i = 0; i < 4; ++i) result.eyes[side].orientation_xyzw[i] = (float)placed_rotation[i];
     }
     for (unsigned i = 0; i < 4; ++i) result.orientation_xyzw[i] = (float)heading[i];
@@ -124,8 +103,9 @@ bool xr_bench_head_apply(double yaw, double pitch, float head_xyzw[4], XrEyeSnap
     const double turn_pitch[4] = {sin(0.5 * pitch), 0, 0, cos(0.5 * pitch)};
     double turn[4], head[4], eye[2][4];
     quaternion_multiply(turn_yaw, turn_pitch, turn);
-    if (!unit_quaternion(head_xyzw, head) || !unit_quaternion(eyes[0].orientation_xyzw, eye[0]) ||
-        !unit_quaternion(eyes[1].orientation_xyzw, eye[1])) return false;
+    quaternion_from(head_xyzw, head);
+    quaternion_from(eyes[0].orientation_xyzw, eye[0]);
+    quaternion_from(eyes[1].orientation_xyzw, eye[1]);
     double center[3], turned[2][3], rotated[2][4], turned_head[4];
     for (unsigned i = 0; i < 3; ++i)
         center[i] = 0.5 * ((double)eyes[0].position_xyz[i] + eyes[1].position_xyz[i]);
@@ -134,7 +114,6 @@ bool xr_bench_head_apply(double yaw, double pitch, float head_xyzw[4], XrEyeSnap
         for (unsigned i = 0; i < 3; ++i) offset[i] = (double)eyes[side].position_xyz[i] - center[i];
         quaternion_rotate(turn, offset, turned[side]);
         quaternion_multiply(turn, eye[side], rotated[side]);
-        for (unsigned i = 0; i < 3; ++i) if (!isfinite(center[i] + turned[side][i])) return false;
     }
     quaternion_multiply(turn, head, turned_head);
     for (unsigned i = 0; i < 4; ++i) head_xyzw[i] = (float)turned_head[i];
@@ -150,16 +129,10 @@ bool xr_calibration_panel(const XrCalibration *calibration, float distance, floa
     if (!calibration || !calibration->epoch || !position_xyz || !orientation_xyzw ||
         !isfinite(distance) || !(distance > 0) || !isfinite(rise)) return false;
     double heading[4], placed[3];
-    if (!unit_quaternion(calibration->heading_xyzw, heading)) return false;
+    quaternion_from(calibration->heading_xyzw, heading);
     // The heading is a yaw: the rise stays vertical.
     quaternion_rotate(heading, (const double[3]){0, rise, -distance}, placed);
-    float position[3];
-    for (unsigned i = 0; i < 3; ++i) {
-        const double coordinate = (double)calibration->origin_xyz[i] + placed[i];
-        if (!isfinite(coordinate)) return false;
-        position[i] = (float)coordinate;
-    }
-    memcpy(position_xyz, position, sizeof position);
+    for (unsigned i = 0; i < 3; ++i) position_xyz[i] = (float)((double)calibration->origin_xyz[i] + placed[i]);
     for (unsigned i = 0; i < 4; ++i) orientation_xyzw[i] = (float)heading[i];
     return true;
 }
@@ -187,12 +160,11 @@ bool xr_calibration_panel(const XrCalibration *calibration, float distance, floa
 // submitted layers, not a claim about the compositor's displayed pixels.
 typedef enum {
     FRAME_IMAGE, FRAME_NO_RENDER, FRAME_NOT_VISIBLE, FRAME_REFERENCE, FRAME_TRACKING,
-    FRAME_CANCELLED, FRAME_TERMINAL, FRAME_LAYER_AGE, FRAME_LAYER_FUTURE,
-    FRAME_PRODUCER_PENDING, FRAME_NO_PAIR, FRAME_OUTCOME_COUNT
+    FRAME_CANCELLED, FRAME_TERMINAL, FRAME_PRODUCER_PENDING, FRAME_NO_PAIR, FRAME_OUTCOME_COUNT
 } FrameOutcome;
 static const char *const frame_outcome_names[FRAME_OUTCOME_COUNT] = {
     "image", "should-not-render", "not-visible", "reference-change", "tracking-invalid",
-    "reset-or-stop", "terminal", "layer-age", "future-pose", "producer-pending", "no-current-pair"
+    "reset-or-stop", "terminal", "producer-pending", "no-current-pair"
 };
 #define XR_PROCS(X) \
     X(DestroyInstance) X(GetInstanceProperties) X(GetSystem) \
@@ -221,8 +193,7 @@ static struct {
     uint64_t queue_completion_waits, queue_completion_zero_layers, queue_completion_wait_ns, queue_completion_max_wait_ns;
     uint64_t frame_id;
     uint64_t outcomes[FRAME_OUTCOME_COUNT], visible_images;
-    // D053: LOCAL's current definition and the calibration captured in it.
-    uint64_t local_epoch;
+    // D053: the calibration captured in LOCAL's current definition (local_definition).
     XrCalibration calibration;
     uint32_t max_eye_width, max_eye_height; // the runtime's per-view maximum (0: unknown)
     uint32_t recommended_eye_width, recommended_eye_height; // the runtime's per-view recommendation (0: unknown)
@@ -243,7 +214,10 @@ static pthread_mutex_t pose_lock = PTHREAD_MUTEX_INITIALIZER;
 static XrPoseSnapshot published;
 static atomic_bool accepting, stop_requested;
 static _Atomic uint64_t latest_present, reset_epoch, reference_generation = 1;
-static uint64_t local_definitions; // never reused, so epochs differ across sessions
+// LOCAL's current definition: a new one with each session and each applied recenter, never reused, so definitions
+// differ across sessions; 0 before the first session. Poses carry the one they were located in (XrPoseSnapshot
+// local_definition), and an eye image is shown only in the definition its poses are in.
+static _Atomic uint64_t local_definition;
 static PFN_vkCreateDevice forwarded_create_device;
 static PFN_vkCreateInstance forwarded_create_instance;
 static uint32_t requested_vulkan_api;
@@ -317,6 +291,9 @@ static void invalidate_pose(const char *reason, bool advance_generation) {
     published.angular_velocity_valid = false;
     memset(published.angular_velocity_xyz, 0, sizeof published.angular_velocity_xyz);
     published.generation = atomic_load(&reference_generation);
+    // A reader holding an earlier pose (head look, D101) learns of a new LOCAL definition here, before the next
+    // publication: a recenter and a new session both invalidate.
+    published.local_definition = atomic_load(&local_definition);
     pthread_mutex_unlock(&pose_lock);
     if (reason) XRLOG("tracking invalidated: %s generation=%llu\n", reason,
                       (unsigned long long)atomic_load(&reference_generation));
@@ -435,10 +412,10 @@ bool xr_runtime_discover(void) {
     if (requested < requirements.minApiVersionSupported) goto fail;
     uint32_t views = 0;
     if (!xr_ok(xr.EnumerateViewConfigurationViews(xr.instance, xr.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-                                                0, &views, NULL), "stereo view configuration") || views != 2) goto fail;
+                                                0, &views, NULL), "stereo view configuration")) goto fail;
     XrViewConfigurationView view_info[2] = {{.type = XR_TYPE_VIEW_CONFIGURATION_VIEW}, {.type = XR_TYPE_VIEW_CONFIGURATION_VIEW}};
     if (!xr_ok(xr.EnumerateViewConfigurationViews(xr.instance, xr.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-                                                2, &views, view_info), "stereo view sizes") || views != 2) goto fail;
+                                                2, &views, view_info), "stereo view sizes")) goto fail;  // (two)
     // Eye images are the game's final-image halves (exec.c vr_capture_eyes), not this size; its shape sets the eye
     // render's (pc_vr.c pc_vr_eye_size), read before the Vulkan device and any eye target exist.
     xr.recommended_eye_width = view_info[0].recommendedImageRectWidth < view_info[1].recommendedImageRectWidth ?
@@ -662,7 +639,7 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
     if (xr.pending_reference_change && frame.predictedDisplayTime >= xr.pending_reference_change) {
         xr.pending_reference_change = 0;
         // LOCAL is redefined (the runtime's recenter): calibrate again in it.
-        xr.local_epoch = ++local_definitions;
+        atomic_fetch_add(&local_definition, 1);
         xr.calibration = (XrCalibration){0};
         invalidate_pose("reference-space change applied", true);
     }
@@ -682,7 +659,7 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
     // Visibility permits rendering behind runtime overlays; focus only
     // describes eligibility for XR input, not tracking or image admission.
     const bool visible = xr.state == XR_SESSION_STATE_VISIBLE || xr.state == XR_SESSION_STATE_FOCUSED;
-    bool valid = XR_SUCCEEDED(located) && XR_SUCCEEDED(views_result) && view_count == 2 &&
+    bool valid = XR_SUCCEEDED(located) && XR_SUCCEEDED(views_result) &&
         (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
         (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) &&
         (view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) &&
@@ -706,29 +683,30 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
                   (unsigned)head.locationFlags, (unsigned long long)xr.frame_id);
         }
     }
-    if (native_views_valid && xr.local_epoch && xr.calibration.epoch != xr.local_epoch) {
+    const uint64_t local = atomic_load(&local_definition);
+    if (native_views_valid && local && xr.calibration.epoch != local) {
         const float head_xyzw[4] = {head.pose.orientation.x, head.pose.orientation.y,
                                     head.pose.orientation.z, head.pose.orientation.w};
         const float left[3] = {views[0].pose.position.x, views[0].pose.position.y, views[0].pose.position.z};
         const float right[3] = {views[1].pose.position.x, views[1].pose.position.y, views[1].pose.position.z};
-        if (xr_calibration_capture(head_xyzw, left, right, xr.local_epoch, &xr.calibration))
+        if (xr_calibration_capture(head_xyzw, left, right, local, &xr.calibration))
             XRLOG("calibration epoch=%llu heading_deg=%.1f origin=%.3f,%.3f,%.3f; kept until LOCAL is redefined\n",
                 (unsigned long long)xr.calibration.epoch,
                 2 * atan2(xr.calibration.heading_xyzw[1], xr.calibration.heading_xyzw[3]) * (180.0 / 3.14159265358979323846),
                 xr.calibration.origin_xyz[0], xr.calibration.origin_xyz[1], xr.calibration.origin_xyz[2]);
     }
-    // 3. Submit the latest eye pair's layers (none when there is no valid pair or tracking), then end the frame. The
-    // submission is dropped if a reset, a stop or a reference change came in meanwhile.
+    // 3. Submit the latest eye pair's layers (none when there is no pair in this game boot and LOCAL definition, or the
+    // session is not visible or should not render; held through lost tracking, D101), then end the frame. The
+    // submission is dropped if a reset or a stop came in meanwhile (LOCAL is redefined only on this thread).
     XrCompositionLayerProjection projection = {.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     const XrCompositionLayerBaseHeader *layers[2] = {NULL, NULL};
     const uint64_t copied_before = eye_gpu.copied;
-    const uint32_t layer_count = eye_submit_layers(frame.predictedDisplayTime, native_views_valid, &projection, layers);
+    const uint32_t layer_count = eye_submit_layers(visible && frame.shouldRender, &projection, layers);
     bool image_submitted = layer_count > 0;
     const bool image_lock_held = image_submitted;
     if (image_lock_held) {
         pthread_mutex_lock(&eye_submission_lock);
-        image_submitted = epoch == atomic_load(&reset_epoch) &&
-            located_generation == atomic_load(&reference_generation) && !atomic_load(&stop_requested);
+        image_submitted = epoch == atomic_load(&reset_epoch) && !atomic_load(&stop_requested);
     }
     XrFrameEndInfo end = {.type = XR_TYPE_FRAME_END_INFO, .displayTime = frame.predictedDisplayTime,
         .environmentBlendMode = xr.blend, .layerCount = image_submitted ? layer_count : 0, .layers = image_submitted ? layers : NULL};
@@ -827,12 +805,10 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
         .orientation_xyzw = {head.pose.orientation.x, head.pose.orientation.y, head.pose.orientation.z, head.pose.orientation.w},
         .active = valid, .focused = xr.state == XR_SESSION_STATE_FOCUSED,
         .orientation_valid = valid, .orientation_tracked = valid, .views_valid = valid,
-        .native_views_valid = valid && native_views_valid, .calibration = xr.calibration};
+        .native_views_valid = valid && native_views_valid, .calibration = xr.calibration, .local_definition = local};
     // The runtime owns velocity estimation. Never inspect members without the
     // corresponding flag, and never publish a rate from a discarded pose/frame.
-    if (valid && (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) &&
-        isfinite(velocity.angularVelocity.x) && isfinite(velocity.angularVelocity.y) &&
-        isfinite(velocity.angularVelocity.z)) {
+    if (valid && (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
         snapshot.angular_velocity_xyz[0] = velocity.angularVelocity.x;
         snapshot.angular_velocity_xyz[1] = velocity.angularVelocity.y;
         snapshot.angular_velocity_xyz[2] = velocity.angularVelocity.z;
@@ -892,7 +868,7 @@ static void *frame_owner(void *unused) {
     while (!atomic_load(&stop_requested)) {
         pthread_mutex_lock(&xr_vulkan_lock);
         poll_events();
-        eye_retire_obsolete();
+        eye_retire_obsolete(xr.running);
         if (xr.terminal) {
             pthread_mutex_unlock(&xr_vulkan_lock);
             break;
@@ -970,8 +946,7 @@ static bool visibility_mesh_fetch(uint32_t eye, unsigned kind, XrVisibilityMesh 
     XrVisibilityMaskKHR mask = {.type = XR_TYPE_VISIBILITY_MASK_KHR};
     if (!xr_ok(xr.GetVisibilityMaskKHR(xr.session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye, type, &mask),
                "visibility mask sizes")) return false;
-    // (bounded: a mask is a few hundred vertices at most in practice; the bound only guards the allocation)
-    if (mask.vertexCountOutput > 65536 || mask.indexCountOutput > 3 * 65536 || mask.indexCountOutput % 3) return false;
+    // (triangles whose indices name its vertices, as the extension promises: D116)
     XrVector2f *vertices = calloc(mask.vertexCountOutput ? mask.vertexCountOutput : 1, sizeof *vertices);
     uint32_t *indices = calloc(mask.indexCountOutput ? mask.indexCountOutput : 1, sizeof *indices);
     if (!vertices || !indices) { free(vertices); free(indices); return false; }
@@ -981,8 +956,6 @@ static bool visibility_mesh_fetch(uint32_t eye, unsigned kind, XrVisibilityMesh 
     mask.indices = indices;
     if (!xr_ok(xr.GetVisibilityMaskKHR(xr.session, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye, type, &mask),
                "visibility mask data")) { free(vertices); free(indices); return false; }
-    for (uint32_t i = 0; i < mask.indexCountOutput; ++i)
-        if (indices[i] >= mask.vertexCountOutput) { free(vertices); free(indices); return false; }
     free(out->vertices);
     free(out->indices);
     *out = (XrVisibilityMesh){mask.vertexCountOutput, mask.indexCountOutput, vertices, indices};
@@ -1062,7 +1035,8 @@ bool xr_runtime_bind_vulkan(VkInstance instance, VkPhysicalDevice physical,
     XrReferenceSpaceCreateInfo space = {.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
         .referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL, .poseInReferenceSpace = {.orientation = {.w = 1}}};
     if (!xr_ok(xr.CreateReferenceSpace(xr.session, &space, &xr.local), "create LOCAL space")) goto fail;
-    xr.local_epoch = ++local_definitions;
+    atomic_fetch_add(&local_definition, 1);
+    invalidate_pose(NULL, true);  // (the publication now names the new definition)
     space.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     if (!xr_ok(xr.CreateReferenceSpace(xr.session, &space, &xr.view), "create VIEW space")) goto fail;
     visibility_masks_fetch();
@@ -1096,13 +1070,10 @@ bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) {
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
     if (!out) return XR_POSE_UNAVAILABLE;
     memset(out, 0, sizeof *out);
-    if (pthread_mutex_trylock(&pose_lock) != 0) return XR_POSE_BUSY;
+    pthread_mutex_lock(&pose_lock);
     *out = published;
     pthread_mutex_unlock(&pose_lock);
-    const uint64_t now = xr_runtime_pose_clock_ns();
-    if (!out->active || !out->orientation_valid || !out->orientation_tracked ||
-        now < out->published_monotonic_ns ||
-        now - out->published_monotonic_ns > 250000000 || !atomic_load(&accepting)) {
+    if (!out->active || !out->orientation_valid || !out->orientation_tracked || !atomic_load(&accepting)) {
         out->angular_velocity_valid = false;
         memset(out->angular_velocity_xyz, 0, sizeof out->angular_velocity_xyz);
         return XR_POSE_UNAVAILABLE;

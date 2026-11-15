@@ -58,7 +58,7 @@
 // reads stay direct (vr_eyes.h says why); this module's per-frame writes take the indirection.
 typedef struct {
     double distance;  // game units ahead of the game camera along its forward where the ray meets the scene (0: none yet)
-    uint64_t frame;   // the present count when distance was last set (the reticle uses a distance at most 8 old)
+    uint64_t frame;   // the present count when distance was last set (logs; the reticle and rune hold the last)
     uint64_t misses;  // the readings whose ray met nothing (for the log)
 } VrAimResult;
 

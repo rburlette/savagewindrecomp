@@ -11,7 +11,7 @@
 //    for the held scene), and say which draw sets which field below;
 //  - the images: the slot being filled (vr_eyes.filling), the GPU submission that completes its copies
 //    (vr_eyes.ready_seq) and the slots themselves stay in exec.c beside the code that hands them to the XR owner;
-//  - state that outlives a frame: the held scene's generation (vr_eyes.scene_held), the eased HUD distance, the
+//  - state that outlives a frame: the held scene's LOCAL definition (vr_eyes.scene_held), the eased HUD distance, the
 //    settings and the pose query (exec.c reads them and passes the values in VrFrameInputs);
 //  - building the panels (exec.c vr_panel) and the offer itself (xr_runtime_offer_eye_pair, runtime/xr/xr_vulkan.h).
 //    The XR owner can still refuse a ready offer; that refusal is its answer, not a classification.
@@ -46,16 +46,21 @@ typedef struct {
     // may be an eye's after a load), whether or not it carried a certificate. Set by vr_after_draw. The game drew a
     // scene this frame, so the frame is offered as a scene or not at all: never as a menu panel.
     bool scene_seen;
+    // An eye's scene-final draw happened with the eye given the headset's view (its tag without
+    // PC_VR_LAYER_DRAW_UNBOUND), certified or not. Set by vr_after_draw. A scene drawn only with the game's own camera
+    // (a load before head look binds it, an eye call refused) is not offered and not counted as a refusal.
+    bool scene_bound_seen;
     // Per-eye bits: that eye's scene-final draw carried its own render certificate, which resolved to that eye. Set by
-    // vr_after_draw at the scene-final draw. Where a bit is set, eyes[] and scene_output[] hold this frame's values
-    // for that eye; elsewhere they hold nothing.
+    // vr_after_draw at the scene-final draw. Where a bit is set, eyes[] holds this frame's certificate for that eye;
+    // elsewhere it holds nothing.
     unsigned certified;
-    // Per-eye bits: a certified eye's placement draw (PC_VR_LAYER_DRAW_PLACEMENT) drew that eye's own finished image
-    // (scene_output) into that eye's half of the final image. Set by vr_after_draw. With both bits and both
+    // Per-eye bits: a certified eye's placement draw (PC_VR_LAYER_DRAW_PLACEMENT, in that eye's layer: its own
+    // certificate) drew into that eye's half of the final image. Set by vr_after_draw. With both bits and both
     // certificates agreeing, the final image's halves are this frame's two eyes, each in its place.
     unsigned placed;
-    // A certified eye's placement draw drew another image, or drew into the other eye's half. Set by vr_after_draw.
-    // The halves cannot be trusted to be the eyes: the frame is rejected as misplaced.
+    // A certified eye's placement draw drew into the other eye's half: a tripwire (0 in every run on record, D103 and
+    // every check since); the capture copies fixed halves, so such a frame is rejected as misplaced. Set by
+    // vr_after_draw.
     bool misplaced;
     // An eye's placement draw happened, certified or not (vr_after_draw). The scene is in the final image, so the
     // game's later 2D draws into it are its HUD (D057): exec.c's vr_is_hud_draw sends them to the HUD's own image.
@@ -73,9 +78,9 @@ typedef struct {
     // projection's depth terms and world scale (the crosshair's depth and the HUD markers use them). Valid only where
     // certified has the eye's bit.
     PcVrRenderCertificate eyes[2];
-    // Each certified eye's finished image (its scene-final draw's render target, by debug id), so that its placement
-    // draw can be checked to sample this very image. Valid only where certified has the eye's bit.
-    uint64_t scene_output[2];
+    // (D115 step 6: the placement no longer compares the texture it samples with the eye's scene-final target. Both
+    // eyes are drawn into the same colour target, so that comparison could not tell them apart; the placement's own
+    // certificate says which eye it is.)
 } VrFrameFindings;
 
 // Back to the state before any draw of a frame: every byte zero, as the zero-initialised vr_eyes starts. Called at each
@@ -104,6 +109,9 @@ typedef enum {
     // A scene was drawn but the eyes do not certify one rendering: an eye without a certificate, or certificates of
     // different traversals, generations, frames or pose snapshots.
     VR_FRAME_REJECTED_UNCERTIFIED,
+    // A scene was drawn only with the game's own camera, not the headset's view (scene_bound_seen): nothing to show,
+    // and not a refusal. The headset keeps the last image; after a load that is the game's fade.
+    VR_FRAME_REJECTED_UNBOUND,
     // A scene was drawn and certified, but an eye's image was not found placed in its own half.
     VR_FRAME_REJECTED_MISPLACED,
     // No scene, and no pose to anchor a menu panel: the pose query failed, its eyes lacked native views, or no
@@ -128,9 +136,9 @@ typedef struct {
     bool slot_filled;                 // a slot was claimed and filled at this frame's lens pass (vr_eyes.filling)
     bool slot_has_hud;                // that slot also holds this frame's HUD image (the HUD was drawn this frame)
     uint64_t game_present_id;         // the present's game frame number; 0 for a UI re-presentation
-    // The tracking generation of the last accepted scene pair, which the XR owner keeps showing while no scene is
-    // drawn; 0 when a menu panel pair has replaced it, or after the game reset. A quick menu's HUD goes over it only
-    // in that same generation (a recenter or tracking loss in between ends the hold).
+    // The LOCAL definition of the last accepted scene pair, which the XR owner keeps showing while no scene is drawn
+    // (it holds it by LOCAL definition too: D101); 0 when a menu panel pair has replaced it, or after the game reset. A
+    // quick menu's HUD goes over it only in that same definition (a recenter or a new session ends the hold).
     uint64_t scene_held;
     // The HUD panel's distance setting (pc_vr_panel_depth(PC_VR_PANEL_HUD), times the camera target's distance); 0:
     // the HUD panel is off, and the HUD stays in the eye images.
@@ -141,7 +149,7 @@ typedef struct {
     bool pose_valid;         // the pose query returned a valid pose (frames without a scene only)
     bool pose_native_views;  // with both eyes' native views, positions and orientations, tracked
     bool anchor_built;       // and a calibration anchor (xr_calibration_anchor) was made from it
-    uint64_t anchor_generation;  // that anchor's tracking generation, compared with scene_held
+    uint64_t anchor_local;  // that anchor's LOCAL definition, compared with scene_held
 } VrFrameInputs;
 
 // The early part of the classification: whether the frame has anything to offer at all. exec.c calls it before its
@@ -157,8 +165,10 @@ static inline VrFrameRejection vr_frame_not_offered(const VrFrameInputs *inputs)
 // byte for byte), so that the pair is one rendering and the snapshot is the pose to submit it with.
 static inline bool vr_frame_eyes_agree(const VrFrameFindings *findings) {
     const PcVrRenderCertificate *left = &findings->eyes[0], *right = &findings->eyes[1];
-    // (One traversal makes both eyes' certificates from its one snapshot and latch, so the same traversal is the same
-    // frame, generation and pose: the validation review's step 3 removed comparing those again.)
+    // (One frame record makes both eyes' certificates from its one pose, so the same record is the same frame,
+    // generation and pose: the validation review's step 3 removed comparing those again. Each eye keeps its own
+    // certificate until its own next call (pc_vr_projection_trace.c RecordEye), so this comparison is what makes the
+    // two one pair: keep it.)
     return findings->certified == 3 && findings->placed == 3 && !findings->misplaced &&
         left->traversal == right->traversal;
 }
@@ -176,11 +186,11 @@ static inline VrFrameOutcome vr_frame_rejects(VrFrameRejection rejection) {
 // The kind the frame asks for, assuming any panel it needs can be built (see vr_frame_without_panel):
 //  - nothing to offer (vr_frame_not_offered): rejected with that reason;
 //  - a scene was drawn: a scene when the eyes agree (vr_frame_eyes_agree), with the HUD when the slot holds this
-//    frame's HUD and the HUD panel is on; else misplaced when an eye was misplaced or both are certified but not both
-//    placed; else uncertified;
+//    frame's HUD and the HUD panel is on; else unbound when no eye was certified and none given the headset's view;
+//    else misplaced when an eye was misplaced or both are certified but not both placed; else uncertified;
 //  - no scene: without an anchored pose, rejected (menu without a pose); with one, the HUD over the held scene when
 //    a quick menu or shop is open over it (over_world), the slot holds its HUD, the HUD has been placed before, the
-//    HUD panel is on and the held scene is of the anchor's generation; else the menu panel.
+//    HUD panel is on and the held scene is of the anchor's LOCAL definition; else the menu panel.
 static inline VrFrameOutcome vr_frame_classify(const VrFrameInputs *inputs) {
     const VrFrameRejection not_offered = vr_frame_not_offered(inputs);
     if (not_offered != VR_FRAME_NOT_REJECTED) return vr_frame_rejects(not_offered);
@@ -189,6 +199,7 @@ static inline VrFrameOutcome vr_frame_classify(const VrFrameInputs *inputs) {
         if (vr_frame_eyes_agree(findings))
             return vr_frame_offers(inputs->slot_has_hud && inputs->hud_panel_depth != 0 ? VR_FRAME_SCENE_WITH_HUD
                                                                                         : VR_FRAME_SCENE);
+        if (!findings->certified && !findings->scene_bound_seen) return vr_frame_rejects(VR_FRAME_REJECTED_UNBOUND);
         if (findings->misplaced || (findings->certified == 3 && findings->placed != 3))
             return vr_frame_rejects(VR_FRAME_REJECTED_MISPLACED);
         return vr_frame_rejects(VR_FRAME_REJECTED_UNCERTIFIED);
@@ -196,7 +207,7 @@ static inline VrFrameOutcome vr_frame_classify(const VrFrameInputs *inputs) {
     if (!(inputs->pose_valid && inputs->pose_native_views && inputs->anchor_built))
         return vr_frame_rejects(VR_FRAME_REJECTED_MENU_WITHOUT_POSE);
     if (findings->over_world && inputs->slot_has_hud && inputs->hud_distance_m > 0 && inputs->hud_panel_depth != 0 &&
-        inputs->scene_held == inputs->anchor_generation)
+        inputs->scene_held == inputs->anchor_local)
         return vr_frame_offers(VR_FRAME_HUD_OVER_HELD_SCENE);
     return vr_frame_offers(VR_FRAME_MENU_PANEL);
 }
@@ -230,6 +241,7 @@ static inline const char *vr_frame_kind_name(VrFrameOutcome outcome) {
     case VR_FRAME_REJECTED_NOT_CAPTURED: return "not-captured";
     case VR_FRAME_REJECTED_NOT_A_GAME_FRAME: return "not-a-game-frame";
     case VR_FRAME_REJECTED_UNCERTIFIED: return "uncertified";
+    case VR_FRAME_REJECTED_UNBOUND: return "unbound";
     case VR_FRAME_REJECTED_MISPLACED: return "misplaced";
     case VR_FRAME_REJECTED_MENU_WITHOUT_POSE: return "menu-no-pose";
     case VR_FRAME_REJECTED_MENU_WITHOUT_PANEL: return "menu-no-panel";

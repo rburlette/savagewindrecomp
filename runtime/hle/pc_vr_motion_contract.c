@@ -134,16 +134,15 @@ static bool deliver_sensor_sample(Cpu *cpu) {
                     snapshot.generation, sample_serial + 1, &sample);
             if (!built) pose_result = XR_POSE_UNAVAILABLE;
         }
-        // Loss, focus change, an invalid pose or velocity and stale tracking all require a fresh neutral on
-        // recovery. Never replay the last orientation. A busy snapshot drops this read and keeps the neutral.
+        // Loss, focus change and an invalid pose or velocity all require a fresh neutral on recovery. Never replay
+        // the last orientation.
         if (pose_result == XR_POSE_UNAVAILABLE) labo_pose_orientation_reset(&pose_orientation);
-        if (pose_result != XR_POSE_BUSY && built != pose_was_available &&
-            tracking_state_logs++ < TRACKING_STATE_LOG_LIMIT)
+        if (built != pose_was_available && tracking_state_logs++ < TRACKING_STATE_LOG_LIMIT)
             LOG("[labo-pose] tracking %s frame=%llu generation=%llu\n",
                 built ? "available" : "unavailable",
                 (unsigned long long)snapshot.frame_id,
                 (unsigned long long)snapshot.generation);
-        if (pose_result != XR_POSE_BUSY) pose_was_available = built;
+        pose_was_available = built;
     }
     if (!built) {
         cpu->x[0] = 0;

@@ -215,7 +215,7 @@ static void draw_frame(DrawnFrame drawn) {
     for (unsigned eye = 0; eye < 2; ++eye) {
         frame->eyes[eye].traversal = 9;
         frame->eyes[eye].native_index = eye;
-        frame->eyes[eye].native_snapshot.generation = 5;
+        frame->eyes[eye].native_snapshot.generation = frame->eyes[eye].native_snapshot.local_definition = 5;
     }
     frame->certified = drawn == DRAWN_UNCERTIFIED_SCENE ? 1 : 3;
     frame->placed = drawn == DRAWN_UNCERTIFIED_SCENE ? 1 : 3;

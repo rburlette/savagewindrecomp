@@ -8,17 +8,18 @@
 _Atomic uint64_t pc_vr_guard_counts[PC_VR_GUARD_COUNT];
 
 static const char *const pc_vr_guard_names[PC_VR_GUARD_COUNT] = {
-    "view-head-look-not-applied", "view-precondition", "view-write-failed", "view-matrix-mismatch",
+    "view-not-fresh", "view-no-pose", "view-pair", "view-placement", "view-write-failed",
     "fov-precondition", "fov-write-failed", "fov-conversion-mismatch",
-    "traversal-frame-unreadable", "traversal-serial-exhausted", "traversal-root-identity", "traversal-not-sibling",
-    "traversal-link-gone", "traversal-bound-eye",
-    "pose-busy", "pose-unavailable", "pose-age", "pose-invalid", "pose-generation",
-    "fingerprint-mismatch",
+    "traversal-frame-unreadable", "traversal-root-identity", "traversal-not-sibling",
     "frame-uncertified-missing", "frame-uncertified-disagree", "frame-misplaced", "frame-menu-without-pose",
     "frame-menu-without-panel",
-    "offer-contract", "offer-panel", "offer-hud", "offer-pose-identity", "offer-pose-age", "offer-eyes",
-    "offer-stopped", "offer-reset", "offer-generation", "offer-mailbox",
+    "offer-contract", "offer-panel", "offer-hud", "offer-pose-identity",
+    "offer-stopped", "offer-reset", "offer-local", "offer-mailbox",
 };
+
+const char *pc_vr_guard_name(PcVrGuard guard) {
+    return guard < PC_VR_GUARD_COUNT ? pc_vr_guard_names[guard] : "?";
+}
 
 void pc_vr_guards_log(const char *when) {
     char text[2048];

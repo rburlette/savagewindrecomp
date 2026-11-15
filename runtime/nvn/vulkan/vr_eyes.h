@@ -108,7 +108,7 @@ typedef struct {
 
     // Written by this module when an offer is accepted; 0 again at the game reset. Read by exec.c's
     // vr_quick_menu_over_world.
-    uint64_t scene_held;  // the pose generation of the last accepted scene pair; 0 after a menu panel pair
+    uint64_t scene_held;  // the LOCAL definition of the last accepted scene pair; 0 after a menu panel pair
     // Written by exec.c's draw hooks (the eye placement, the display draw, the window mirror), read by its
     // vr_is_final_image. Survives the game reset, as it always has: the next placement or lens pass renews it, and until
     // then it is only compared, never dereferenced.
@@ -124,6 +124,9 @@ typedef struct {
     unsigned kind_changes;  // the changes logged so far
     // Counts, for the log; written by this module, for the whole run.
     uint64_t captured, offered, accepted, rejected, busy_skips, uncertified, misplaced_frames, menu_pairs, resized;
+    uint64_t unbound;  // scene frames drawn only with the game's own camera (VR_FRAME_REJECTED_UNBOUND)
+    uint64_t unbound_stretches;  // runs of them (a load, a lost binding)
+    uint64_t unbound_since;      // the present the current run began at (0: none)
     uint64_t over_pairs;
 } VrEyes;
 

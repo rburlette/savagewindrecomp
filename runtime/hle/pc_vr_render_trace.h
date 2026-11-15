@@ -9,7 +9,6 @@
 
 typedef struct {
     uint64_t id, traversal, frame, generation;
-    uint64_t camera_hash, view_hash, parameters_hash, logical_hash, device_hash;
     double units_per_meter; // Explicit diagnostic input, NOT calibrated scale.
     // The eye projection's device matrix, the z and w rows' z and w terms (row-major [10], [11], [14], [15]): a
     // depth d of a view-space z is (a z + b) / (c z + e). D073's aim depth reads the scene with it.
@@ -63,10 +62,20 @@ typedef enum {
 // (runtime/nvn/vulkan/vr_lens_mask.h, D114). Their layer's flag (EYE or MAYBE_EYE) as for the kinds.
 #define PC_VR_LAYER_DRAW_LENS 16u
 #define PC_VR_LAYER_DRAW_LENS_HIDDEN 32u
+// With EYE or MAYBE_EYE: the eye layer is drawn with the game's own camera, not given the headset's view this frame:
+// its eye call was not the frame record's or was refused (the refusal counted where it happened), or the layer is
+// known only from the display's pair, before head look binds the game's camera after a load. Such a frame is not
+// shown and not counted as a refusal (D115 step 5c: the game's own fade covers a load).
+#define PC_VR_LAYER_DRAW_UNBOUND 64u
+// Alongside whatever is set: the draw is one of the rune target test's (tools/game_sites.py pcvr_rune_test_draw: the
+// call of the test's draw function; runtime/pc_vr_hud.c, exec.c vr_rune_aim_patch).
+#define PC_VR_LAYER_DRAW_RUNE_TEST 128u
 // Called by patched game code around the call that issues the draw, on the thread recording it. begin returns what
-// was set before, which end restores; rt_lens_draw_begin adds a lens flag to what is set (hidden: the depth mask's).
+// was set before, which end restores; rt_lens_draw_begin adds a lens flag to what is set (hidden: the depth mask's),
+// rt_rune_test_draw_begin the rune test's flag.
 uint32_t rt_layer_draw_begin(uint32_t kind);
 uint32_t rt_lens_draw_begin(uint32_t hidden);
+uint32_t rt_rune_test_draw_begin(void);
 void rt_layer_draw_end(uint32_t previous);
 // What a draw recorded on this thread now is: a PcVrLayerDraw, with its layer's flag. 0 outside those calls.
 uint32_t pc_vr_layer_draw_recording(void);

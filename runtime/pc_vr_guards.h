@@ -15,29 +15,18 @@
 #include <stdint.h>
 
 typedef enum {
-    // The camera trace (runtime/hle/pc_vr_projection_trace.c): why an eye's native view or FOV was not applied, or a
-    // traversal (one frame's pair of eye calls) was refused.
-    PC_VR_GUARD_VIEW_HEAD_LOOK_NOT_APPLIED,  // head look did not apply its pose to the eye
-    PC_VR_GUARD_VIEW_PRECONDITION,           // the eye, its traversal or its pose did not allow the write
-    PC_VR_GUARD_VIEW_WRITE_FAILED,           // the camera fields did not read back as written (restored)
-    PC_VR_GUARD_VIEW_MATRIX_MISMATCH,        // the game's view matrix after its builder is not the written view
-    PC_VR_GUARD_FOV_PRECONDITION,            // the projection's state did not allow the FOV write
-    PC_VR_GUARD_FOV_WRITE_FAILED,            // the FOV fields did not read back as written (restored)
-    PC_VR_GUARD_FOV_CONVERSION_MISMATCH,     // the game's logical or device matrix is not the FOV written
-    PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE,  // the eye call's saved frame could not be read
-    PC_VR_GUARD_TRAVERSAL_SERIAL_EXHAUSTED,  // (the traversal serial ran out)
-    PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY,     // the root eye's configuration or sibling is not a valid object
-    PC_VR_GUARD_TRAVERSAL_NOT_SIBLING,       // the second eye call is not the root's sibling call
-    PC_VR_GUARD_TRAVERSAL_LINK_GONE,         // the root's live link to the sibling no longer holds
-    PC_VR_GUARD_TRAVERSAL_BOUND_EYE,         // the bound eye's base pose or eye position is not finite
-    // The pose check at the traversal's root and pair (projection_pose_current): the headset pose then.
-    PC_VR_GUARD_POSE_BUSY,        // the published pose's lock was held (trylock)
-    PC_VR_GUARD_POSE_UNAVAILABLE, // no valid published pose
-    PC_VR_GUARD_POSE_AGE,         // the frame's or the current pose older than the limit (250 ms)
-    PC_VR_GUARD_POSE_INVALID,     // the frame's or the current pose not tracked, not finite or without native views
-    PC_VR_GUARD_POSE_GENERATION,  // the current pose of another reference generation (a recenter)
-    // A draw's certificate checked against the eye layer's guest state (render_fingerprint): it changed since.
-    PC_VR_GUARD_FINGERPRINT_MISMATCH,
+    // The frame record (runtime/hle/pc_vr_projection_trace.c): why an eye's view or FOV was not given this frame.
+    PC_VR_GUARD_VIEW_NOT_FRESH,              // the eye is not the game's fresh copy of the bound base camera
+    PC_VR_GUARD_VIEW_NO_POSE,                // no pose with native views in this LOCAL definition (none held yet)
+    PC_VR_GUARD_VIEW_PAIR,                   // the eyes' views could not be built from the pose (numerical contracts)
+    PC_VR_GUARD_VIEW_PLACEMENT,              // the game's eye copy is not the base camera moved to its own side
+    PC_VR_GUARD_VIEW_WRITE_FAILED,           // the camera fields could not be written (nothing changed)
+    PC_VR_GUARD_FOV_PRECONDITION,            // the eye's view not built on this thread, or its FOV does not map
+    PC_VR_GUARD_FOV_WRITE_FAILED,            // the FOV fields could not be written (nothing changed)
+    PC_VR_GUARD_FOV_CONVERSION_MISMATCH,     // the game's logical matrix does not give the eye's FOV
+    PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE,  // the eye call's saved frame could not be read, or is neither eye's call
+    PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY,     // the root eye's layer, configuration or sibling is not a valid object
+    PC_VR_GUARD_TRAVERSAL_NOT_SIBLING,       // the second eye call is not the open root's sibling call
     // The renderer's frame (runtime/nvn/vulkan/vr_frame.h): a scene frame not offered, or a menu frame without a panel.
     PC_VR_GUARD_FRAME_UNCERTIFIED_MISSING,   // an eye's scene-final draw without its own certificate
     PC_VR_GUARD_FRAME_UNCERTIFIED_DISAGREE,  // both certified, but of different traversals, frames or poses
@@ -49,11 +38,9 @@ typedef enum {
     PC_VR_GUARD_OFFER_PANEL,
     PC_VR_GUARD_OFFER_HUD,
     PC_VR_GUARD_OFFER_POSE_IDENTITY,
-    PC_VR_GUARD_OFFER_POSE_AGE,
-    PC_VR_GUARD_OFFER_EYES,
     PC_VR_GUARD_OFFER_STOPPED,
     PC_VR_GUARD_OFFER_RESET,
-    PC_VR_GUARD_OFFER_GENERATION,
+    PC_VR_GUARD_OFFER_LOCAL,
     PC_VR_GUARD_OFFER_MAILBOX,
     PC_VR_GUARD_COUNT
 } PcVrGuard;
@@ -67,5 +54,7 @@ static inline void pc_vr_guard_count(PcVrGuard guard) {
 // Logs one "[pc-vr-guards] at=<when> total=<n> <name>=<count> ..." line with every reason counted so far (those at 0
 // left out).
 void pc_vr_guards_log(const char *when);
+// A reason's name, as the log line spells it.
+const char *pc_vr_guard_name(PcVrGuard guard);
 
 #endif

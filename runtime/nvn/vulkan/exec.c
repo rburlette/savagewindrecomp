@@ -4401,6 +4401,7 @@ static uint32_t vr_draw_marker;
 static PcVrPaneRole vr_draw_role;
 // The draw's own render certificate (0: none): the eye layer it was recorded in, with that frame's pose.
 static uint64_t vr_draw_certificate;
+static bool vr_draw_rune_test;  // (the draw is one of the rune target test's: PC_VR_LAYER_DRAW_RUNE_TEST)
 // [pc-vr-audit] SAVAGEWIND_LOG_PANES: the number of the UI pane that recorded the draw (0: none, or logging off).
 static uint32_t vr_draw_pane;
 
@@ -4690,6 +4691,7 @@ static void vr_after_draw(Prog *program, const CmdRec *command) {
     // ---- job 1: an eye's scene-final draw
     if (eye_final) {
         vr_eyes.frame.scene_seen = true;
+        if (!(layer_draw & PC_VR_LAYER_DRAW_UNBOUND)) vr_eyes.frame.scene_bound_seen = true;
         vr_eyes.frame.over_world = false;  // (a scene after all: vr_quick_menu_over_world)
         // (for the shots: the image it writes, and the HDR scene it reads, the texture of the same size)
         TexBackend *output = target->backend, *input = NULL;
@@ -4702,7 +4704,6 @@ static void vr_after_draw(Prog *program, const CmdRec *command) {
         if (certified) {
             const unsigned eye = certificate.native_index;
             vr_eyes.frame.eyes[eye] = certificate;
-            vr_eyes.frame.scene_output[eye] = target->debug_id;
             vr_eyes.frame.certified |= 1u << eye;
             // (D073) The eye's scene depth: the depth target the game's finishing draw of the eye layer has attached.
             vr_scene_depth.depth[eye] = st.rt.depth ? st.rt.depth->backend : NULL;
@@ -4758,12 +4759,11 @@ static void vr_after_draw(Prog *program, const CmdRec *command) {
             }
             vr_eyes.final_backend = target->backend;
         }
-        // Guards, for an eye certified this frame: the placement shows that eye's finished image, in that eye's half.
+        // For an eye certified this frame, its placement (its own certificate says which eye): placed, in that eye's
+        // half; the other half is the tripwire (VrFrameFindings misplaced).
         if (certified && (vr_eyes.frame.certified >> certificate.native_index & 1)) {
             const unsigned eye = certificate.native_index, half = st.viewport[0][0] * 2 >= target->width ? 1 : 0;
-            const NvnTexEntry *entry = program->fi->ntex ? shader_texture_entry(1, &program->fi->tex[0]) : NULL;
-            if (entry && entry->tex && entry->tex->debug_id == vr_eyes.frame.scene_output[eye] && eye == half)
-                vr_eyes.frame.placed |= 1u << eye;
+            if (eye == half) vr_eyes.frame.placed |= 1u << eye;
             else vr_eyes.frame.misplaced = true;
         }
         return;
@@ -4845,9 +4845,10 @@ static bool vr_world_hud_draw(void) {
     if (!pane_constants.addr || pane_constants.size < 64 || !offset_constants.addr || offset_constants.size < 4 ||
         st.ds[0])
         return false;  // (no depth test: ui2d's)
-    // Only nn::ui2d's blocks, as hud_patch tells them, of a pane or a text small enough to be a marker's.
+    // Only nn::ui2d's blocks, as hud_patch tells them, of a pane or a text.
     float origin[2];  // where the pane's (or the text's) origin is, in the layer's NDC before the Labo offset (the log)
-    if (!vr_hud_marker_block((const float *)(uintptr_t)pane_constants.addr, pane_constants.size, origin))
+    float pane_size;  // the pane's larger side in layout units (0: a text; the log)
+    if (!vr_hud_marker_block((const float *)(uintptr_t)pane_constants.addr, pane_constants.size, origin, &pane_size))
         return false;
     const float *viewport = st.viewport[0], half_width = st.rt.color[0]->width * 0.5f;
     if (!vr_hud_one_half(viewport, half_width)) return false;  // (a draw over one half only)
@@ -4868,10 +4869,10 @@ static bool vr_world_hud_draw(void) {
         marker = &linked;
         how = "pane";
         ++vr_world_hud.exact;
-    } else if (vr_draw_role == PC_VR_PANE_RETICLE && vr_aim_result.distance > 0 &&
-               vr_aim_result.frame + 8 >= renderer_present_count()) {
+    } else if (vr_draw_role == PC_VR_PANE_RETICLE && vr_aim_result.distance > 0) {
         // A reticle's pane (the bow's, a rune's, a thrown weapon's): on the aim ray, at the depth the scene has there
-        // (vr_aim.c), about the layout's centre.
+        // (vr_aim.c), about the layout's centre. The last distance is held however old (D101; there is none only
+        // before the first since the game reset), as the rune aim holds it: no window of presents (backlog 9).
         linked = vr_hud_reticle_point(vr_aim_result.distance);
         marker = &linked;
         how = "reticle";
@@ -4901,6 +4902,13 @@ static bool vr_world_hud_draw(void) {
                        config->play.world_hud_test_turn, &vr_world_hud.move, &placed);
     ++vr_world_hud.draws;
     ++vr_world_hud.frame_draws;
+    // (a large pane placed: the binding or role took one that the size cap before backlog 9 left on the panel)
+    static unsigned large_logged;
+    if (pane_size > VR_WORLD_HUD_PANE_LARGE && large_logged++ < 8) {
+        const char *screen = pc_vr_screen_name(vr_draw_screen);
+        LOG("[pc-vr-world-hud] large pane placed: screen=%s how=%s size=%.0f (layout units)\n", screen ? screen : "-",
+            how, pane_size);
+    }
     if (vr_world_hud.logged < 16 || !(vr_world_hud.draws % 8192)) {
         ++vr_world_hud.logged;
         const char *screen = pc_vr_screen_name(vr_draw_screen);
@@ -4917,18 +4925,14 @@ static bool vr_world_hud_draw(void) {
     return true;
 }
 
-// A fade of the HUD's layout (a solid pane over all of it: the black that clears after a load) is drawn into each
-// eye's half of the final image, which is that eye's whole view, instead of into the HUD's image, whose panel shows
-// only the screen's rectangle. Enlarged about the half's centre so the Labo offset leaves no strip; solid, so nothing
-// else changes. Panes with a picture stay on the panel. Per HUD draw outside a held scene (vr_route_hud_draw), before
-// the marker's placement; sets vr_world_hud's move when it takes the draw.
+// The screen Fade's black pane (the black that clears after a load), known by its role (pc_vr_pane_role: the screen
+// and pane names), is drawn into each eye's half of the final image, which is that eye's whole view, instead of into
+// the HUD's image, whose panel shows only the screen's rectangle. Enlarged about the half's centre so the Labo offset
+// leaves no strip; solid, so nothing else changes. Per HUD draw outside a held scene (vr_route_hud_draw), before the
+// marker's placement; sets vr_world_hud's move when it takes the draw.
 static bool vr_hud_fade(Prog *program) {
     (void)program;
-    if (!st.rt.color[0] || vr_draw_role != PC_VR_PANE_FADE) return false;  // (the screen Fade's black pane)
-    const Range pane_constants = st.ubuf[0][0];
-    if (!pane_constants.addr || pane_constants.size < 34 * 16 || st.ds[0]) return false;
-    // A pane of the HUD's layer that covers all of it (vr_hud_fade_block).
-    if (!vr_hud_fade_block((const float *)(uintptr_t)pane_constants.addr)) return false;
+    if (!st.rt.color[0] || vr_draw_role != PC_VR_PANE_FADE || st.ds[0]) return false;
     const float *viewport = st.viewport[0], half_width = st.rt.color[0]->width * 0.5f;
     if (!vr_hud_one_half(viewport, half_width)) return false;
     const Range offset_constants = st.ubuf[0][10];  // (this half's Labo offset, as vr_world_hud_draw reads it)
@@ -5997,16 +6001,17 @@ static bool fxaa_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out
 // so the target did too, away from the crosshair, which is on the game camera's aim ray (D073). So the position is
 // replaced by where that ray meets the scene (vr_aim.c's vr_aim_result) in the image of the eye whose scene the draw
 // samples: in play, the frame's first eye (0), drawn just before the test into the scene targets both eyes share.
-// The test's draw is known by its constants block: the game's own setup of the test reports the block it fills
-// (runtime/pc_vr_hud.c rt_rune_test, called from a patch in the game's code).
+// The test's draw is known by the game call that issues it (PC_VR_LAYER_DRAW_RUNE_TEST, tools/game_sites.py
+// pcvr_rune_test_draw), and the block with the position by the game's own setup of the test, which reports the block
+// it fills (runtime/pc_vr_hud.c rt_rune_test).
 // SAVAGEWIND_PC_VR_RUNE_AIM=0: off; =flip: the position's y counted from the bottom.
 
 // For each fragment constant buffer about to be bound (cbuf_info, per draw): when it is the rune target test's, sets
 // *out to a copy with the position moved onto the aim ray, and returns true. False: bind the game's buffer as it is.
 static bool vr_rune_aim_patch(Range buffer, VkDescriptorBufferInfo *out) {
-    // (the test's constants: the block the game's own setup of the test reported, two vectors of four floats; these
-    // cheap checks first, as this runs for every fragment constant buffer)
-    if (buffer.size < 32 || !pc_vr_rune_test_constants(buffer.addr) || !st.tpool) return false;
+    // (a draw of the test's, and its constants the block the game's own setup of the test reported, two vectors of
+    // four floats; the draw's flag first, as this runs for every fragment constant buffer)
+    if (!vr_draw_rune_test || buffer.size < 32 || !pc_vr_rune_test_constants(buffer.addr) || !st.tpool) return false;
     const PcVrRuneAim mode = pc_vr_config()->play.rune_aim;
     if (mode == PC_VR_RUNE_AIM_OFF) return false;
     const float *constants = (const float *)(uintptr_t)buffer.addr;
@@ -9269,6 +9274,7 @@ static void draw(CmdRec *r, bool indexed) {
     vr_draw_screen = nvn_screen_tag(r);  // (D088: the UI screen that recorded it, and its pane's marker)
     vr_draw_role = (PcVrPaneRole)nvn_pane_role(r);
     vr_draw_certificate = nvn_render_certificate(r);
+    vr_draw_rune_test = (nvn_layer_draw(r) & PC_VR_LAYER_DRAW_RUNE_TEST) != 0;
     vr_draw_marker = nvn_marker_tag(r);
     vr_draw_pane = 0;
     if (vr_draw_marker & PC_VR_PANE_LOG_TAG) {  // [pc-vr-audit] SAVAGEWIND_LOG_PANES: the pane's number, no marker

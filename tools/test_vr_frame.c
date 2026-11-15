@@ -22,6 +22,7 @@ static unsigned checks, failures;
 // scene-final draws of a good frame leave them.
 static void certify_scene_pair(VrFrameFindings *findings) {
     XrPoseSnapshot snapshot = {.frame_id = 1234, .game_present_id = 500, .generation = HELD_GENERATION,
+        .local_definition = HELD_GENERATION,
         .orientation_xyzw = {0, 0, 0, 1}, .native_views_valid = true,
         .eyes = {{.orientation_xyzw = {0, 0, 0, 1}, .position_xyz = {-0.032f, 1.6f, 0},
                   .fov_left_right_up_down = {-0.9f, 0.8f, 0.85f, -0.9f}},
@@ -31,9 +32,8 @@ static void certify_scene_pair(VrFrameFindings *findings) {
     for (unsigned eye = 0; eye < 2; ++eye) {
         findings->eyes[eye] = (PcVrRenderCertificate){.id = 40 + eye, .traversal = 900, .frame = 1234,
             .generation = HELD_GENERATION, .units_per_meter = 10, .native_index = eye, .native_snapshot = snapshot};
-        findings->scene_output[eye] = 70 + eye;
     }
-    findings->scene_seen = true;
+    findings->scene_seen = findings->scene_bound_seen = true;
     findings->certified = 3;
     findings->placed = 3;
     findings->placement_seen = true;
@@ -42,7 +42,7 @@ static void certify_scene_pair(VrFrameFindings *findings) {
 // A frame without a scene whose pose query gave a valid, natively viewed pose and a calibration anchor.
 static void anchor_menu(VrFrameInputs *inputs) {
     inputs->pose_valid = inputs->pose_native_views = inputs->anchor_built = true;
-    inputs->anchor_generation = HELD_GENERATION;
+    inputs->anchor_local = HELD_GENERATION;
 }
 
 // A quick menu opened over the held scene: everything the HUD over the held scene needs.
@@ -109,7 +109,11 @@ static void left_eye_uncertified(VrFrameFindings *findings, VrFrameInputs *input
 }
 static void scene_without_certificates(VrFrameFindings *findings, VrFrameInputs *inputs) {
     (void)inputs;
-    findings->scene_seen = true;  // (an eye layer's scene-final draw without a certificate, as after a load)
+    findings->scene_seen = findings->scene_bound_seen = true;  // (given the headset's view, then no certificate)
+}
+static void scene_with_the_games_camera(VrFrameFindings *findings, VrFrameInputs *inputs) {
+    (void)inputs;
+    findings->scene_seen = true;  // (the eye layers drawn with the game's own camera, as after a load)
 }
 static void only_left_certified_unplaced(VrFrameFindings *findings, VrFrameInputs *inputs) {
     (void)inputs;
@@ -189,7 +193,7 @@ static void quick_menu_hud_panel_off(VrFrameFindings *findings, VrFrameInputs *i
 }
 static void quick_menu_after_recenter(VrFrameFindings *findings, VrFrameInputs *inputs) {
     open_quick_menu(findings, inputs);
-    inputs->anchor_generation = HELD_GENERATION + 1;
+    inputs->anchor_local = HELD_GENERATION + 1;
 }
 static void quick_menu_after_menu_panel(VrFrameFindings *findings, VrFrameInputs *inputs) {
     open_quick_menu(findings, inputs);
@@ -201,7 +205,7 @@ static void quick_menu_after_menu_panel(VrFrameFindings *findings, VrFrameInputs
 // present or the game reset (which also clears over_world).
 static void quick_menu_both_generations_zero(VrFrameFindings *findings, VrFrameInputs *inputs) {
     open_quick_menu(findings, inputs);
-    inputs->scene_held = inputs->anchor_generation = 0;
+    inputs->scene_held = inputs->anchor_local = 0;
 }
 static void quick_menu_without_pose(VrFrameFindings *findings, VrFrameInputs *inputs) {
     open_quick_menu(findings, inputs);
@@ -237,6 +241,8 @@ static const ClassifyCase classify_cases[] = {
     {"left eye uncertified", left_eye_uncertified, VR_FRAME_REJECTED, VR_FRAME_REJECTED_UNCERTIFIED, "uncertified"},
     {"scene without certificates", scene_without_certificates, VR_FRAME_REJECTED, VR_FRAME_REJECTED_UNCERTIFIED,
      "uncertified"},
+    {"scene drawn with the game's camera", scene_with_the_games_camera, VR_FRAME_REJECTED, VR_FRAME_REJECTED_UNBOUND,
+     "unbound"},
     {"only the left certified, unplaced", only_left_certified_unplaced, VR_FRAME_REJECTED,
      VR_FRAME_REJECTED_UNCERTIFIED, "uncertified"},
     {"traversals differ", traversals_differ, VR_FRAME_REJECTED, VR_FRAME_REJECTED_UNCERTIFIED, "uncertified"},
@@ -301,7 +307,7 @@ typedef struct {
     bool hud_setting_on;         // pc_vr_panel_depth(PC_VR_PANEL_HUD) nonzero
     bool hud_distance_positive;  // the eased HUD distance before this frame
     bool pose_valid, native_views, anchor_succeeds;
-    bool held_is_anchor_generation;  // vr_eyes.scene_held == the anchor's generation
+    bool held_is_anchor_local;  // vr_eyes.scene_held == the anchor's generation
     bool scene_hud_panel_builds, quick_panel_builds, menu_panel_builds;
 } DecisionInputs;
 
@@ -363,7 +369,7 @@ static DecisionTrace decision_before_vr_frame(const DecisionInputs *in) {
         if (in->pose_valid && in->native_views && in->anchor_succeeds) {
             trace.hud_setting_read = true;
             if (in->over_world && in->slot_has_hud && in->hud_distance_positive && in->hud_setting_on &&
-                in->held_is_anchor_generation && try_panel(&trace, 'Q', in->quick_panel_builds)) {
+                in->held_is_anchor_local && try_panel(&trace, 'Q', in->quick_panel_builds)) {
                 ready = true;
                 kind = "quick-over-scene";
             } else {
@@ -383,14 +389,14 @@ static DecisionTrace decision_before_vr_frame(const DecisionInputs *in) {
 // certificates for the four comparisons; the flags are set here.
 static DecisionTrace decision_with_vr_frame(const DecisionInputs *in, VrFrameFindings *findings) {
     DecisionTrace trace = {0};
-    findings->scene_seen = in->scene_seen;
+    findings->scene_seen = findings->scene_bound_seen = in->scene_seen;  // (the old decision had no unbound frames)
     findings->certified = in->certified;
     findings->placed = in->placed;
     findings->misplaced = in->misplaced;
     findings->over_world = in->over_world;
     VrFrameInputs inputs = {.findings = findings, .producer_armed = in->producer_armed, .slot_filled = in->slot_filled,
         .slot_has_hud = in->slot_filled && in->slot_has_hud, .game_present_id = in->game_frame ? 500 : 0,
-        .scene_held = in->held_is_anchor_generation ? HELD_GENERATION : HELD_GENERATION + 1,
+        .scene_held = in->held_is_anchor_local ? HELD_GENERATION : HELD_GENERATION + 1,
         .hud_distance_m = in->hud_distance_positive ? EASED_HUD_DISTANCE_M : 0};
     const VrFrameRejection not_offered = vr_frame_not_offered(&inputs);
     if (not_offered == VR_FRAME_REJECTED_NOT_CAPTURED) {
@@ -407,7 +413,7 @@ static DecisionTrace decision_with_vr_frame(const DecisionInputs *in, VrFrameFin
         inputs.pose_native_views = inputs.pose_valid && in->native_views;
         trace.anchor_called = inputs.pose_native_views;
         inputs.anchor_built = inputs.pose_native_views && in->anchor_succeeds;
-        inputs.anchor_generation = inputs.anchor_built ? HELD_GENERATION : 0;  // (offer.render_pose.generation)
+        inputs.anchor_local = inputs.anchor_built ? HELD_GENERATION : 0;  // (offer.render_pose.generation)
     }
     if (findings->scene_seen ? in->slot_has_hud && vr_frame_eyes_agree(findings) : inputs.anchor_built) {
         trace.hud_setting_read = true;
@@ -481,7 +487,7 @@ static unsigned long differential_check(unsigned long *combinations) {
         in.scene_hud_panel_builds = take_bits(number, &position, 1);
         in.quick_panel_builds = take_bits(number, &position, 1);
         in.menu_panel_builds = take_bits(number, &position, 1);
-        in.held_is_anchor_generation = take_bits(number, &position, 1);
+        in.held_is_anchor_local = take_bits(number, &position, 1);
         in.anchor_succeeds = take_bits(number, &position, 1);
         in.native_views = take_bits(number, &position, 1);
         in.pose_valid = take_bits(number, &position, 1);
@@ -516,7 +522,7 @@ static unsigned long differential_check(unsigned long *combinations) {
                    number, in.producer_armed, in.slot_filled, in.game_frame, in.scene_seen, in.certified, in.placed,
                    in.misplaced, in.same_traversal, in.same_generation, in.same_frame, in.same_snapshot, in.over_world,
                    in.slot_has_hud, in.hud_setting_on, in.hud_distance_positive, in.pose_valid, in.native_views,
-                   in.anchor_succeeds, in.held_is_anchor_generation, in.scene_hud_panel_builds, in.quick_panel_builds,
+                   in.anchor_succeeds, in.held_is_anchor_local, in.scene_hud_panel_builds, in.quick_panel_builds,
                    in.menu_panel_builds);
             print_trace("before", &before);
             print_trace("after", &after);
@@ -553,7 +559,8 @@ int main(void) {
                             1u << VR_FRAME_MENU_PANEL | 1u << VR_FRAME_REJECTED));
     CHECK(rejections_reached == (1u << VR_FRAME_NOT_REJECTED | 1u << VR_FRAME_REJECTED_NOT_CAPTURED |
                                  1u << VR_FRAME_REJECTED_NOT_A_GAME_FRAME | 1u << VR_FRAME_REJECTED_UNCERTIFIED |
-                                 1u << VR_FRAME_REJECTED_MISPLACED | 1u << VR_FRAME_REJECTED_MENU_WITHOUT_POSE));
+                                 1u << VR_FRAME_REJECTED_UNBOUND | 1u << VR_FRAME_REJECTED_MISPLACED |
+                                 1u << VR_FRAME_REJECTED_MENU_WITHOUT_POSE));
     // (menu without a panel comes only from a panel that cannot be built: below)
 
     // The downgrade chain: a quick menu whose HUD panel fails is the menu panel (not a rejection: order trap), whose
@@ -575,7 +582,8 @@ int main(void) {
     // Kinds that need no panel stay as they are.
     CHECK(outcome_is(vr_frame_without_panel(vr_frame_offers(VR_FRAME_SCENE)), VR_FRAME_SCENE, VR_FRAME_NOT_REJECTED));
     const VrFrameRejection every_rejection[] = {VR_FRAME_REJECTED_NOT_CAPTURED, VR_FRAME_REJECTED_NOT_A_GAME_FRAME,
-        VR_FRAME_REJECTED_UNCERTIFIED, VR_FRAME_REJECTED_MISPLACED, VR_FRAME_REJECTED_MENU_WITHOUT_POSE,
+        VR_FRAME_REJECTED_UNCERTIFIED, VR_FRAME_REJECTED_UNBOUND, VR_FRAME_REJECTED_MISPLACED,
+        VR_FRAME_REJECTED_MENU_WITHOUT_POSE,
         VR_FRAME_REJECTED_MENU_WITHOUT_PANEL};
     for (size_t index = 0; index < sizeof every_rejection / sizeof every_rejection[0]; ++index)
         CHECK(outcome_is(vr_frame_without_panel(vr_frame_rejects(every_rejection[index])), VR_FRAME_REJECTED,
@@ -597,6 +605,7 @@ int main(void) {
     CHECK(!strcmp(vr_frame_kind_name(vr_frame_offers(VR_FRAME_HUD_OVER_HELD_SCENE)), "quick-over-scene"));
     CHECK(!strcmp(vr_frame_kind_name(vr_frame_offers(VR_FRAME_MENU_PANEL)), "menu-panel"));
     CHECK(!strcmp(vr_frame_kind_name(vr_frame_rejects(VR_FRAME_REJECTED_UNCERTIFIED)), "uncertified"));
+    CHECK(!strcmp(vr_frame_kind_name(vr_frame_rejects(VR_FRAME_REJECTED_UNBOUND)), "unbound"));
     CHECK(!strcmp(vr_frame_kind_name(vr_frame_rejects(VR_FRAME_REJECTED_MISPLACED)), "misplaced"));
     CHECK(!strcmp(vr_frame_kind_name(vr_frame_rejects(VR_FRAME_REJECTED_MENU_WITHOUT_POSE)), "menu-no-pose"));
     CHECK(!strcmp(vr_frame_kind_name(vr_frame_rejects(VR_FRAME_REJECTED_MENU_WITHOUT_PANEL)), "menu-no-panel"));
@@ -613,8 +622,7 @@ int main(void) {
     CHECK(!memcmp(&findings, &initial_findings, sizeof findings));
     CHECK(!findings.scene_seen && !findings.certified && !findings.placed && !findings.misplaced &&
           !findings.placement_seen && !findings.over_world && !findings.over_world_known);
-    CHECK(!findings.eyes[0].traversal && !findings.eyes[1].native_snapshot.generation && !findings.scene_output[0] &&
-          !findings.scene_output[1]);
+    CHECK(!findings.eyes[0].traversal && !findings.eyes[1].native_snapshot.generation);
     // A reset frame with a filled slot at a game present is a menu frame: it never passes for a scene.
     inputs = (VrFrameInputs){.findings = &findings, .producer_armed = true, .slot_filled = true, .game_present_id = 501};
     CHECK(outcome_is(vr_frame_classify(&inputs), VR_FRAME_REJECTED, VR_FRAME_REJECTED_MENU_WITHOUT_POSE));

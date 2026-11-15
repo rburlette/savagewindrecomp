@@ -260,7 +260,7 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
         inputs.pose_valid = xr_runtime_get_pose(&pose) == XR_POSE_VALID;
         inputs.pose_native_views = inputs.pose_valid && pose.native_views_valid;
         inputs.anchor_built = inputs.pose_native_views && xr_calibration_anchor(&pose, &offer.render_pose);
-        inputs.anchor_generation = offer.render_pose.generation;
+        inputs.anchor_local = offer.render_pose.local_definition;
         offer.anchored = inputs.anchor_built;
     }
     // The HUD setting, read where the frame can use it: a scene pair with this frame's HUD, or an anchored menu frame.
@@ -317,10 +317,27 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
     if (accepted) {
         ++vr_eyes.accepted;
         if (offer.over_scene) ++vr_eyes.over_pairs;
-        else vr_eyes.scene_held = offer.anchored ? 0 : offer.render_pose.generation;  // (a menu panel replaces it)
+        else vr_eyes.scene_held = offer.anchored ? 0 : offer.render_pose.local_definition;  // (a menu panel replaces it)
     } else {
-        ++vr_eyes.rejected;
+        if (outcome.rejection == VR_FRAME_REJECTED_UNBOUND) ++vr_eyes.unbound;  // (not a refusal)
+        else ++vr_eyes.rejected;
         vr_eye_slot_release(slot);
+    }
+    // Stretches of unbound frames (a scene drawn with the game's own camera: a load before head look binds it, or a
+    // binding that is lost), each counted and logged where it starts and ends, the first 32: a stretch that never
+    // ends, a frozen headset image, shows as a start with no end (the independent review of the cleanup, finding 1).
+    const bool unbound_frame = outcome.rejection == VR_FRAME_REJECTED_UNBOUND;
+    if (unbound_frame && !vr_eyes.unbound_since) {
+        vr_eyes.unbound_since = game_present_id;
+        if (++vr_eyes.unbound_stretches <= 32)
+            LOG("[pc-vr-eyes] unbound from present=%llu (stretch %llu): drawn with the game's own camera\n",
+                (unsigned long long)game_present_id, (unsigned long long)vr_eyes.unbound_stretches);
+    } else if (!unbound_frame && vr_eyes.unbound_since && frame->scene_seen) {
+        if (vr_eyes.unbound_stretches <= 32)
+            LOG("[pc-vr-eyes] unbound until present=%llu (stretch %llu, %llu presents)\n",
+                (unsigned long long)game_present_id, (unsigned long long)vr_eyes.unbound_stretches,
+                (unsigned long long)(game_present_id - vr_eyes.unbound_since));
+        vr_eyes.unbound_since = 0;
     }
     // Each change of kind, for the first 200 (the quick menus' and menus' frames between the periodic lines).
     if (kind != vr_eyes.last_kind && vr_eyes.kind_changes < 200) {
@@ -331,14 +348,18 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
             framepace_pause_state(), (unsigned long long)vr_eyes.over_pairs);
     }
     vr_eyes.last_kind = kind;
-    if (vr_eyes.offered <= 8 || !(vr_eyes.offered % 120) || (!accepted && vr_eyes.rejected <= 16))
-        LOG("[pc-vr-eyes] offer=%llu present=%llu kind=%s traversal=%llu generation=%llu accepted=%d accepted_total=%llu rejected=%llu menu_pairs=%llu uncertified=%llu misplaced=%llu busy_skips=%llu resized=%llu half=%ux%u\n",
+    // (the first refusals; unbound frames are not refusals and log only at the first frame of each stretch)
+    const bool unbound = outcome.rejection == VR_FRAME_REJECTED_UNBOUND;
+    if (vr_eyes.offered <= 8 || !(vr_eyes.offered % 120) || (!accepted && !unbound && vr_eyes.rejected <= 16))
+        LOG("[pc-vr-eyes] offer=%llu present=%llu kind=%s traversal=%llu generation=%llu accepted=%d accepted_total=%llu rejected=%llu menu_pairs=%llu uncertified=%llu misplaced=%llu unbound=%llu unbound_stretches=%llu busy_skips=%llu resized=%llu half=%ux%u\n",
             (unsigned long long)vr_eyes.offered, (unsigned long long)game_present_id, kind,
             (unsigned long long)(frame->scene_seen ? frame->eyes[0].traversal : 0),
             (unsigned long long)offer.render_pose.generation, accepted,
             (unsigned long long)vr_eyes.accepted, (unsigned long long)vr_eyes.rejected,
             (unsigned long long)vr_eyes.menu_pairs, (unsigned long long)vr_eyes.uncertified,
-            (unsigned long long)vr_eyes.misplaced_frames, (unsigned long long)vr_eyes.busy_skips,
+            (unsigned long long)vr_eyes.misplaced_frames, (unsigned long long)vr_eyes.unbound,
+            (unsigned long long)vr_eyes.unbound_stretches,
+            (unsigned long long)vr_eyes.busy_skips,
             (unsigned long long)vr_eyes.resized, vr_eyes.width, vr_eyes.height);
     if (!(vr_eyes.offered % 1200)) pc_vr_guards_log("present");
 }
