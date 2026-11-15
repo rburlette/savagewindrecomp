@@ -117,6 +117,16 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
         out->diagnostics.shot_presents, PC_VR_SHOT_PRESENTS);
     out->diagnostics.quick_menu_shots = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS"));
     out->diagnostics.no_headset_mask = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_NO_HEADSET_MASK"));
+    value = lookup(context, "SAVAGEWIND_PC_VR_HEADSET_PACE");
+    const int headset_pace = value ? atoi(value) : 0;
+    out->diagnostics.headset_pace = headset_pace >= 1 && headset_pace <= 6 ? (unsigned)headset_pace : 0;
+    if (out->diagnostics.headset_pace) {  // (the offset belongs to the pace: nothing without it)
+        value = lookup(context, "SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS");
+        double pace_offset_ms = PC_VR_HEADSET_PACE_OFFSET_MS_DEFAULT;
+        if (value && !(explicit_positive_number(value, &pace_offset_ms) && pace_offset_ms <= 50.0))
+            pace_offset_ms = PC_VR_HEADSET_PACE_OFFSET_MS_DEFAULT;
+        out->diagnostics.headset_pace_offset_ns = (uint64_t)(pace_offset_ms * 1e6 + 0.5);
+    }
     value = lookup(context, "SAVAGEWIND_PC_VR_BENCH_HEAD");
     out->diagnostics.bench_head_requested = value != NULL;
     const long long bench_start = value ? atoll(value) : 0;
@@ -189,6 +199,9 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
         describe_presents(&line, "SHOT", config->diagnostics.shot_presents, config->diagnostics.shot_count);
     if (config->diagnostics.quick_menu_shots) describe_append(&line, " QUICK_MENU_SHOTS");
     if (config->diagnostics.no_headset_mask) describe_append(&line, " NO_HEADSET_MASK");
+    if (config->diagnostics.headset_pace)
+        describe_append(&line, " HEADSET_PACE=%u HEADSET_PACE_OFFSET_MS=%.6g", config->diagnostics.headset_pace,
+                        config->diagnostics.headset_pace_offset_ns / 1e6);
     if (config->diagnostics.bench_head_start)
         describe_append(&line, " BENCH_HEAD=%llu", (unsigned long long)config->diagnostics.bench_head_start);
     else if (config->diagnostics.bench_head_requested) describe_append(&line, " BENCH_HEAD=invalid");

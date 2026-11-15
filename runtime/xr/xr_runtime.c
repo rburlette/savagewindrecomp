@@ -230,6 +230,16 @@ static _Thread_local const char *current_xr_call;
 
 uint64_t xr_runtime_pose_clock_ns(void) { return SDL_GetTicksNS(); }
 
+// The display clock (xr_runtime_display_clock): written by the frame owner after each xrWaitFrame, read by the game's
+// presenting thread. The two values are read apart; the period does not change within a session.
+static _Atomic uint64_t display_frame_start_ns, display_period_ns;
+
+bool xr_runtime_display_clock(uint64_t *frame_start_ns, uint64_t *period_ns) {
+    *frame_start_ns = atomic_load(&display_frame_start_ns);
+    *period_ns = atomic_load(&display_period_ns);
+    return *period_ns != 0;
+}
+
 const char *xr_runtime_current_call(void) {
     return current_xr_call ? current_xr_call : "outside-XR-call";
 }
@@ -603,6 +613,10 @@ static bool wait_frame(XrFrameState *frame) {
     *frame = (XrFrameState){.type = XR_TYPE_FRAME_STATE};
     const uint64_t began = xr_perf.enabled ? SDL_GetTicksNS() : 0;
     const bool ok = xr_ok(XR_CALL("xrWaitFrame", xr.WaitFrame(xr.session, &wait, frame)), "xrWaitFrame");
+    if (ok) {
+        atomic_store(&display_period_ns, (uint64_t)frame->predictedDisplayPeriod);
+        atomic_store(&display_frame_start_ns, SDL_GetTicksNS());
+    }
     if (xr_perf.enabled) {
         xr_perf_add(&xr_perf.wait, SDL_GetTicksNS() - began);
         const XrDuration period = frame->predictedDisplayPeriod;
@@ -1207,6 +1221,10 @@ XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
 }
 void xr_runtime_reset_game(void) {}
 uint64_t xr_runtime_pose_clock_ns(void) { return 0; }
+bool xr_runtime_display_clock(uint64_t *frame_start_ns, uint64_t *period_ns) {
+    *frame_start_ns = *period_ns = 0;
+    return false;
+}
 void xr_runtime_shutdown(void) {}
 bool xr_runtime_shutdown_checked(void) { return true; }
 const char *xr_runtime_current_call(void) { return "OpenXR-disabled"; }

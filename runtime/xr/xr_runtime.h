@@ -117,6 +117,10 @@ XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out);
 // Same monotonic clock/epoch used for snapshot publication.
 // Returns zero in an OpenXR-disabled build. No XR call or lock is performed.
 uint64_t xr_runtime_pose_clock_ns(void);
+// The headset's display clock, in that same clock: when the owner's latest display frame started (xrWaitFrame
+// returned) and the display period the runtime reported with it. Kept as last seen when the frame loop stops. False
+// before the first display frame and in an OpenXR-disabled build. No XR call or lock is performed.
+bool xr_runtime_display_clock(uint64_t *frame_start_ns, uint64_t *period_ns);
 // Called after stopping guest threads; drops old notifications and calibration.
 void xr_runtime_reset_game(void);
 // Joins the sole frame owner, then releases XR before Vulkan may be destroyed.

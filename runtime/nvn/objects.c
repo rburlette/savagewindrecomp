@@ -9,6 +9,7 @@
 #include "../platform.h"
 #include "../prof.h"
 #include "../perfmon.h"
+#include "../pc_vr_pace.h"
 #include "../xr/xr_runtime.h"
 #include "nvn.h"
 
@@ -1213,6 +1214,13 @@ static void present_pace(int interval) {
     static int cap = -1;
     static uint64_t last;
     if (cap < 0) cap = getenv("SAVAGEWIND_FPS_CAP") ? atoi(getenv("SAVAGEWIND_FPS_CAP")) : 60;
+    PcVrPacedFrame paced;  // PC VR on the headset's grid (pc_vr_pace.h): its wait in place of the one below
+    if (pc_vr_pace_frame(framepace_on() ? framepace_period_ns() : 0, &paced)) {
+        g_pace_sleep_ns += paced.slept_ns;
+        last = paced.started_ns;
+        framepace_presented(paced.started_ns, paced.on_grid);
+        return;
+    }
     uint64_t period;
     if (framepace_on()) period = framepace_period_ns();
     else {
@@ -1247,19 +1255,22 @@ NVN(nvnQueuePresentTexture) {
     static int logged = -1;
     if (logged != w->interval) { logged = w->interval; LOG("[nvn] window present interval %d\n", w->interval); }
     TL("present (pace)");
-    present_pace(w->interval);
+    const bool pace_after = pc_vr_pace_on();  // (pc_vr_pace.h: the wait comes after the present is handed on)
+    if (!pace_after) present_pace(w->interval);
     if (frame_split()) g_fs_pace = plat_now_ns();
     perfmon_frame();
     TL("present (backend)");
     if (async_exec()) {
         if (image.texture) queue_put_present(QOP_PRESENT, 0, NULL, &image);
         TL("present queued");
+        if (pace_after) present_pace(w->interval);
         return;
     }
     if (host_work()) kernel_host_work_begin();
     if (image.texture) backend_present(&image);
     if (host_work()) kernel_host_work_end();
     TL("presented");
+    if (pace_after) present_pace(w->interval);
 }
 
 // ================================================================== small state objects
