@@ -320,6 +320,9 @@ static struct {
     uint64_t skipped;   // finished pairs returned unshown because a newer one had finished (D081)
     XrPerfMetric wait, producer, swapchain, fence, end, completion, new_age, age;
     XrPerfMetric spare;  // how long before its display frame started each pair was offered (xr_images_internal.h)
+    // The eye copy's parts (xr_images_internal.h eye_copy_timing_report): the submit call, the wait until the GPU
+    // began it, the copy on the GPU, and the GPU's end to the return of the owner's wait.
+    XrPerfMetric copy_submit, copy_queued, copy_on_gpu, copy_woke;
 } xr_perf;
 static XrTime xr_perf_last_predicted;  // (kept across reports)
 static unsigned xr_perf_showing;       // display frames the current image has been shown (kept across reports)
@@ -341,6 +344,9 @@ static void xr_perf_report(void) {
     XR_PERF_REPORT(wait); XR_PERF_REPORT(producer); XR_PERF_REPORT(swapchain); XR_PERF_REPORT(fence);
     XR_PERF_REPORT(end); XR_PERF_REPORT(completion); XR_PERF_REPORT(new_age); XR_PERF_REPORT(age);
     XR_PERF_REPORT(spare);
+    if (xr_perf.copy_on_gpu.count) {
+        XR_PERF_REPORT(copy_submit); XR_PERF_REPORT(copy_queued); XR_PERF_REPORT(copy_on_gpu); XR_PERF_REPORT(copy_woke);
+    }
 #undef XR_PERF_REPORT
     // The spare time's spread: pairs by the milliseconds between their offer and their display frame's start, rounded
     // up (0: offered after it started; the last count: 17 ms or more).
@@ -1060,6 +1066,7 @@ bool xr_runtime_bind_vulkan(VkInstance instance, VkPhysicalDevice physical,
                             VkDevice device, uint32_t queue_family, uint32_t queue_index) {
     if (!xr.instance || !device || xr.session || xr.teardown_pending) return false;
     if (!eye_gpu_bind(device, queue_family)) return false;
+    if (xr_perf.enabled) eye_copy_timing_bind(instance, physical, device);  // (the timing windows' copy parts)
     const PcVrConfig *config = pc_vr_config();
     eye_images_enabled = config->enabled;  // (the play configuration has the eye images)
     atomic_store(&eye_offer_trace, config->diagnostics.offer_trace);

@@ -90,6 +90,71 @@ static pthread_mutex_t eye_submission_lock = PTHREAD_MUTEX_INITIALIZER;
 // before.
 #define EYE_COPY_STALL_NS UINT64_C(5000000000)
 
+// ---- The copy's timing, for the XR timing windows only (SAVAGEWIND_PC_VR_PERF): where a slow copy spent its time.
+// Two GPU timestamps bracket the copy's commands; once its fence has signalled they are read and placed on the owner's
+// clock through the GPU's own clock read now (VK_EXT_calibrated_timestamps, which the renderer enables when the
+// device has it). That splits the time from submission to the owner's wait returning into: the submit call, the wait
+// until the GPU began the copy (other work ahead of it), the copy on the GPU, and the GPU's end to the wait's return
+// (the owner thread waking). Without the device's procedures or the extension there is no timing and nothing changes.
+#define EYE_TIMING_PROCS(X) \
+    X(CreateQueryPool) X(DestroyQueryPool) X(CmdResetQueryPool) X(CmdWriteTimestamp) X(GetQueryPoolResults) \
+    X(GetSemaphoreCounterValue)
+static struct {
+#define EYE_TIMING_DECLARE(name) PFN_vk##name name;
+    EYE_TIMING_PROCS(EYE_TIMING_DECLARE)
+#undef EYE_TIMING_DECLARE
+    PFN_vkGetCalibratedTimestampsEXT GetCalibratedTimestamps;
+    VkQueryPool pool;
+    double tick_ns;           // nanoseconds a GPU timestamp tick lasts; 0: no timing
+    bool stamped;             // the copy in flight carries its two timestamps
+    uint64_t submit_began_ns; // the owner's clock just before the copy's vkQueueSubmit
+    uint64_t game_present_id; // the pair it copies
+    // The producer's timeline (its submissions the GPU has finished, in order) and where it stood at the copy's
+    // submission: how many of the game's submissions finished while the copy waited says whose work was ahead of it.
+    VkSemaphore game_timeline;
+    uint64_t game_finished_at_submit;
+    uint64_t slow_logged;
+} eye_copy_timing;
+#define EYE_SLOW_COPY_NS UINT64_C(3000000)  // a copy this long from submission gets a log line of its own
+#define EYE_SLOW_COPY_LINES 300
+
+static void eye_copy_timing_bind(VkInstance instance, VkPhysicalDevice physical, VkDevice device) {
+    eye_copy_timing.tick_ns = 0;
+#define EYE_TIMING_LOAD(name) do { \
+    eye_copy_timing.name = (PFN_vk##name)vkGetDeviceProcAddr(device, "vk" #name); \
+    if (!eye_copy_timing.name) return; \
+} while (0);
+    EYE_TIMING_PROCS(EYE_TIMING_LOAD)
+#undef EYE_TIMING_LOAD
+    eye_copy_timing.GetCalibratedTimestamps =
+        (PFN_vkGetCalibratedTimestampsEXT)vkGetDeviceProcAddr(device, "vkGetCalibratedTimestampsEXT");
+    PFN_vkGetPhysicalDeviceProperties properties_of =
+        (PFN_vkGetPhysicalDeviceProperties)vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties");
+    if (!eye_copy_timing.GetCalibratedTimestamps || !properties_of) return;
+    VkPhysicalDeviceProperties properties;
+    properties_of(physical, &properties);
+    VkQueryPoolCreateInfo pool = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2};
+    if (!(properties.limits.timestampPeriod > 0) ||
+        eye_copy_timing.CreateQueryPool(device, &pool, NULL, &eye_copy_timing.pool) != VK_SUCCESS) return;
+    eye_copy_timing.tick_ns = properties.limits.timestampPeriod;
+    XRLOG("eye copy timing on (GPU timestamp tick %.3f ns)\n", eye_copy_timing.tick_ns);
+}
+
+static void eye_copy_timing_destroy(void) {
+    if (eye_copy_timing.pool) eye_copy_timing.DestroyQueryPool(eye_gpu.device, eye_copy_timing.pool, NULL);
+    memset(&eye_copy_timing, 0, sizeof eye_copy_timing);
+}
+
+// The copy's first and last commands (between them: the copy itself).
+static void eye_copy_timing_stamp(bool last) {
+    if (!eye_copy_timing.tick_ns) return;
+    if (!last) eye_copy_timing.CmdResetQueryPool(eye_gpu.command, eye_copy_timing.pool, 0, 2);
+    eye_copy_timing.CmdWriteTimestamp(eye_gpu.command, last ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT :
+                                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, eye_copy_timing.pool, last);
+    eye_copy_timing.stamped = last;
+}
+
 static bool eye_gpu_bind(VkDevice device, uint32_t queue_family) {
     eye_gpu.device = device;
     eye_gpu.queue_family = queue_family;
@@ -226,13 +291,60 @@ static bool eye_wait_producer(uint64_t timeout) {
 // Hands the current pair back to its producer once the GPU has finished with it: the producer's own work, and the
 // owner's copy of it when one was submitted. False: not yet (a copy still in flight keeps the pair and everything it
 // owns), or a failure that stopped the owner. copy_wait_ns bounds the wait for the copy (0 only asks).
+// The finished copy's time, split into its parts, into the timing windows; a slow one also gets a line of its own.
+// returned_ns: the owner's clock when its wait on the copy's fence returned.
+static void eye_copy_timing_report(uint64_t returned_ns) {
+    if (!eye_copy_timing.stamped) return;
+    eye_copy_timing.stamped = false;
+    uint64_t stamps[2];
+    if (eye_copy_timing.GetQueryPoolResults(eye_gpu.device, eye_copy_timing.pool, 0, 2, sizeof stamps, stamps,
+            sizeof stamps[0], VK_QUERY_RESULT_64_BIT) != VK_SUCCESS || stamps[1] < stamps[0]) return;
+    // Where the GPU's clock is now, bracketed by the owner's clock.
+    VkCalibratedTimestampInfoEXT device_clock = {.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
+        .timeDomain = VK_TIME_DOMAIN_DEVICE_EXT};
+    uint64_t device_now = 0, deviation = 0;
+    const uint64_t before_ns = SDL_GetTicksNS();
+    if (eye_copy_timing.GetCalibratedTimestamps(eye_gpu.device, 1, &device_clock, &device_now, &deviation) != VK_SUCCESS ||
+        device_now < stamps[1]) return;
+    const uint64_t now_ns = before_ns + (SDL_GetTicksNS() - before_ns) / 2;
+    const uint64_t on_gpu_ns = (uint64_t)((double)(stamps[1] - stamps[0]) * eye_copy_timing.tick_ns);
+    const uint64_t since_end_ns = (uint64_t)((double)(device_now - stamps[1]) * eye_copy_timing.tick_ns);
+    const uint64_t ended_ns = now_ns > since_end_ns ? now_ns - since_end_ns : 0;
+    const uint64_t began_ns = ended_ns > on_gpu_ns ? ended_ns - on_gpu_ns : 0;
+    const uint64_t submitted_ns = eye_gpu.copy.submitted_ns;  // (after vkQueueSubmit returned)
+    const uint64_t submit_ns = submitted_ns - eye_copy_timing.submit_began_ns;
+    const uint64_t queued_ns = began_ns > submitted_ns ? began_ns - submitted_ns : 0;
+    const uint64_t woke_ns = returned_ns > ended_ns ? returned_ns - ended_ns : 0;
+    xr_perf_add(&xr_perf.copy_submit, submit_ns);
+    xr_perf_add(&xr_perf.copy_queued, queued_ns);
+    xr_perf_add(&xr_perf.copy_on_gpu, on_gpu_ns);
+    xr_perf_add(&xr_perf.copy_woke, woke_ns);
+    const uint64_t total_ns = returned_ns - eye_copy_timing.submit_began_ns;
+    if (total_ns < EYE_SLOW_COPY_NS || eye_copy_timing.slow_logged++ >= EYE_SLOW_COPY_LINES) return;
+    const uint64_t frame_start_ns = atomic_load(&display_frame_start_ns);
+    uint64_t game_finished_now = 0;
+    if (eye_copy_timing.GetSemaphoreCounterValue(eye_gpu.device, eye_copy_timing.game_timeline, &game_finished_now) != VK_SUCCESS)
+        game_finished_now = eye_copy_timing.game_finished_at_submit;
+    XRLOG("slow eye copy %.2f ms: submit call %.2f, before the GPU began it %.2f, on the GPU %.2f, until the owner's "
+          "wait returned %.2f; images %u%s%s%s, submitted %.2f ms into its display frame, present %llu, "
+          "game submissions finished meanwhile %llu\n",
+          total_ns / 1e6, submit_ns / 1e6, queued_ns / 1e6, on_gpu_ns / 1e6, woke_ns / 1e6,
+          eye_gpu.copy.images - eye_gpu.copy.first, eye_gpu.copy.hud ? " hud" : "", eye_gpu.copy.panel ? " panel" : "",
+          eye_gpu.copy.over ? " over-scene" : "",
+          eye_copy_timing.submit_began_ns > frame_start_ns ? (eye_copy_timing.submit_began_ns - frame_start_ns) / 1e6 : 0.0,
+          (unsigned long long)eye_copy_timing.game_present_id,
+          (unsigned long long)(game_finished_now - eye_copy_timing.game_finished_at_submit));
+}
+
 static bool eye_retire_current_within(uint64_t copy_wait_ns) {
     if (!eye_gpu.current_valid) return true;
     if (!eye_wait_producer(EYE_GPU_WAIT_NS)) return false;
     if (eye_gpu.copy_pending) {
         const uint64_t began = xr_perf.enabled ? SDL_GetTicksNS() : 0;
         VkResult result = eye_gpu.WaitForFences(eye_gpu.device, 1, &eye_gpu.fence, VK_TRUE, copy_wait_ns);
-        if (xr_perf.enabled) xr_perf_add(&xr_perf.fence, SDL_GetTicksNS() - began);
+        const uint64_t returned = xr_perf.enabled ? SDL_GetTicksNS() : 0;
+        if (xr_perf.enabled) xr_perf_add(&xr_perf.fence, returned - began);
+        if (result == VK_SUCCESS) eye_copy_timing_report(returned);
         if (result == VK_TIMEOUT) {
             const uint64_t in_flight_ns = xr_runtime_pose_clock_ns() - eye_gpu.copy.submitted_ns;
             if (in_flight_ns < EYE_COPY_STALL_NS) {
@@ -563,6 +675,7 @@ static void eye_copy_pair(bool may_render) {
     VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     if (eye_gpu.BeginCommandBuffer(eye_gpu.command, &begin) != VK_SUCCESS) goto failed_gpu;
+    eye_copy_timing_stamp(false);
     for (unsigned i = first; i < images; ++i) {
         VkImage image = eye_gpu.eyes[i].images[index[i]].image;
         VkImageMemoryBarrier barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -607,6 +720,7 @@ static void eye_copy_pair(bool may_render) {
                 .position = {shown->position_xyz[0], shown->position_xyz[1], shown->position_xyz[2]}},
             .size = {shown->width_m, shown->height_m}};
     }
+    eye_copy_timing_stamp(true);
     if (eye_gpu.EndCommandBuffer(eye_gpu.command) != VK_SUCCESS) goto failed_gpu;
     // The GPU wait provides cross-queue memory visibility even though the CPU
     // already waited to make drop/retirement paths safe. Host waiting alone is
@@ -617,6 +731,14 @@ static void eye_copy_pair(bool may_render) {
     VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &timeline,
         .waitSemaphoreCount = 1, .pWaitSemaphores = &pair->ready_timeline, .pWaitDstStageMask = &stage,
         .commandBufferCount = 1, .pCommandBuffers = &eye_gpu.command};
+    if (eye_copy_timing.tick_ns) {
+        eye_copy_timing.game_present_id = pair->game_present_id;
+        eye_copy_timing.game_timeline = pair->ready_timeline;
+        if (eye_copy_timing.GetSemaphoreCounterValue(eye_gpu.device, pair->ready_timeline,
+                &eye_copy_timing.game_finished_at_submit) != VK_SUCCESS)
+            eye_copy_timing.game_finished_at_submit = 0;
+        eye_copy_timing.submit_began_ns = xr_runtime_pose_clock_ns();
+    }
     if (eye_gpu.QueueSubmit(xr.queue, 1, &submit, eye_gpu.fence) != VK_SUCCESS) goto failed_gpu;
     eye_gpu.copy_pending = true;
     // What the copy's completion needs: from here the pair's images are the GPU's until the fence, and every swapchain
@@ -697,6 +819,7 @@ static bool eye_gpu_shutdown(void) {
     if (!eye_destroy_swapchains()) return false;
     if (eye_gpu.fence) eye_gpu.DestroyFence(eye_gpu.device, eye_gpu.fence, NULL);
     if (eye_gpu.pool) eye_gpu.DestroyCommandPool(eye_gpu.device, eye_gpu.pool, NULL);
+    eye_copy_timing_destroy();
     pthread_mutex_lock(&eye_mailbox_lock);
     memset(&eye_gpu, 0, sizeof eye_gpu);
     pthread_mutex_unlock(&eye_mailbox_lock);
