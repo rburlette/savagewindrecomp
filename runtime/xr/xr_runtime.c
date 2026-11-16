@@ -149,6 +149,7 @@ bool xr_calibration_panel(const XrCalibration *calibration, float distance, floa
 #include <stdlib.h>
 #include "../platform.h"
 #include "../pc_vr_config.h"
+#include "../pc_vr_frame_trace.h"
 #include "../pc_vr_guards.h"
 #include <time.h>
 #include <math.h>
@@ -746,6 +747,21 @@ static void burst_trace_write(const XrBurstReport *report) {
     fputs(text, stderr);
 }
 
+// The scene image shown before the one now, by the pose it was rendered with (run_frame's image pose line).
+static struct {
+    bool valid;
+    uint64_t pose_frame;
+    float orientation_xyzw[4];
+} image_before;
+
+// The angle between two orientations, in degrees.
+static double orientation_angle_deg(const float first_xyzw[4], const float second_xyzw[4]) {
+    double dot = 0;
+    for (unsigned index = 0; index < 4; ++index) dot += (double)first_xyzw[index] * second_xyzw[index];
+    dot = fabs(dot);
+    return 2.0 * acos(dot > 1.0 ? 1.0 : dot) * (180.0 / 3.14159265358979323846);
+}
+
 // The iteration's row, completed and added: what the frame was, and the runtime's own counters as they stand after
 // its xrEndFrame (a counter the runtime gives no value for this frame stays empty).
 static void burst_trace_frame(bool should_render, uint64_t game_present_id, bool image_submitted) {
@@ -976,6 +992,32 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
                 ++xr_perf.new_images;
                 xr_burst_frame.new_image = true;
                 if (xr_perf_showing) ++xr_perf.shown[(xr_perf_showing < 4 ? xr_perf_showing : 4) - 1];
+                // The image before stayed up three display frames or more: this one came late. Where its game frame's
+                // time went is the late-frame trace's to write (pc_vr_frame_trace.h).
+                if (xr_perf_showing >= 3)
+                    pc_vr_frame_trace_late(eye_copy_timing.game_present_id, xr_perf_showing, eye_copy_timing.unfinished,
+                                           eye_gpu.copy.waited, eye_copy_timing.spare_ns);
+                // A scene image's pose against the image before it and against the head now (asked by the user, who
+                // sees the camera out of place at a hitch): written for a late image, and for any image rendered
+                // with an older pose than the one before, turned far from it, or far from where the head is.
+                if (!eye_gpu.layer_panel && !eye_gpu.layer_over) {
+                    const XrPoseSnapshot *rendered = &eye_gpu.copy.render_pose;
+                    const float head_now[4] = {head.pose.orientation.x, head.pose.orientation.y,
+                                               head.pose.orientation.z, head.pose.orientation.w};
+                    const int64_t pose_frames = image_before.valid ? (int64_t)(rendered->frame_id - image_before.pose_frame) : 0;
+                    const double turned_deg = image_before.valid ?
+                        orientation_angle_deg(rendered->orientation_xyzw, image_before.orientation_xyzw) : 0;
+                    const double behind_deg = valid ? orientation_angle_deg(rendered->orientation_xyzw, head_now) : 0;
+                    const bool odd = image_before.valid && (pose_frames <= 0 || turned_deg > 10.0 || behind_deg > 25.0);
+                    static unsigned pose_lines;
+                    if ((odd || xr_perf_showing >= 3) && pose_lines++ < 8000)
+                        XRLOG("image pose: present %llu%s pose-frames %lld turned-deg %.2f behind-deg %.2f shown-before %u\n",
+                              (unsigned long long)eye_copy_timing.game_present_id, odd ? " odd" : "", (long long)pose_frames,
+                              turned_deg, behind_deg, xr_perf_showing);
+                    image_before.valid = true;
+                    image_before.pose_frame = rendered->frame_id;
+                    memcpy(image_before.orientation_xyzw, rendered->orientation_xyzw, sizeof image_before.orientation_xyzw);
+                } else image_before.valid = false;
                 xr_perf_showing = 1;
             } else {
                 ++xr_perf.repeated_images;

@@ -38,6 +38,7 @@
 #include "../../xr/xr_vulkan.h"
 #include "../../settings.h"
 #include "../../pc_vr.h"
+#include "../../pc_vr_frame_trace.h"
 #include "../../pc_vr_hud.h"
 #include "../../color_grade.h"
 #include "../../colour_vision.h"
@@ -5043,6 +5044,9 @@ void vk_vr_present(uint64_t game_present_id) {
     vr_world_hud.frame_draws = 0;
     // (SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS: the game frames over the held scene in a row, vr_quick_menu_shot)
     if (vr_eyes_present(game_present_id, submit_seq)) vr_quick_menu_shots_present(over_world);
+    // (the late-frame trace: the pair is offered; this thread's counts so far, of which the frame's part is kept)
+    pc_vr_frame_trace_offered(game_present_id, cum_draws, cum_submits, (uint64_t)atomic_load(&stat_compiles), cum_wait,
+                              stat_upload_bytes, atomic_load(&g_vram_alloc_ns));
 }
 
 // (debug frames) a depth image's depth values as a greyscale PGM, stretched over its own min..max

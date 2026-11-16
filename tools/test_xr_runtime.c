@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include "../runtime/xr/xr_runtime.c"
 #include "../runtime/pc_vr_guards.c"  // (the refusal counts the owner keeps)
+// (the late-frame trace is the game's side, pc_vr_frame_trace.c: the owner only names the late image)
+void pc_vr_frame_trace_late(uint64_t present_id, unsigned shown, unsigned unfinished, bool copy_carried, uint64_t spare_ns) {
+    (void)present_id; (void)shown; (void)unfinished; (void)copy_carried; (void)spare_ns;
+}
 #include "test_pc_vr_settings.h"  // (the XR owner's settings: the play configuration's, PC VR off unless a case says)
 void rt_fatal_trace(void) { abort(); }
 

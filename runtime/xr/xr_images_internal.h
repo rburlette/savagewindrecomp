@@ -40,6 +40,7 @@ static struct {
     uint64_t pending_epoch[EYE_QUEUE], current_epoch, current_taken_ns;
     uint64_t pending_offered_ns[EYE_QUEUE], current_offered_ns;  // when each pair was offered (the timing windows' spare)
     unsigned pending_count;
+    unsigned current_unfinished;  // display frames at which the current pair's producer had not finished (late-frame trace)
     bool current_valid, producer_complete, copy_pending;
     // The latest copied pair, re-submitted every display frame with the poses it was rendered with until a newer pair,
     // a reset or a recenter ends it (D101: held through a hitch, a session state change or lost tracking; the
@@ -116,6 +117,10 @@ static struct {
     bool stamped;             // the copy in flight carries its two timestamps
     uint64_t submit_began_ns; // the owner's clock just before the copy's vkQueueSubmit
     uint64_t game_present_id; // the pair it copies
+    // For the late-frame trace (pc_vr_frame_trace.h), of the pair it copies: the display frames at which its producer
+    // had not finished, and how long before the display frame that took it the pair was offered.
+    unsigned unfinished;
+    uint64_t spare_ns;
     // The producer's timeline (its submissions the GPU has finished, in order) and where it stood at the copy's
     // submission: how many of the game's submissions finished while the copy waited says whose work was ahead of it.
     VkSemaphore game_timeline;
@@ -280,6 +285,7 @@ static bool eye_wait_producer(uint64_t timeout) {
         // Not finished yet: the pair stays the current one and is asked about again, unless its producer has stalled.
         const uint64_t waited_ns = xr_runtime_pose_clock_ns() - eye_gpu.current_taken_ns;
         if (waited_ns < EYE_COPY_STALL_NS) {
+            ++eye_gpu.current_unfinished;
             if (xr_perf.enabled) ++xr_perf.pending;
             if (timeout && (eye_gpu.late_producers++ < 8 || !(eye_gpu.late_producers % 64)))
                 XRLOG("eye producer not finished %llu ms after its pair was taken; the pair waits (late producers: %llu)\n",
@@ -489,6 +495,7 @@ static bool eye_take_pending(uint64_t *epoch) {
         *epoch = eye_gpu.pending_epoch[0];
         eye_gpu.current_offered_ns = eye_gpu.pending_offered_ns[0];
         eye_gpu.current_taken_ns = xr_runtime_pose_clock_ns();
+        eye_gpu.current_unfinished = 0;
         eye_gpu.current_valid = true;
         const unsigned rest = --eye_gpu.pending_count;
         memmove(eye_gpu.pending, eye_gpu.pending + 1, rest * sizeof *eye_gpu.pending);
@@ -648,7 +655,10 @@ static void eye_copy_pair(bool may_render) {
         // The pair's spare time: how long before this display frame started it was offered (0 when offered after;
         // over a display period when its producer had not finished at an earlier display frame).
         const uint64_t frame_start_ns = atomic_load(&display_frame_start_ns);
-        xr_perf_add(&xr_perf.spare, frame_start_ns > eye_gpu.current_offered_ns ? frame_start_ns - eye_gpu.current_offered_ns : 0);
+        const uint64_t spare_ns = frame_start_ns > eye_gpu.current_offered_ns ? frame_start_ns - eye_gpu.current_offered_ns : 0;
+        xr_perf_add(&xr_perf.spare, spare_ns);
+        eye_copy_timing.spare_ns = spare_ns;  // (the late-frame trace: of the pair about to be copied)
+        eye_copy_timing.unfinished = eye_gpu.current_unfinished;
     }
     XrCompositionLayerProjectionView views[2];
     XrCompositionLayerQuad quad = {.type = XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -741,8 +751,8 @@ static void eye_copy_pair(bool may_render) {
     VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &timeline,
         .waitSemaphoreCount = 1, .pWaitSemaphores = &pair->ready_timeline, .pWaitDstStageMask = &stage,
         .commandBufferCount = 1, .pCommandBuffers = &eye_gpu.command};
+    eye_copy_timing.game_present_id = pair->game_present_id;  // (also the late-frame trace's, with or without GPU timing)
     if (eye_copy_timing.tick_ns) {
-        eye_copy_timing.game_present_id = pair->game_present_id;
         eye_copy_timing.game_timeline = pair->ready_timeline;
         if (eye_copy_timing.GetSemaphoreCounterValue(eye_gpu.device, pair->ready_timeline,
                 &eye_copy_timing.game_finished_at_submit) != VK_SUCCESS)

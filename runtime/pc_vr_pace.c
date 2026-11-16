@@ -4,6 +4,7 @@
 #include "hle.h"
 #include "kernel.h"
 #include "pc_vr_config.h"
+#include "pc_vr_frame_trace.h"
 #include "platform.h"
 #include "rt.h"
 #include "xr/xr_runtime.h"
@@ -50,5 +51,7 @@ bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced) {
         paced->slept_ns = plat_now_ns() - before_ns;
         paced->on_grid = true;
     }
+    // (the late-frame trace: the next frame's start)
+    pc_vr_frame_trace_started(paced->started_ns, paced->slept_ns, paced->on_grid, display_frames);
     return true;
 }

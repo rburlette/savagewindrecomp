@@ -18,6 +18,7 @@
 #include "../../paths.h"
 #include "../../platform.h"
 #include "../../pc_vr.h"
+#include "../../pc_vr_frame_trace.h"
 #include "../../xr/xr_runtime.h"
 #include "../../xr/xr_vulkan.h"
 #include "../../perfmon.h"
@@ -3681,8 +3682,10 @@ int ui_run(void) {
 // (game threads present while others submit; the window loop re-presents)
 void vk_vr_present(uint64_t game_present_id);  // exec.c (D048: the PC VR eye images)
 void backend_present(const NvnPresent *present) {
+    pc_vr_frame_trace_present_begin(present->game_present_id);  // (PC VR: the late-frame trace, the lock's wait included)
     gpu_lock();
     present_locked(present);
     vk_vr_present(present->game_present_id);
     gpu_unlock();
+    pc_vr_frame_trace_present_end(present->game_present_id);
 }
