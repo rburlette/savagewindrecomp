@@ -350,7 +350,10 @@ static bool eye_retire_current_within(uint64_t copy_wait_ns) {
         const uint64_t began = xr_perf.enabled ? SDL_GetTicksNS() : 0;
         VkResult result = eye_gpu.WaitForFences(eye_gpu.device, 1, &eye_gpu.fence, VK_TRUE, copy_wait_ns);
         const uint64_t returned = xr_perf.enabled ? SDL_GetTicksNS() : 0;
-        if (xr_perf.enabled) xr_perf_add(&xr_perf.fence, returned - began);
+        if (xr_perf.enabled) {
+            xr_perf_add(&xr_perf.fence, returned - began);
+            xr_burst_frame.fence_ns = burst_saturated(xr_burst_frame.fence_ns + (returned - began));  // (the burst trace's row)
+        }
         if (result == VK_SUCCESS) eye_copy_timing_report(returned);
         if (result == VK_TIMEOUT) {
             const uint64_t in_flight_ns = xr_runtime_pose_clock_ns() - eye_gpu.copy.submitted_ns;

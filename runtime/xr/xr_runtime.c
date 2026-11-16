@@ -154,6 +154,7 @@ bool xr_calibration_panel(const XrCalibration *calibration, float distance, floa
 #include <math.h>
 #include "xr_vulkan.h"
 #include "xr_feature_guard.h"
+#include "xr_burst_trace.h"
 
 #define XRLOG(...) fprintf(stderr, "[pc-vr] " __VA_ARGS__)
 // Mutually exclusive outcomes for successful EndFrame calls. These describe
@@ -199,6 +200,12 @@ static struct {
     uint32_t max_eye_width, max_eye_height; // the runtime's per-view maximum (0: unknown)
     uint32_t recommended_eye_width, recommended_eye_height; // the runtime's per-view recommendation (0: unknown)
     PFN_xrGetVisibilityMaskKHR GetVisibilityMaskKHR;        // XR_KHR_visibility_mask, when the runtime offers it
+    // XR_META_performance_metrics, when the runtime offers it and the timing windows are on: the runtime's own
+    // counters of the application and the compositor, read each frame for the burst trace (metric_count: 0 without).
+    PFN_xrSetPerformanceMetricsStateMETA SetPerformanceMetricsStateMETA;
+    PFN_xrQueryPerformanceMetricsCounterMETA QueryPerformanceMetricsCounterMETA;
+    XrPath metric_paths[XR_BURST_COUNTERS];
+    unsigned metric_count;
     // SAVAGEWIND_PC_VR_BENCH_HEAD=<game present>: benchmark head script start (0: off) and the latest present seen.
     uint64_t bench_head_start, bench_last_present;
     pthread_t thread;
@@ -324,9 +331,16 @@ static struct {
     // The eye copy's parts (xr_images_internal.h eye_copy_timing_report): the submit call, the wait until the GPU
     // began it, the copy on the GPU, and the GPU's end to the return of the owner's wait.
     XrPerfMetric copy_submit, copy_queued, copy_on_gpu, copy_woke;
+    XrPerfMetric counters;  // reading the runtime's own counters for the burst trace, a frame's calls together
 } xr_perf;
 static XrTime xr_perf_last_predicted;  // (kept across reports)
 static unsigned xr_perf_showing;       // display frames the current image has been shown (kept across reports)
+// The burst trace (xr_burst_trace.h), while the timing windows are on: wait_frame begins an iteration's row, the
+// frame's steps fill it, and burst_trace_frame adds it.
+static XrBurstTrace xr_burst;
+static XrBurstFrame xr_burst_frame;
+static uint64_t xr_burst_wait_returned_ns;
+static uint32_t burst_saturated(uint64_t value) { return value < UINT32_MAX ? (uint32_t)value : UINT32_MAX; }
 
 static void xr_perf_report(void) {
     if (!xr_perf.enabled || !xr_perf.frames) return;
@@ -348,7 +362,17 @@ static void xr_perf_report(void) {
     if (xr_perf.copy_on_gpu.count) {
         XR_PERF_REPORT(copy_submit); XR_PERF_REPORT(copy_queued); XR_PERF_REPORT(copy_on_gpu); XR_PERF_REPORT(copy_woke);
     }
+    if (xr_perf.counters.count) XR_PERF_REPORT(counters);
 #undef XR_PERF_REPORT
+    if (xr_burst.counter_count) {
+        // The runtime's own counters as the window's last frame read them: how they move through a session.
+        char values[XR_BURST_COUNTERS * (XR_BURST_COUNTER_NAME + 16)];
+        int values_length = 0;
+        for (unsigned index = 0; index < xr_burst.counter_count; ++index)
+            values_length += snprintf(values + values_length, sizeof values - (size_t)values_length, " %s=%.3g",
+                                      xr_burst.counter_names[index], xr_burst_frame.counters[index]);
+        XRLOG("perf runtime-counters%s\n", values);
+    }
     // The spare time's spread: pairs by the milliseconds between their offer and their display frame's start, rounded
     // up (0: offered after it started; the last count: 17 ms or more).
     char spare_spread[160];
@@ -377,6 +401,41 @@ static bool load_instance_functions(void) {
     return true;
 }
 
+// XR_META_performance_metrics, enabled on the instance: every counter the runtime has is logged, and those of the
+// application and the compositor are kept for the burst trace's rows (up to XR_BURST_COUNTERS). Without any, the
+// trace goes without them.
+static void performance_metrics_discover(void) {
+    xr.metric_count = xr_burst.counter_count = 0;
+    PFN_xrVoidFunction enumerate_proc = NULL, set_proc = NULL, query_proc = NULL, path_proc = NULL;
+    if (!XR_SUCCEEDED(xrGetInstanceProcAddr(xr.instance, "xrEnumeratePerformanceMetricsCounterPathsMETA", &enumerate_proc)) ||
+        !XR_SUCCEEDED(xrGetInstanceProcAddr(xr.instance, "xrSetPerformanceMetricsStateMETA", &set_proc)) ||
+        !XR_SUCCEEDED(xrGetInstanceProcAddr(xr.instance, "xrQueryPerformanceMetricsCounterMETA", &query_proc)) ||
+        !XR_SUCCEEDED(xrGetInstanceProcAddr(xr.instance, "xrPathToString", &path_proc)) ||
+        !enumerate_proc || !set_proc || !query_proc || !path_proc) return;
+    const PFN_xrEnumeratePerformanceMetricsCounterPathsMETA enumerate =
+        (PFN_xrEnumeratePerformanceMetricsCounterPathsMETA)enumerate_proc;
+    const PFN_xrPathToString path_to_string = (PFN_xrPathToString)path_proc;
+    XrPath paths[128];
+    uint32_t count = 0;
+    if (!XR_SUCCEEDED(enumerate(xr.instance, 0, &count, NULL)) || !count || count > 128 ||
+        !XR_SUCCEEDED(enumerate(xr.instance, count, &count, paths))) return;
+    for (uint32_t index = 0; index < count; ++index) {
+        char name[XR_MAX_PATH_LENGTH];
+        uint32_t length = 0;
+        if (!XR_SUCCEEDED(path_to_string(xr.instance, paths[index], sizeof name, &length, name))) continue;
+        const bool kept = xr.metric_count < XR_BURST_COUNTERS && (strstr(name, "/app/") || strstr(name, "/compositor/"));
+        XRLOG("performance metrics counter %s%s\n", name, kept ? " (in the burst trace)" : "");
+        if (!kept) continue;
+        static const char prefix[] = "/perfmetrics_meta/";
+        const char *short_name = strncmp(name, prefix, sizeof prefix - 1) ? name : name + sizeof prefix - 1;
+        snprintf(xr_burst.counter_names[xr.metric_count], sizeof xr_burst.counter_names[0], "%s", short_name);
+        xr.metric_paths[xr.metric_count++] = paths[index];
+    }
+    xr_burst.counter_count = xr.metric_count;
+    xr.SetPerformanceMetricsStateMETA = (PFN_xrSetPerformanceMetricsStateMETA)set_proc;
+    xr.QueryPerformanceMetricsCounterMETA = (PFN_xrQueryPerformanceMetricsCounterMETA)query_proc;
+}
+
 bool xr_runtime_discover(void) {
     if (xr.teardown_pending) return false;
     if (xr.instance) return true;
@@ -387,10 +446,11 @@ bool xr_runtime_discover(void) {
     if (!extensions) return false;
     for (uint32_t i = 0; i < count; ++i) extensions[i].type = XR_TYPE_EXTENSION_PROPERTIES;
     XrResult result = xrEnumerateInstanceExtensionProperties(NULL, count, &count, extensions);
-    bool enable2 = false, visibility_mask = false;
+    bool enable2 = false, visibility_mask = false, performance_metrics = false;
     if (XR_SUCCEEDED(result)) for (uint32_t i = 0; i < count; ++i) {
         if (!strcmp(extensions[i].extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME)) enable2 = true;
         if (!strcmp(extensions[i].extensionName, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME)) visibility_mask = true;
+        if (!strcmp(extensions[i].extensionName, XR_META_PERFORMANCE_METRICS_EXTENSION_NAME)) performance_metrics = true;
     }
     free(extensions);
     if (!xr_ok(result, "enumerate extension data") || !enable2) {
@@ -399,12 +459,19 @@ bool xr_runtime_discover(void) {
     }
     // XR_KHR_visibility_mask (optional): the runtime's mesh of each eye's pixels the lenses do not show
     // (xr_visibility_mask_fetch).
-    const char *enabled[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME};
+    // XR_META_performance_metrics (optional, experiment): the runtime's own counters for the burst trace, asked for
+    // only with the timing windows (SAVAGEWIND_PC_VR_PERF) that the trace runs with.
+    const bool performance_metrics_offered = performance_metrics;
+    performance_metrics = performance_metrics && pc_vr_config()->diagnostics.perf;
+    const char *enabled[3] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
+    uint32_t enabled_count = 1;
+    if (visibility_mask) enabled[enabled_count++] = XR_KHR_VISIBILITY_MASK_EXTENSION_NAME;
+    if (performance_metrics) enabled[enabled_count++] = XR_META_PERFORMANCE_METRICS_EXTENSION_NAME;
     XrInstanceCreateInfo info = {.type = XR_TYPE_INSTANCE_CREATE_INFO,
         .applicationInfo = {.applicationName = "Savage Wind PC VR", .applicationVersion = 1,
                             .engineName = "Savage Wind", .engineVersion = 1,
                             .apiVersion = XR_MAKE_VERSION(1, 0, 0)},
-        .enabledExtensionCount = visibility_mask ? 2 : 1, .enabledExtensionNames = enabled};
+        .enabledExtensionCount = enabled_count, .enabledExtensionNames = enabled};
     if (!xr_ok(xrCreateInstance(&info, &xr.instance), "xrCreateInstance")) return false;
     if (!load_instance_functions()) goto fail;
     if (visibility_mask) {
@@ -413,6 +480,10 @@ bool xr_runtime_discover(void) {
             xr.GetVisibilityMaskKHR = (PFN_xrGetVisibilityMaskKHR)proc;
     }
     XRLOG("visibility mask extension=%s\n", xr.GetVisibilityMaskKHR ? "enabled" : "not offered");
+    if (performance_metrics) performance_metrics_discover();
+    XRLOG("performance metrics extension=%s counters-in-the-burst-trace=%u\n",
+          performance_metrics ? "enabled" : performance_metrics_offered ? "offered, not asked for" : "not offered",
+          xr.metric_count);
     XrInstanceProperties props = {.type = XR_TYPE_INSTANCE_PROPERTIES};
     if (!xr_ok(xr.GetInstanceProperties(xr.instance, &props), "xrGetInstanceProperties")) goto fail;
     XRLOG("runtime=%s version=%u.%u.%u\n", props.runtimeName,
@@ -639,13 +710,20 @@ static bool wait_frame(XrFrameState *frame) {
         atomic_store(&display_frame_start_ns, SDL_GetTicksNS());
     }
     if (xr_perf.enabled) {
-        xr_perf_add(&xr_perf.wait, SDL_GetTicksNS() - began);
+        const uint64_t returned = SDL_GetTicksNS();
+        xr_perf_add(&xr_perf.wait, returned - began);
         const XrDuration period = frame->predictedDisplayPeriod;
+        uint64_t missed = 0;
         if (ok && period > 0 && xr_perf_last_predicted && frame->predictedDisplayTime > xr_perf_last_predicted) {
             const int64_t periods = (frame->predictedDisplayTime - xr_perf_last_predicted + period / 2) / period;
-            if (periods > 1) xr_perf.missed += (uint64_t)(periods - 1);
+            if (periods > 1) missed = (uint64_t)(periods - 1);
         }
+        xr_perf.missed += missed;
         if (ok) xr_perf_last_predicted = frame->predictedDisplayTime;
+        // The burst trace's row for this iteration begins here; the frame's steps fill in the rest.
+        xr_burst_frame = (XrBurstFrame){.wait_began_ns = began, .wait_ns = burst_saturated(returned - began),
+            .predicted_display_time = frame->predictedDisplayTime, .missed = burst_saturated(missed)};
+        xr_burst_wait_returned_ns = returned;
     }
     return ok;
 }
@@ -653,6 +731,45 @@ static bool wait_frame(XrFrameState *frame) {
 static void frame_failed(void) {
     xr.terminal = true;
     invalidate_pose("frame lifecycle failed; restart required", true);
+}
+
+// A burst the detector names (xr_burst_trace.h), written to the log in one piece: its text is xr_burst_trace_format's.
+static void burst_trace_write(const XrBurstReport *report) {
+    enum { BURSTS_WRITTEN = 40 };  // (a run's log stays bounded)
+    static unsigned written;
+    static char text[192 * 1024];
+    if (report->from != report->to && written++ >= BURSTS_WRITTEN) {
+        if (written == BURSTS_WRITTEN + 1) XRLOG("burst %u and later ones: rows not written\n", report->burst);
+        return;
+    }
+    xr_burst_trace_format(&xr_burst, report, text, sizeof text);
+    fputs(text, stderr);
+}
+
+// The iteration's row, completed and added: what the frame was, and the runtime's own counters as they stand after
+// its xrEndFrame (a counter the runtime gives no value for this frame stays empty).
+static void burst_trace_frame(bool should_render, uint64_t game_present_id, bool image_submitted) {
+    xr_burst_frame.frame_id = xr.frame_id;
+    xr_burst_frame.game_present_id = game_present_id;
+    xr_burst_frame.should_render = should_render;
+    xr_burst_frame.image_submitted = image_submitted;
+    const uint64_t began = xr.metric_count ? SDL_GetTicksNS() : 0;
+    for (unsigned index = 0; index < XR_BURST_COUNTERS; ++index) {
+        float value = NAN;
+        if (index < xr.metric_count) {
+            XrPerformanceMetricsCounterMETA counter = {.type = XR_TYPE_PERFORMANCE_METRICS_COUNTER_META};
+            const XrResult queried = XR_CALL("xrQueryPerformanceMetricsCounterMETA",
+                xr.QueryPerformanceMetricsCounterMETA(xr.session, xr.metric_paths[index], &counter));
+            if (XR_SUCCEEDED(queried)) {
+                if (counter.counterFlags & XR_PERFORMANCE_METRICS_COUNTER_FLOAT_VALUE_VALID_BIT_META) value = counter.floatValue;
+                else if (counter.counterFlags & XR_PERFORMANCE_METRICS_COUNTER_UINT_VALUE_VALID_BIT_META) value = (float)counter.uintValue;
+            }
+        }
+        xr_burst_frame.counters[index] = value;
+    }
+    if (xr.metric_count) xr_perf_add(&xr_perf.counters, SDL_GetTicksNS() - began);
+    XrBurstReport report;
+    if (xr_burst_trace_add(&xr_burst, &xr_burst_frame, &report)) burst_trace_write(&report);
 }
 
 // One display frame, under xr_vulkan_lock, after a successful xrWaitFrame:
@@ -669,6 +786,8 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
     const uint64_t epoch = atomic_load(&reset_epoch);
     const XrFrameState frame = *waited;
     ++xr.frame_id;
+    // (the burst trace's row: how long the owner stood at xr_vulkan_lock since xrWaitFrame returned)
+    if (xr_perf.enabled) xr_burst_frame.lock_ns = burst_saturated(SDL_GetTicksNS() - xr_burst_wait_returned_ns);
     // 1. Begin.
     XrFrameBeginInfo begin = {.type = XR_TYPE_FRAME_BEGIN_INFO};
     if (!xr_ok(XR_CALL("xrBeginFrame", xr.BeginFrame(xr.session, &begin)), "xrBeginFrame")) goto fail;
@@ -819,7 +938,12 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
     const uint64_t end_began = xr_perf.enabled ? SDL_GetTicksNS() : 0;
     const XrResult ended = XR_CALL(image_submitted ? "xrEndFrame(game-eyes)" : "xrEndFrame(zero-layers)",
         xr.EndFrame(xr.session, &end));
-    if (xr_perf.enabled) xr_perf_add(&xr_perf.end, SDL_GetTicksNS() - end_began);
+    if (xr_perf.enabled) {
+        const uint64_t end_returned = SDL_GetTicksNS();
+        xr_perf_add(&xr_perf.end, end_returned - end_began);
+        xr_burst_frame.work_ns = burst_saturated(end_began - xr_burst_wait_returned_ns);
+        xr_burst_frame.end_ns = burst_saturated(end_returned - end_began);
+    }
     if (image_lock_held) pthread_mutex_unlock(&eye_submission_lock);
     if (!xr_ok(ended, "xrEndFrame")) goto fail;
     FrameOutcome outcome = FRAME_IMAGE;
@@ -850,6 +974,7 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
             }
             if (eye_gpu.copied != copied_before) {
                 ++xr_perf.new_images;
+                xr_burst_frame.new_image = true;
                 if (xr_perf_showing) ++xr_perf.shown[(xr_perf_showing < 4 ? xr_perf_showing : 4) - 1];
                 xr_perf_showing = 1;
             } else {
@@ -868,7 +993,10 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
         ++xr.queue_completion_waits;
         if (!image_submitted) ++xr.queue_completion_zero_layers;
         xr.queue_completion_wait_ns += elapsed;
-        if (xr_perf.enabled) xr_perf_add(&xr_perf.completion, elapsed);
+        if (xr_perf.enabled) {
+            xr_perf_add(&xr_perf.completion, elapsed);
+            xr_burst_frame.completion_ns = burst_saturated(elapsed);
+        }
         if (elapsed > xr.queue_completion_max_wait_ns) xr.queue_completion_max_wait_ns = elapsed;
         if (completed != VK_SUCCESS) {
             XRLOG("runtime queue completion failed: %d; restart required\n", completed);
@@ -876,6 +1004,7 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
             return; // EndFrame already succeeded and its outcome was counted.
         }
     }
+    if (xr_perf.enabled) burst_trace_frame(frame.shouldRender, game_present_id, image_submitted);
     if (xr_perf.frames >= 120) xr_perf_report();
     // What the submitted layers show (scripts/start-pc-vr.ps1 counts the frame lines by it).
     const char *content = !image_submitted ? "none" : eye_gpu.layer_panel ? "panel" :
@@ -1080,6 +1209,16 @@ bool xr_runtime_bind_vulkan(VkInstance instance, VkPhysicalDevice physical,
         .queueFamilyIndex = queue_family, .queueIndex = queue_index};
     XrSessionCreateInfo session_info = {.type = XR_TYPE_SESSION_CREATE_INFO, .next = &binding, .systemId = xr.system};
     if (!xr_ok(XR_CALL("xrCreateSession", xr.CreateSession(xr.instance, &session_info, &xr.session)), "xrCreateSession(shared game device)")) goto fail;
+    if (xr.metric_count) {
+        // The runtime's counters are read only while the session has them switched on (XR_META_performance_metrics).
+        const XrPerformanceMetricsStateMETA metrics = {.type = XR_TYPE_PERFORMANCE_METRICS_STATE_META, .enabled = XR_TRUE};
+        const XrResult switched = XR_CALL("xrSetPerformanceMetricsStateMETA",
+            xr.SetPerformanceMetricsStateMETA(xr.session, &metrics));
+        if (!XR_SUCCEEDED(switched)) {
+            XRLOG("performance metrics not switched on: XrResult=%d; the burst trace goes without them\n", switched);
+            xr.metric_count = xr_burst.counter_count = 0;
+        }
+    }
     XrReferenceSpaceCreateInfo space = {.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
         .referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL, .poseInReferenceSpace = {.orientation = {.w = 1}}};
     if (!xr_ok(xr.CreateReferenceSpace(xr.session, &space, &xr.local), "create LOCAL space")) goto fail;
