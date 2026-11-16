@@ -114,6 +114,15 @@ void pc_vr_frame_trace_present_end(uint64_t present_id);
 // display frame that took it the pair was offered (0: after it began). A pair with neither was offered too late: the
 // queue's thread was still running its lists.
 void pc_vr_frame_trace_late(uint64_t present_id, unsigned shown, unsigned unfinished, bool copy_carried, uint64_t spare_ns);
+// The thread that runs the game's update, as it begins one (hle/framepace.c rt_vfr_update): the stall sampler's.
+void pc_vr_frame_trace_update(void);
+
+// ---- The stall sampler (runtime/pc_vr_stall_sampler.c, Windows only): while a frame's present is overdue, what the
+// thread of the game's update and the presenting thread are in, sampled every couple of milliseconds and written as
+// "[pc-vr] stall sample" lines. Called by the trace above.
+void pc_vr_stall_sampler_register(bool presenting);  // the calling thread takes the role, the first one to ask
+void pc_vr_stall_sampler_frame(uint64_t start_ns, uint64_t after_present_id);  // a frame starts: its present is due
+void pc_vr_stall_sampler_presented(void);  // its present has come
 
 #ifdef __cplusplus
 }

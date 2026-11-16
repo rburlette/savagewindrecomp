@@ -55,6 +55,7 @@
 #include "../gamelib.h"
 #include "../window_size.h"
 #include "../pc_vr.h"
+#include "../pc_vr_frame_trace.h"
 #include "../automation_state.h"
 
 #ifdef _WIN32
@@ -830,6 +831,7 @@ void rt_vfr_update(uint64_t vfr) {
     if (nvn_timeline()) LOG("[tl] %.3f %x vfr\n", plat_now_ns() / 1e6, kernel_current_thread_handle());
     extern uint64_t g_fs_vfr;  // (SAVAGEWIND_FRAME_LOG=2, nvn/objects.c)
     g_fs_vfr = plat_now_ns();
+    pc_vr_frame_trace_update();  // (PC VR: the late-frame trace's stall sampler learns this thread)
     extern void freecam_frame(void);  // (hle/freecam.c)
     freecam_frame();
     clock_probe(vfr);

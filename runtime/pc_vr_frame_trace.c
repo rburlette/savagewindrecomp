@@ -22,7 +22,7 @@ static struct {
     bool on_grid;
     unsigned pace_frames;
 } making;
-static uint64_t previous_queued_ns;
+static uint64_t previous_queued_ns, previous_present_id;
 
 // The queue's thread only: the command lists run since the last present, and its counts at the last offer.
 static struct {
@@ -55,6 +55,11 @@ void pc_vr_frame_trace_started(uint64_t started_ns, uint64_t slept_ns, bool on_g
     making.slept_ns = slept_ns;
     making.on_grid = on_grid;
     making.pace_frames = display_frames;
+    pc_vr_stall_sampler_frame(started_ns, previous_present_id);
+}
+
+void pc_vr_frame_trace_update(void) {
+    pc_vr_stall_sampler_register(false);
 }
 
 void pc_vr_frame_trace_sync(bool ended) {
@@ -72,6 +77,9 @@ void pc_vr_frame_trace_queued(uint64_t present_id) {
     if (!pc_vr_frame_trace_on() || !present_id) return;
     extern uint64_t g_fs_vfr;  // (nvn/objects.c: when the game's frame update began, set in hle/framepace.c)
     const uint64_t now_ns = plat_now_ns();
+    pc_vr_stall_sampler_register(true);
+    pc_vr_stall_sampler_presented();
+    previous_present_id = present_id;
     // Without the pace a frame starts where the present before it went out.
     const PcVrFrameRecord made = {.present_id = present_id,
         .start_ns = making.start_ns ? making.start_ns : previous_queued_ns, .slept_ns = making.slept_ns,
