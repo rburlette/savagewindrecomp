@@ -23,6 +23,7 @@
 #include "../settings.h"
 #include "../input_bind.h"
 #include "../pc_vr.h"
+#include "../pc_vr_frame_trace.h"
 #include "host_input_control.h"
 #include "input_min_hold.h"
 #include "input_stick.h"
@@ -362,6 +363,7 @@ static void recompute_pad(void) {
     bool fly_down = fly_host >= 0 && fly_host < PADB_HOST_COUNT && (host >> fly_host & 1);
     if (fly_down && !fly_was_down && control_enabled() && !menu_input_captured() && !bind_capture_active(NULL, NULL, NULL))
         control_fly_toggle();
+    if (fly_down && !fly_was_down) pc_vr_frame_trace_user_mark();  // (PC VR: the same press marks the late-frame trace)
     fly_was_down = fly_down;
     if (!pad || host_test) pad_lx = test_lx, pad_ly = test_ly, pad_rx = pad_ry = 0;
     else {

@@ -299,6 +299,8 @@ $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntim
 
 # The profiler's Windows sampler guards its stack walks with SEH (__try).
 $(B)/rt/prof_sampler.o: RTFLAGS += -fms-extensions
+# PC VR: the stall sampler guards its stack walks the same way.
+$(B)/rt/pc_vr_stall_sampler.o: RTFLAGS += -fms-extensions
 # Windows guarded memory scans use SEH.
 $(B)/rt/memscan_os.o: RTFLAGS += -fms-extensions
 

@@ -60,6 +60,13 @@ void pc_vr_frame_trace_started(uint64_t started_ns, uint64_t slept_ns, bool on_g
 
 void pc_vr_frame_trace_update(void) {
     pc_vr_stall_sampler_register(false);
+    pc_vr_stall_sampler_moved();
+}
+
+void pc_vr_frame_trace_user_mark(void) {
+    if (!pc_vr_frame_trace_on()) return;
+    static unsigned marks;  // (the input thread alone; the present's number is read as it stands)
+    LOG("[pc-vr] user mark %u: after present %llu\n", ++marks, (unsigned long long)previous_present_id);
 }
 
 void pc_vr_frame_trace_sync(bool ended) {
@@ -67,10 +74,13 @@ void pc_vr_frame_trace_sync(bool ended) {
     const uint64_t now_ns = plat_now_ns();
     if (ended) making.sync_end_ns = now_ns;
     else if (!making.sync_begin_ns) making.sync_begin_ns = now_ns;  // (the first begins it, the last ends it)
+    pc_vr_stall_sampler_gpu_wait(!ended);
 }
 
 void pc_vr_frame_trace_submitted(void) {
-    if (pc_vr_frame_trace_on()) making.submit_ns = plat_now_ns();
+    if (!pc_vr_frame_trace_on()) return;
+    making.submit_ns = plat_now_ns();
+    pc_vr_stall_sampler_moved();
 }
 
 void pc_vr_frame_trace_queued(uint64_t present_id) {
