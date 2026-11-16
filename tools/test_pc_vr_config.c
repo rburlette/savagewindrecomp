@@ -250,6 +250,12 @@ static void test_diagnostics(void) {
     CHECK(!with_setting("SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "yes").diagnostics.quick_menu_shots);
     CHECK(with_setting("SAVAGEWIND_PC_VR_NO_HEADSET_MASK", "1").diagnostics.no_headset_mask);
     CHECK(!with_setting("SAVAGEWIND_PC_VR_NO_HEADSET_MASK", "yes").diagnostics.no_headset_mask);
+    // The XR owner's first wait for a copy: its own unless 1 to 100 milliseconds.
+    CHECK(with_setting("SAVAGEWIND_PC_VR_COPY_WAIT_MS", "100").diagnostics.copy_wait_ms == 100);
+    CHECK(with_setting("SAVAGEWIND_PC_VR_COPY_WAIT_MS", "1").diagnostics.copy_wait_ms == 1);
+    const char *bad_copy_wait[] = {"0", "101", "-3", "abc", ""};
+    for (unsigned i = 0; i < sizeof bad_copy_wait / sizeof bad_copy_wait[0]; ++i)
+        CHECK(!with_setting("SAVAGEWIND_PC_VR_COPY_WAIT_MS", bad_copy_wait[i]).diagnostics.copy_wait_ms);
     // The headset pace: off unless 1 to 6. With it, its offset: -1.5 ms unless a decimal from -50 to 50; without it
     // the offset is nothing.
     config = with_setting("SAVAGEWIND_PC_VR_HEADSET_PACE", "2");

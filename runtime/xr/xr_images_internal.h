@@ -89,6 +89,13 @@ static pthread_mutex_t eye_submission_lock = PTHREAD_MUTEX_INITIALIZER;
 // submission, a producer since the owner took its pair) is a stalled GPU, and stops the owner as any timeout did
 // before.
 #define EYE_COPY_STALL_NS UINT64_C(5000000000)
+// The owner's first wait for a copy of its own. The copy takes about 0.3 ms on the GPU but stands behind whatever
+// batch the game has just handed the same device: half a millisecond as a rule, now and then 3 to 17 ms (measured on
+// Link, 2026-11-15). Waiting those out makes the owner end its display frame late. Past this bound the copy stays in
+// flight as any late copy does, and its pair is shown a display frame later. Not zero: a copy that would have finished
+// within a millisecond would then always come a display frame late. SAVAGEWIND_PC_VR_COPY_WAIT_MS gives another bound.
+#define EYE_COPY_WAIT_NS UINT64_C(3000000)
+static uint64_t eye_copy_wait_ns(void) { return xr.copy_wait_ns ? xr.copy_wait_ns : EYE_COPY_WAIT_NS; }
 
 // ---- The copy's timing, for the XR timing windows only (SAVAGEWIND_PC_VR_PERF): where a slow copy spent its time.
 // Two GPU timestamps bracket the copy's commands; once its fence has signalled they are read and placed on the owner's
@@ -561,8 +568,8 @@ static void eye_copy_finish(void) {
     const XrPoseSnapshot *render_pose = &eye_gpu.copy.render_pose;
     const bool panel = eye_gpu.copy.panel, hud = eye_gpu.copy.hud, over = eye_gpu.copy.over;
     // Completion before xrReleaseSwapchainImage also protects source ownership. The first time the owner waits, within
-    // its bound; a copy already late is only asked about.
-    if (!eye_retire_current_within(eye_gpu.copy.waited ? 0 : EYE_GPU_WAIT_NS)) {
+    // the copy's bound (EYE_COPY_WAIT_NS); a copy already late is only asked about.
+    if (!eye_retire_current_within(eye_gpu.copy.waited ? 0 : eye_copy_wait_ns())) {
         if (xr.terminal) eye_gpu.layer_valid = false;
         return;
     }

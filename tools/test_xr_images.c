@@ -24,6 +24,7 @@ static struct {
     // The pair copied reads images source_base + eye (default 20) and waits for expected_value (default 7).
     uint64_t finished_upto, expected_value;
     uintptr_t source_base;
+    uint64_t fence_timeout;  // the timeout of the latest wait on the copy's fence
 } gpu_mock;
 
 static VKAPI_ATTR VkResult VKAPI_CALL image_wait_sem(VkDevice device, const VkSemaphoreWaitInfo *info, uint64_t timeout) {
@@ -60,9 +61,11 @@ static VKAPI_ATTR void VKAPI_CALL image_destroy_fence(VkDevice device, VkFence f
 }
 static VKAPI_ATTR VkResult VKAPI_CALL image_wait_fence(VkDevice device, uint32_t count, const VkFence *fences, VkBool32 all, uint64_t timeout) {
     (void)device;
-    // (the owner's one bounded wait for a copy, or 0: asking about a copy already late)
-    CHECK(count == 1 && *fences == (VkFence)(uintptr_t)42 && all && (timeout == EYE_GPU_WAIT_NS || timeout == 0));
+    // (the owner's one bounded wait for a copy, the longer one of a retirement, or 0: asking about a copy already late)
+    CHECK(count == 1 && *fences == (VkFence)(uintptr_t)42 && all &&
+          (timeout == eye_copy_wait_ns() || timeout == EYE_GPU_WAIT_NS || timeout == 0));
     CHECK(gpu_mock.pending_copy);
+    gpu_mock.fence_timeout = timeout;
     ++gpu_mock.fences;
     gpu_mock.fence_asks += !timeout;
     if (gpu_mock.reset_at_fence) xr_runtime_reset_game();
@@ -517,13 +520,17 @@ static void test_image_late_copy(void) {
     mock.expected_layers = 1;
     tracking_frame(2);
     CHECK(eye_gpu.submitted == 1 && eye_gpu.copied == 1 && gpu_mock.fence_asks == 0);
-    // The next pair's copy is late.
+    // (the owner's first wait for its copy: the copy's own short bound, well under a display period)
+    CHECK(gpu_mock.fence_timeout == EYE_COPY_WAIT_NS && EYE_COPY_WAIT_NS < 11111111 && EYE_COPY_WAIT_NS > 0);
+    // The next pair's copy is late, here with the bound the configuration can set.
     CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID);
     pair.game_present_id = 3;
     CHECK(xr_runtime_offer_eye_pair(&pair));
     gpu_mock.fence_result = VK_TIMEOUT;
+    xr.copy_wait_ns = 7000000;
     ++mock.predicted;
     tracking_frame(3);  // (the pair before is still what is shown: image_inspect_end checks its poses)
+    CHECK(gpu_mock.fence_timeout == 7000000);
     CHECK(!xr.terminal && eye_gpu.copy_pending && eye_gpu.current_valid && eye_gpu.late_copies == 1);
     CHECK(eye_gpu.submitted == 2 && eye_gpu.copied == 1 && eye_gpu.layer_valid);
     CHECK(gpu_mock.submits == 2 && gpu_mock.acquires == 4 && gpu_mock.releases == 2 && gpu_mock.retirements == 1);

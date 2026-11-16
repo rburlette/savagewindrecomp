@@ -190,6 +190,7 @@ static struct {
     VkQueue queue;
     XrTime pending_reference_change;
     bool running, terminal, last_good, teardown_pending, runtime_queue_completion, display_rate_tracking;
+    uint64_t copy_wait_ns;  // the owner's first wait for a copy when the configuration sets one; 0: EYE_COPY_WAIT_NS
     uint64_t queue_completion_waits, queue_completion_zero_layers, queue_completion_wait_ns, queue_completion_max_wait_ns;
     uint64_t frame_id;
     uint64_t outcomes[FRAME_OUTCOME_COUNT], visible_images;
@@ -422,6 +423,7 @@ bool xr_runtime_discover(void) {
     const PcVrConfig *config = pc_vr_config();
     xr_perf.enabled = config->diagnostics.perf;
     xr.display_rate_tracking = config->play.display_rate_tracking;
+    xr.copy_wait_ns = (uint64_t)config->diagnostics.copy_wait_ms * 1000000;
     xr.bench_head_start = config->diagnostics.bench_head_start;
     if (config->diagnostics.bench_head_requested)
         XRLOG("benchmark head script %s start-present=%llu steps=%u (published poses turned; never a play setting)\n",

@@ -125,6 +125,9 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
         out->diagnostics.shot_presents, PC_VR_SHOT_PRESENTS);
     out->diagnostics.quick_menu_shots = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS"));
     out->diagnostics.no_headset_mask = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_NO_HEADSET_MASK"));
+    value = lookup(context, "SAVAGEWIND_PC_VR_COPY_WAIT_MS");
+    const int copy_wait_ms = value ? atoi(value) : 0;
+    out->diagnostics.copy_wait_ms = copy_wait_ms >= 1 && copy_wait_ms <= 100 ? (unsigned)copy_wait_ms : 0;
     value = lookup(context, "SAVAGEWIND_PC_VR_HEADSET_PACE");
     const int headset_pace = value ? atoi(value) : 0;
     out->diagnostics.headset_pace = headset_pace >= 1 && headset_pace <= 6 ? (unsigned)headset_pace : 0;
@@ -207,6 +210,7 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
         describe_presents(&line, "SHOT", config->diagnostics.shot_presents, config->diagnostics.shot_count);
     if (config->diagnostics.quick_menu_shots) describe_append(&line, " QUICK_MENU_SHOTS");
     if (config->diagnostics.no_headset_mask) describe_append(&line, " NO_HEADSET_MASK");
+    if (config->diagnostics.copy_wait_ms) describe_append(&line, " COPY_WAIT_MS=%u", config->diagnostics.copy_wait_ms);
     if (config->diagnostics.headset_pace)
         describe_append(&line, " HEADSET_PACE=%u HEADSET_PACE_OFFSET_MS=%.6g", config->diagnostics.headset_pace,
                         config->diagnostics.headset_pace_offset_ns / 1e6);
