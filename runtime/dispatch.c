@@ -414,10 +414,29 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
 
 // [pc-vr-audit] A CPU data breakpoint's access (runtime/platform/windows.c plat_data_watch): the first one from each
 // slot, host pc and guest call site (lr) is logged with its guest call chain; hits per slot and per site each second.
+// (probe) The site table: 4096 sites, started afresh by each `watch` command (data_watch_sites_reset), so one run can
+// list the readers of several sets of words; each window line also carries a per-site total at the end of a set.
+#define DATA_WATCH_SITES 4096
+static atomic_flag data_watch_lock = ATOMIC_FLAG_INIT;
+static struct { uint64_t pc, lr, hits, total; unsigned slot; } data_watch_sites[DATA_WATCH_SITES];
+static int data_watch_site_count, data_watch_set;
+
+static void data_watch_sites_reset(void) {
+    while (atomic_flag_test_and_set_explicit(&data_watch_lock, memory_order_acquire)) {}
+    fprintf(stderr, "[pc-vr-audit] watch set=%d totals", data_watch_set);
+    for (int k = 0; k < data_watch_site_count; k++)
+        fprintf(stderr, " %d:%llu", k, (unsigned long long)data_watch_sites[k].total);
+    fprintf(stderr, "\n");
+    memset(data_watch_sites, 0, sizeof data_watch_sites);
+    data_watch_site_count = 0;
+    data_watch_set++;
+    atomic_flag_clear_explicit(&data_watch_lock, memory_order_release);
+}
+
 void rt_data_watch_hit(unsigned slot, uint64_t pc, const uint64_t regs[4]) {
-    static atomic_flag lock = ATOMIC_FLAG_INIT;
-    static struct { uint64_t pc, lr, hits; unsigned slot; } sites[256];
-    static int nsites;
+#define lock data_watch_lock
+#define sites data_watch_sites
+#define nsites data_watch_site_count
     static uint64_t window_ns, window_hits[4];
     const Cpu *cpu = kernel_current_cpu();
     const uint64_t lr = cpu ? cpu->x[30] : 0, now = plat_now_ns();
@@ -425,7 +444,7 @@ void rt_data_watch_hit(unsigned slot, uint64_t pc, const uint64_t regs[4]) {
     window_hits[slot & 3]++;
     int i = 0;
     while (i < nsites && !(sites[i].pc == pc && sites[i].lr == lr && sites[i].slot == slot)) i++;
-    if (i == nsites && nsites < 256) {
+    if (i == nsites && nsites < DATA_WATCH_SITES) {
         sites[nsites].pc = pc;
         sites[nsites].lr = lr;
         sites[nsites++].slot = slot;
@@ -434,8 +453,8 @@ void rt_data_watch_hit(unsigned slot, uint64_t pc, const uint64_t regs[4]) {
         if (!name) name = plat_symbol(pc, &offset);
         if (!name) name = "savagewind rt_fault_watch", offset = pc - (uint64_t)(uintptr_t)&rt_fault_watch;
         extern uint64_t renderer_present_count(void);
-        fprintf(stderr, "[pc-vr-audit] watch site=%d slot=%u by %s+%llx present=%llu (thread %x) guest x0-x2 %llx %llx "
-                "%llx host rax rcx rdx r8 %llx %llx %llx %llx\n", i, slot, name, (unsigned long long)offset,
+        fprintf(stderr, "[pc-vr-audit] watch set=%d site=%d slot=%u by %s+%llx present=%llu (thread %x) guest x0-x2 %llx %llx "
+                "%llx host rax rcx rdx r8 %llx %llx %llx %llx\n", data_watch_set, i, slot, name, (unsigned long long)offset,
                 (unsigned long long)renderer_present_count(), kernel_current_thread_handle(),
                 (unsigned long long)(cpu ? cpu->x[0] : 0), (unsigned long long)(cpu ? cpu->x[1] : 0),
                 (unsigned long long)(cpu ? cpu->x[2] : 0), (unsigned long long)regs[0], (unsigned long long)regs[1],
@@ -443,21 +462,22 @@ void rt_data_watch_hit(unsigned slot, uint64_t pc, const uint64_t regs[4]) {
         extern void kernel_log_guest_chain(void);
         kernel_log_guest_chain();
     }
-    if (i < nsites) sites[i].hits++;
+    if (i < nsites) sites[i].hits++, sites[i].total++;
     if (!window_ns) window_ns = now;
     if (now - window_ns >= 1000000000ull) {
         extern uint64_t renderer_present_count(void);
-        fprintf(stderr, "[pc-vr-audit] watch window present=%llu hits=%llu,%llu,%llu,%llu sites",
-                (unsigned long long)renderer_present_count(), (unsigned long long)window_hits[0],
+        fprintf(stderr, "[pc-vr-audit] watch window set=%d present=%llu hits=%llu,%llu,%llu,%llu sites=%d\n",
+                data_watch_set, (unsigned long long)renderer_present_count(), (unsigned long long)window_hits[0],
                 (unsigned long long)window_hits[1], (unsigned long long)window_hits[2],
-                (unsigned long long)window_hits[3]);
-        for (int k = 0; k < nsites; k++)
-            if (sites[k].hits) fprintf(stderr, " %d:%llu", k, (unsigned long long)sites[k].hits), sites[k].hits = 0;
-        fprintf(stderr, "\n");
+                (unsigned long long)window_hits[3], nsites);
+        for (int k = 0; k < nsites; k++) sites[k].hits = 0;
         memset(window_hits, 0, sizeof window_hits);
         window_ns = now;
     }
     atomic_flag_clear_explicit(&lock, memory_order_release);
+#undef lock
+#undef sites
+#undef nsites
 }
 
 // [pc-vr-audit] The control endpoint's `watch <address> [<address> ...]` (developer mode, Windows): CPU data breakpoints
@@ -480,6 +500,7 @@ static void cmd_watch(int argc, char **argv, ControlReply *reply) {
             return;
         }
     }
+    data_watch_sites_reset();
     control_field_bool(reply, "armed", plat_data_watch(addresses));
 #else
     (void)argc, (void)argv;
@@ -487,10 +508,31 @@ static void cmd_watch(int argc, char **argv, ControlReply *reply) {
 #endif
 }
 
+// (probe) `head <yaw degrees> <pitch degrees>` holds the head turned by that much from the tracked pose, `head off`
+// lets it go: on the simulator, the head-turned view without a headset (runtime/xr/xr_runtime.c xr_probe_head_hold).
+static void cmd_head(int argc, char **argv, ControlReply *reply) {
+    extern void xr_probe_head_hold(bool on, double yaw_degrees, double pitch_degrees);
+    if (argc == 2 && !strcmp(argv[1], "off")) {
+        xr_probe_head_hold(false, 0, 0);
+        control_field_bool(reply, "held", false);
+        return;
+    }
+    if (argc != 3) {
+        control_fail(reply, "Usage: head <yaw degrees> <pitch degrees> | head off");
+        return;
+    }
+    const double yaw = strtod(argv[1], NULL), pitch = strtod(argv[2], NULL);
+    xr_probe_head_hold(true, yaw, pitch);
+    control_field_bool(reply, "held", true);
+    control_field_num(reply, "yaw", yaw);
+    control_field_num(reply, "pitch", pitch);
+}
+
 void rt_data_watch_control_init(void) {
     static const ControlCmd commands[] = {
-        {"watch", "<address> [<address> ...]", "Log the code that reads or writes up to four guest words", cmd_watch}};
-    control_register(commands, 1);
+        {"watch", "<address> [<address> ...]", "Log the code that reads or writes up to four guest words", cmd_watch},
+        {"head", "<yaw degrees> <pitch degrees> | off", "Hold the head turned from the tracked pose (probe)", cmd_head}};
+    control_register(commands, 2);
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {

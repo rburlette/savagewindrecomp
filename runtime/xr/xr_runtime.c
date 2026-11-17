@@ -223,6 +223,16 @@ static pthread_mutex_t pose_lock = PTHREAD_MUTEX_INITIALIZER;
 static XrPoseSnapshot published;
 static atomic_bool accepting, stop_requested;
 static _Atomic uint64_t latest_present, reset_epoch, reference_generation = 1;
+
+// (probe) The control endpoint's `head <yaw> <pitch>`: every pose sample turned by this much from the tracked pose
+// until `head off`, as the benchmark's script turns it. Hundredths of a degree; probe_head_held 0: off.
+static _Atomic int probe_head_held, probe_head_yaw_centidegrees, probe_head_pitch_centidegrees;
+void xr_probe_head_hold(bool on, double yaw_degrees, double pitch_degrees) {
+    atomic_store(&probe_head_yaw_centidegrees, (int)lround(yaw_degrees * 100));
+    atomic_store(&probe_head_pitch_centidegrees, (int)lround(pitch_degrees * 100));
+    atomic_store(&probe_head_held, on ? 1 : 0);
+    XRLOG("probe head hold %s yaw-deg=%.2f pitch-deg=%.2f\n", on ? "on" : "off", yaw_degrees, pitch_degrees);
+}
 // LOCAL's current definition: a new one with each session and each applied recenter, never reused, so definitions
 // differ across sessions; 0 before the first session. Poses carry the one they were located in (XrPoseSnapshot
 // local_definition), and an eye image is shown only in the definition its poses are in.
@@ -931,6 +941,14 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
                     XRLOG("benchmark head step=%llu present=%llu yaw-deg=%.1f pitch-deg=%.1f\n", (unsigned long long)step,
                           (unsigned long long)xr.bench_last_present, yaw * 57.29577951308232, pitch * 57.29577951308232);
             }
+        }
+        if (atomic_load(&probe_head_held) && valid) {  // (probe) the held head turn
+            const double degree = 3.14159265358979323846 / 180;
+            snapshot.angular_velocity_valid = false;
+            memset(snapshot.angular_velocity_xyz, 0, sizeof snapshot.angular_velocity_xyz);
+            xr_bench_head_apply(atomic_load(&probe_head_yaw_centidegrees) * 0.01 * degree,
+                                atomic_load(&probe_head_pitch_centidegrees) * 0.01 * degree,
+                                snapshot.orientation_xyzw, snapshot.eyes);
         }
         pthread_mutex_lock(&pose_lock);
         if (epoch == atomic_load(&reset_epoch) && !atomic_load(&stop_requested)) published = snapshot;
