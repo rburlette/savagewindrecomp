@@ -510,7 +510,12 @@ static void cmd_watch(int argc, char **argv, ControlReply *reply) {
 
 // (probe) `head <yaw degrees> <pitch degrees>` holds the head turned by that much from the tracked pose, `head off`
 // lets it go: on the simulator, the head-turned view without a headset (runtime/xr/xr_runtime.c xr_probe_head_hold).
+// Only a build with the XR runtime has a head to turn.
 static void cmd_head(int argc, char **argv, ControlReply *reply) {
+#ifndef SAVAGEWIND_WITH_OPENXR
+    (void)argc, (void)argv;
+    control_fail(reply, "head: a PC VR build only");
+#else
     extern void xr_probe_head_hold(bool on, double yaw_degrees, double pitch_degrees);
     if (argc == 2 && !strcmp(argv[1], "off")) {
         xr_probe_head_hold(false, 0, 0);
@@ -526,6 +531,7 @@ static void cmd_head(int argc, char **argv, ControlReply *reply) {
     control_field_bool(reply, "held", true);
     control_field_num(reply, "yaw", yaw);
     control_field_num(reply, "pitch", pitch);
+#endif
 }
 
 void rt_data_watch_control_init(void) {
