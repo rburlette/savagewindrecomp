@@ -1172,6 +1172,37 @@ def _rune_test_draw(gen, address):
             f'  /* {address:#x}: bl (the rune target test\'s draw) */')
 
 
+# PC VR's head view for the game's visibility decisions (runtime/hle/pc_vr_cull_view.c; backlog 5). The game decides
+# what is on screen from its own camera: the visibility test (1.9.0 0x70010ec544 and its twin 0x70010ec624) and the
+# actor level-of-detail manager's update (0x70010bb1c8, which stops calculating actors outside its view volumes) each
+# build a view from the camera's matrix (the camera + 8) and its field of view, after Labo VR's change of it (1.9.0
+# 0x700126138c writes the changed fovy and aspect where x1 and x2 point). The head turns only the eye cameras, so in
+# PC VR the runtime may give both the head's view over the two eyes instead: the matrix where the game takes the
+# camera's (`add x<dest>, x<camera>, #8`), and the field of view right after Labo's change. Each patch names the
+# camera, and the runtime answers only for the camera the eyes are derived from, and only when the feature is on.
+def _cull_matrix(camera, dest):
+    def patch(gen, address):
+        assert _word(gen, address) == 0x91002000 | camera << 5 | dest, hex(_word(gen, address))
+        return ('{ extern uint64_t rt_pc_vr_cull_matrix(uint64_t); '
+                f'c->x[{dest}] = rt_pc_vr_cull_matrix(c->x[{camera}]); }}'
+                f'  /* {address:#x}: add x{dest}, x{camera}, #8 (a visibility view: its camera\'s matrix) */')
+    return patch
+
+
+def _cull_fov(camera):
+    def patch(gen, address):
+        word = _word(gen, address)
+        assert word >> 26 == 0x25, hex(word)  # bl
+        target = address + sext(word & 0x3ffffff, 26) * 4
+        assert target == gen.sites.get('pcvr_labo_fov'), f'{target:#x} is not Labo\'s change of the field of view'
+        return (f'{{ extern void f_{target:x}(Cpu *); extern void rt_pc_vr_cull_fov(uint64_t, uint64_t, uint64_t); '
+                'const uint64_t fovy_address = c->x[1], aspect_address = c->x[2]; '
+                f'c->x[30] = {address + 4:#x}ull; f_{target:x}(c); '
+                f'rt_pc_vr_cull_fov(c->x[{camera}], fovy_address, aspect_address); }}'
+                f'  /* {address:#x}: bl (a visibility view: Labo\'s change of its field of view) */')
+    return patch
+
+
 # PC VR's eye images (runtime/hle/pc_vr_render_trace.h): the game finishes every render layer with one call of its
 # screen-quad draw for the layer's finished image (kind 1) and one for that image's placement in the final image
 # (kind 2), and shows the frame by drawing the final image to the display (kind 3): through the callback Labo's
@@ -1235,6 +1266,12 @@ PATCHES = {
     'pcvr_marker_wheel_flat': _marker_wheel_flag(11, False),
     'pcvr_rune_test': _rune_test,
     'pcvr_rune_test_draw': _rune_test_draw,
+    'pcvr_lod_cull_matrix': _cull_matrix(0, 20),
+    'pcvr_lod_cull_fov': _cull_fov(21),
+    'pcvr_vis_cull_fov': _cull_fov(20),
+    'pcvr_vis_cull_matrix': _cull_matrix(20, 1),
+    'pcvr_vis2_cull_fov': _cull_fov(20),
+    'pcvr_vis2_cull_matrix': _cull_matrix(20, 1),
     'pcvr_ui_parallax': _ui_parallax,
     # (the site: ldrb w9 the mask flag, cmp w9, #0, csel the full-screen triangle or the polygon, then the bl)
     'pcvr_lens_draw': _lens_draw(0, "the eye scenes' screen-quad draw: Labo's lens polygon", flag_register=9),

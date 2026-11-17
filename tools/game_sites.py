@@ -463,6 +463,47 @@ SITES = [
     # view), from its only caller 0x700126aa78: the test's screen-quad draws are recorded during it
     Site('pcvr_rune_test_draw', 'code', '94000000/fc000000 aa1303e0 aa1403e1 2a1f03e2 94000000/fc000000 14000000/fc000000',
          0),
+    # PC VR's head view for the game's visibility decisions (tools/patches.py _cull_matrix, _cull_fov;
+    # runtime/hle/pc_vr_cull_view.c; 1.9.0 only). The game builds a visibility view from a camera's matrix (the camera
+    # + 8) and its field of view after Labo VR's change of it (1.9.0 0x700126138c: s0 fovy, s1 aspect, x1 and x2
+    # where the changed pair goes), in three places:
+    # ... Labo's change itself, found on its own: the patches check their calls go there
+    Site('pcvr_labo_fov', 'code', '6dbd23e9 a9017bfd a9024ff4 910043fd 1e204028 1e2c1001 aa0203f3 aa0103f4 1e210800 '
+         '1e210909 94000000/fc000000 1e280800 1e291800 94000000/fc000000 1e202800', 0),
+    # ... the actor level-of-detail manager's update (1.9.0 0x70010bb1c8): `add x20, x0, #8`, the matrix its two view
+    # volumes are built from (the camera in x0, kept in x21), and its call of Labo's change
+    Site('pcvr_lod_cull_matrix', 'code', 'f94002a0 94000000/fc000000 b4000000/ff00001f aa1403e2 91002014 aa0003f5 '
+         '910e43e0 aa1403e1 94000000/fc000000 90000008/9f00001f d10013a1 f9400108/ffc003ff bd44bbe0 d10023a2 bd44bfe1 '
+         'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000', 4),
+    Site('pcvr_lod_cull_fov', 'code', 'f94002a0 94000000/fc000000 b4000000/ff00001f aa1403e2 91002014 aa0003f5 '
+         '910e43e0 aa1403e1 94000000/fc000000 90000008/9f00001f d10013a1 f9400108/ffc003ff bd44bbe0 d10023a2 bd44bfe1 '
+         'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000', 17),
+    # ... the visibility test (1.9.0 0x70010ec544, the camera kept in x20): its call of Labo's change and
+    # `add x1, x20, #8`, the matrix for its frustum. Its twin for the camera manager's second set (0x70010ec624) has
+    # the same words, so each pattern starts with the two words before its function: the end of the point wrapper
+    # (movi d0, #0; b) for the test, the twin's own wrapper (ldp s1, s2, [x0, #0x6c]; b) for the twin
+    Site('pcvr_vis_cull_fov', 'code', '2f00e400 14000000/fc000000 d10243ff fd002bea 6d0623e9 a9077bfd a9084ff4 9101c3fd '
+         '90000008/9f00001f 1e20402a 1e204008 bd407400 bd400101/ffc003ff 1e212000 5400000a/ff00001f 90000008/9f00001f '
+         'aa0003f4 1e204049 f9400108/ffc003ff aa0103f3 f9400100/ffc003ff 94000000/fc000000 f9400008 f9400108/ffc003ff '
+         'd63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 f9400108/ffc003ff '
+         'f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 91002281', 33),
+    Site('pcvr_vis_cull_matrix', 'code', '2f00e400 14000000/fc000000 d10243ff fd002bea 6d0623e9 a9077bfd a9084ff4 '
+         '9101c3fd 90000008/9f00001f 1e20402a 1e204008 bd407400 bd400101/ffc003ff 1e212000 5400000a/ff00001f '
+         '90000008/9f00001f aa0003f4 1e204049 f9400108/ffc003ff aa0103f3 f9400100/ffc003ff 94000000/fc000000 f9400008 '
+         'f9400108/ffc003ff d63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 '
+         'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 '
+         '91002281', 39),
+    Site('pcvr_vis2_cull_fov', 'code', '2d4d8801 14000000/fc000000 d10243ff fd002bea 6d0623e9 a9077bfd a9084ff4 9101c3fd '
+         '90000008/9f00001f 1e20402a 1e204008 bd407400 bd400101/ffc003ff 1e212000 5400000a/ff00001f 90000008/9f00001f '
+         'aa0003f4 1e204049 f9400108/ffc003ff aa0103f3 f9400100/ffc003ff 94000000/fc000000 f9400008 f9400108/ffc003ff '
+         'd63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 f9400108/ffc003ff '
+         'f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 91002281', 33),
+    Site('pcvr_vis2_cull_matrix', 'code', '2d4d8801 14000000/fc000000 d10243ff fd002bea 6d0623e9 a9077bfd a9084ff4 '
+         '9101c3fd 90000008/9f00001f 1e20402a 1e204008 bd407400 bd400101/ffc003ff 1e212000 5400000a/ff00001f '
+         '90000008/9f00001f aa0003f4 1e204049 f9400108/ffc003ff aa0103f3 f9400100/ffc003ff 94000000/fc000000 f9400008 '
+         'f9400108/ffc003ff d63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 '
+         'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 '
+         '91002281', 39),
     # sead::LookAtCamera::doUpdateMatrix (tools/patches.py _lookat_update): its first load of the eye (+0x38); eye,
     # at (+0x44) and up (+0x50) make the view matrix written to x1 (free camera, runtime/hle/freecam.c)
     Site('lookat_update', 'code', '2d470801 2d480c00 1e232020 2d491404 1e240440 1e250400 54000000/ff00001f 1e233823', 0),
@@ -558,6 +599,8 @@ OPTIONAL_GROUPS = [
      'pcvr_marker_store_6', 'pcvr_marker_store_7', 'pcvr_marker_store_8', 'pcvr_marker_component_call',
      'pcvr_marker_wheel_follow', 'pcvr_marker_wheel_flat'),  # (1.9.0 only)
     ('pcvr_rune_test', 'pcvr_rune_test_draw'),
+    ('pcvr_labo_fov', 'pcvr_lod_cull_matrix', 'pcvr_lod_cull_fov', 'pcvr_vis_cull_fov', 'pcvr_vis_cull_matrix',
+     'pcvr_vis2_cull_fov', 'pcvr_vis2_cull_matrix'),  # (1.9.0 only)
     ('pcvr_ui_parallax',),
     ('pcvr_layer_final_draw', 'pcvr_layer_placement_draw', 'pcvr_display_lens_draw', 'pcvr_display_copy_draw'),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
@@ -816,6 +859,13 @@ KNOWN = {
         'pcvr_marker_wheel_flat': 0x7000e1aeb4,
         'pcvr_rune_test': 0x700126f798,
         'pcvr_rune_test_draw': 0x700126acbc,
+        'pcvr_labo_fov': 0x700126138c,
+        'pcvr_lod_cull_matrix': 0x70010bb2a0,
+        'pcvr_lod_cull_fov': 0x70010bb2d4,
+        'pcvr_vis_cull_fov': 0x70010ec5c0,
+        'pcvr_vis_cull_matrix': 0x70010ec5d8,
+        'pcvr_vis2_cull_fov': 0x70010ec6a0,
+        'pcvr_vis2_cull_matrix': 0x70010ec6b8,
         'pcvr_ui_parallax': 0x7000eeee50,
         'pcvr_layer_final_draw': 0x700126c080,
         'pcvr_layer_placement_draw': 0x7000fec358,

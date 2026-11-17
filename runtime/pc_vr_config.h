@@ -89,6 +89,9 @@ typedef struct {
         int64_t headset_pace_offset_ns;   // with the pace, SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS, -50 to 50 (-1.5
                                           // when not given): a frame starts this long after a display frame does,
                                           // before it when negative
+        bool head_cull;           // SAVAGEWIND_PC_VR_HEAD_CULL=1: the game's visibility decisions take the head's view
+                                  // over both eyes in place of the game camera's (runtime/hle/pc_vr_cull_view.c, an
+                                  // experiment)
     } diagnostics;
     unsigned aliases_seen, aliases_ignored;  // a bit per alias given, and per alias given another value than 1
     unsigned settings_ignored;               // a bit per play setting whose value was not taken

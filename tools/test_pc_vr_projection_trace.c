@@ -62,6 +62,15 @@ static GameLibModule game_module = {.name = "main", .base = MAIN_BASE, .size = 0
 static GameLibTables game_tables = {.modules = &game_module, .nmodules = &module_count};
 static Module loaded_main = {.name = "main", .base = MAIN_BASE, .size = 0x1d37000};
 bool pc_vr_enabled(void) { return mock_pc_vr; }
+// The head view's publication (runtime/hle/pc_vr_cull_view.c has its own fixture): the calls and the last base camera.
+static unsigned cull_view_publications;
+static uint64_t cull_view_last_base;
+void pc_vr_cull_view_publish(uint64_t base_camera, const PcVrHeadLookCamera eyes[2],
+                             const float fov_left_right_up_down[2][4]) {
+    (void)eyes; (void)fov_left_right_up_down;
+    ++cull_view_publications;
+    cull_view_last_base = base_camera;
+}
 const GameLibTables *gamelib_tables(void) { return &game_tables; }
 Module *loader_module(const char *name) { return !strcmp(name, "main") ? &loaded_main : NULL; }
 bool pc_vr_main_compatible(void) { return pc_vr_main_layout(gamelib_tables(), loader_module("main")); }
@@ -1246,6 +1255,8 @@ int main(void) {
     test_display_pair();
 #endif
     test_play_configuration();
+    // Every accepted root call published its two eye views with its base camera (for the head view of visibility).
+    CHECK(cull_view_publications > 0 && cull_view_last_base != 0);
     printf("PC VR projection/native-view fixture: %u checks passed (synthetic guest pages only)\n", checks);
     return 0;
 }

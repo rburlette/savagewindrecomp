@@ -138,6 +138,7 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
             pace_offset_ms = PC_VR_HEADSET_PACE_OFFSET_MS_DEFAULT;
         out->diagnostics.headset_pace_offset_ns = llround(pace_offset_ms * 1e6);
     }
+    out->diagnostics.head_cull = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_HEAD_CULL"));
     value = lookup(context, "SAVAGEWIND_PC_VR_BENCH_HEAD");
     out->diagnostics.bench_head_requested = value != NULL;
     const long long bench_start = value ? atoll(value) : 0;
@@ -214,6 +215,7 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
     if (config->diagnostics.headset_pace)
         describe_append(&line, " HEADSET_PACE=%u HEADSET_PACE_OFFSET_MS=%.6g", config->diagnostics.headset_pace,
                         config->diagnostics.headset_pace_offset_ns / 1e6);
+    if (config->diagnostics.head_cull) describe_append(&line, " HEAD_CULL");
     if (config->diagnostics.bench_head_start)
         describe_append(&line, " BENCH_HEAD=%llu", (unsigned long long)config->diagnostics.bench_head_start);
     else if (config->diagnostics.bench_head_requested) describe_append(&line, " BENCH_HEAD=invalid");
