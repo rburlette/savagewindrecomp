@@ -13,6 +13,8 @@
 //    scene0/1 (the same without certificates, the eyes named only by the order of their images).
 //  - SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS=1: what the headset shows while a quick menu or a shop holds the scene (D072),
 //    for the first 4 such menus of the run, at the 30th present over the held scene in a row (vr_quick_menu_shot).
+//  - The controller's capture button, in any PC VR run (pc_vr_eye_shot_request, runtime/pc_vr.h): the next frame's
+//    eye images as the XR owner copies them, as build/vr-shot-mark<n>-submit0/1-<present>.png, n the press's number.
 // "Present" is the renderer's present count plus one, the frame being recorded (renderer_present_count, device.c).
 //
 // Cost: each saved image is copied, the frame's commands so far are submitted, and the render thread waits for the GPU

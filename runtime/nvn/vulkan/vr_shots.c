@@ -1,6 +1,7 @@
 // PC VR renderer: diagnostic image shots (D048 onward). What a shot is, when one is taken, what it costs and the
 // preconditions: vr_shots.h. Moved here from exec.c; the bodies are exec.c's.
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #include "record.h"
 #include "vr_shots.h"
 #include "../labo_premask_capture.h"
+#include "../../pc_vr.h"
 #include "../../pc_vr_config.h"
 
 uint64_t renderer_present_count(void);  // (device.c) the presents so far: the frame being recorded is this plus one
@@ -44,6 +46,8 @@ static struct {
     uint64_t held_presents;      // the presents over the held scene in a row before this one (exec.c vk_vr_present)
     bool shot_this_hold;         // this run of presents over the held scene has its shot
     unsigned quick_menus_taken;  // the menus captured so far
+    // The capture button's eye shot requests served so far (pc_vr_eye_shot_requests).
+    unsigned eye_shot_requests_served;
 } vr_shots;
 
 // ------------------------------------------------------------------------------------------------- saving an image
@@ -71,8 +75,24 @@ bool vr_shot_image_savable(const TexBackend *src) {
 // image first, so later reuse of its memory cannot change the pixels, then waits for the GPU; a GPU that does not
 // finish within 10 seconds stops the process. srgb: encode A2B10G10R10 values to sRGB (vr_shot_encode); alpha: save an
 // RGBA8 image's alpha as grey (the PNGs here are written opaque). No render pass may be open. Returns whether the file
-// was written.
-static bool vr_save_png(TexBackend *src, const char *path, bool srgb, bool alpha) {
+// was written; with in_background, whether its pixels were read: a thread of its own encodes and writes the file
+// (about a second and a half for an eye image, which would otherwise hold the frame), logging when it is done, so a
+// game closed right after may leave it unwritten.
+typedef struct {
+    char path[80];
+    uint8_t *rgba;
+    uint32_t width, height;
+} VrShotWrite;
+
+static void *vr_shot_write_thread(void *argument) {
+    VrShotWrite *write = argument;
+    vk_save_png(write->path, write->rgba, write->width, write->height);
+    free(write->rgba);
+    free(write);
+    return NULL;
+}
+
+static bool vr_save_png(TexBackend *src, const char *path, bool srgb, bool alpha, bool in_background) {
     const bool depth = src && src->format == VK_FORMAT_D32_SFLOAT && src->aspect == VK_IMAGE_ASPECT_DEPTH_BIT;
     if (!vr_shot_image_savable(src)) return false;
     VkImage image = VK_NULL_HANDLE;
@@ -151,11 +171,25 @@ static bool vr_save_png(TexBackend *src, const char *path, bool srgb, bool alpha
             }
         }
         // Raw Vulkan row orientation: no crop, UV transform or distortion.
-        vk_save_png(path, rgba, src->width, src->height);
+        VrShotWrite *write = in_background ? malloc(sizeof *write) : NULL;
+        pthread_t writer;
+        pthread_attr_t detached;
+        bool handed_over = false;
+        if (write && snprintf(write->path, sizeof write->path, "%s", path) < (int)sizeof write->path &&
+            !pthread_attr_init(&detached)) {
+            write->rgba = rgba, write->width = src->width, write->height = src->height;
+            pthread_attr_setdetachstate(&detached, PTHREAD_CREATE_DETACHED);
+            handed_over = !pthread_create(&writer, &detached, vr_shot_write_thread, write);
+            pthread_attr_destroy(&detached);
+        }
+        if (!handed_over) {
+            free(write);
+            vk_save_png(path, rgba, src->width, src->height);
+        }
         if (depth) LOG("[labo-depth-pixels] pixels=%llu zero=%llu one=%llu invalid=%llu path=%s\n",
             (unsigned long long)pixels, (unsigned long long)zero,
             (unsigned long long)one, (unsigned long long)invalid, path);
-        free(rgba);
+        if (!handed_over) free(rgba);
     }
     const bool saved = rgba != NULL;
     vmaDestroyBuffer(g_vk.vma, buffer, buffer_allocation);
@@ -200,7 +234,7 @@ void vr_shot(TexBackend *image, const char *name, bool alpha_as_grey) {
         done[request] |= bit;
         char path[80];
         snprintf(path, sizeof path, "build/vr-shot-%s-%llu.png", name, (unsigned long long)requested[request]);
-        const bool saved = vr_save_png(image, path, true, alpha_as_grey);
+        const bool saved = vr_save_png(image, path, true, alpha_as_grey, false);
         LOG("[pc-vr-eyes] shot %s present=%llu requested=%llu source=%ux%u saved=%d path=%s\n", name,
             (unsigned long long)present, (unsigned long long)requested[request], image->width, image->height, saved,
             path);
@@ -222,10 +256,22 @@ int vr_shot_scene_side(uint64_t output_serial) {
 }
 
 void vr_shot_slot_eyes(const VkImage slot_images[3], uint32_t half_width, uint32_t height) {
+    // The capture button's requests not served yet (pc_vr_eye_shot_request): one pair for them, this frame's.
+    const unsigned requests = pc_vr_eye_shot_requests();
+    const bool requested = requests != vr_shots.eye_shot_requests_served;
+    vr_shots.eye_shot_requests_served = requests;
+    const uint64_t present = renderer_present_count() + 1;
     for (unsigned eye = 0; eye < 2; ++eye) {
         TexBackend eye_image = {.image = slot_images[eye], .format = VK_FORMAT_R8G8B8A8_SRGB, .width = half_width,
             .height = height, .depth = 1, .layers = 1, .levels = 1, .samples = 1, .aspect = VK_IMAGE_ASPECT_COLOR_BIT};
         vr_shot(&eye_image, eye ? "submit1" : "submit0", false);
+        if (!requested) continue;
+        char path[80];
+        snprintf(path, sizeof path, "build/vr-shot-mark%u-submit%u-%llu.png", requests, eye, (unsigned long long)present);
+        // (read: the pixels are taken; the writer thread's "[vk] saved <path>" says the file is written)
+        const bool read = vr_save_png(&eye_image, path, true, false, true);
+        LOG("[pc-vr-eyes] shot of eye shot request %u present=%llu source=%ux%u read=%d path=%s\n", requests,
+            (unsigned long long)present, half_width, height, read, path);
     }
 }
 
@@ -289,7 +335,7 @@ void vr_quick_menu_shot(const VkImage slot_images[3], bool over_world, bool slot
             .aspect = VK_IMAGE_ASPECT_COLOR_BIT};
         snprintf(paths[image], sizeof paths[image], "build/vr-shot-quick-menu%u-%s-%llu.png", number,
                  image_names[image], (unsigned long long)present);
-        saved[image] = vr_save_png(&shot, paths[image], false, image == 3);
+        saved[image] = vr_save_png(&shot, paths[image], false, image == 3, false);
     }
     LOG("[pc-vr-eyes] quick menu shot %u of %u present=%llu (present %llu over the held scene) world pieces left out "
         "this frame=%u saved=%d%d%d%d: %s %s %s %s\n", number, VR_QUICK_MENU_SHOTS_MAX, (unsigned long long)present,

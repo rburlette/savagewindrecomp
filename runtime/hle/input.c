@@ -364,6 +364,7 @@ static void recompute_pad(void) {
     if (fly_down && !fly_was_down && control_enabled() && !menu_input_captured() && !bind_capture_active(NULL, NULL, NULL))
         control_fly_toggle();
     if (fly_down && !fly_was_down) pc_vr_frame_trace_user_mark();  // (PC VR: the same press marks the late-frame trace)
+    if (fly_down && !fly_was_down) pc_vr_eye_shot_request();  // (PC VR: the same press saves the eye images)
     fly_was_down = fly_down;
     if (!pad || host_test) pad_lx = test_lx, pad_ly = test_ly, pad_rx = pad_ry = 0;
     else {

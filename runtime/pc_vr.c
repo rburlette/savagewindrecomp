@@ -33,6 +33,16 @@ bool pc_vr_enabled(void) { return pc_vr_config()->enabled; }
 
 bool pc_vr_controller_without_focus(void) { return pc_vr_enabled(); }
 
+static _Atomic unsigned eye_shot_requests;
+
+void pc_vr_eye_shot_request(void) {
+    if (!pc_vr_enabled()) return;
+    const unsigned request = atomic_fetch_add_explicit(&eye_shot_requests, 1, memory_order_relaxed) + 1;
+    LOG("[pc-vr] eye shot %u requested (the capture button)\n", request);
+}
+
+unsigned pc_vr_eye_shot_requests(void) { return atomic_load_explicit(&eye_shot_requests, memory_order_relaxed); }
+
 // EYE_SIZE when given; else, in PC VR with an eye scale, that scale's pixels in the OpenXR runtime's view shape
 // (pc_vr_eye_size_for_view), known from discovery on, which comes before the Vulkan device and any render target.
 bool pc_vr_eye_size(unsigned *width, unsigned *height) {

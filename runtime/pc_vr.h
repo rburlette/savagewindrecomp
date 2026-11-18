@@ -20,6 +20,14 @@ bool pc_vr_enabled(void);
 // The keyboard and mouse still follow the window's focus.
 bool pc_vr_controller_without_focus(void);
 
+// The controller's capture button (the free-fly binding; runtime/hle/input.c, any thread) asks for the eye images the
+// headset is given in the next frame, saved at full size as build/vr-shot-mark<n>-submit0/1-<present>.png in the data
+// folder (runtime/nvn/vulkan/vr_shots.c). The pair's frame waits for the GPU's copy of them; the files are written by
+// threads of their own.
+void pc_vr_eye_shot_request(void);
+// The requests so far; the renderer saves one pair for those it has not served yet.
+unsigned pc_vr_eye_shot_requests(void);
+
 // The exact raster size for both eye rendering and submission, PC VR only: SAVAGEWIND_PC_VR_EYE_SIZE=WxH (each axis
 // 128..4096, process-latched), else the eye scale's pixels in the OpenXR runtime's view shape once discovery has run
 // (pc_vr_eye_size.h). False: the eye targets keep Labo's shape (EyeScale alone, or none). Poses/FOV remain runtime-derived.
