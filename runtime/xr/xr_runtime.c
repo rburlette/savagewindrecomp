@@ -226,12 +226,18 @@ static _Atomic uint64_t latest_present, reset_epoch, reference_generation = 1;
 
 // (probe) The control endpoint's `head <yaw> <pitch>`: every pose sample turned by this much from the tracked pose
 // until `head off`, as the benchmark's script turns it. Hundredths of a degree; probe_head_held 0: off.
+// With a shift, both eyes are also moved by it in the tracking space's axes (right, up, back), in tenths of a
+// millimetre: a lean of the head without a headset.
 static _Atomic int probe_head_held, probe_head_yaw_centidegrees, probe_head_pitch_centidegrees;
-void xr_probe_head_hold(bool on, double yaw_degrees, double pitch_degrees) {
+static _Atomic int probe_head_shift_decimillimetres[3];
+void xr_probe_head_hold(bool on, double yaw_degrees, double pitch_degrees, const double shift_metres[3]) {
     atomic_store(&probe_head_yaw_centidegrees, (int)lround(yaw_degrees * 100));
     atomic_store(&probe_head_pitch_centidegrees, (int)lround(pitch_degrees * 100));
+    for (unsigned axis = 0; axis < 3; ++axis)
+        atomic_store(&probe_head_shift_decimillimetres[axis], (int)lround(shift_metres[axis] * 10000));
     atomic_store(&probe_head_held, on ? 1 : 0);
-    XRLOG("probe head hold %s yaw-deg=%.2f pitch-deg=%.2f\n", on ? "on" : "off", yaw_degrees, pitch_degrees);
+    XRLOG("probe head hold %s yaw-deg=%.2f pitch-deg=%.2f shift-m=%.4f,%.4f,%.4f\n", on ? "on" : "off", yaw_degrees,
+          pitch_degrees, shift_metres[0], shift_metres[1], shift_metres[2]);
 }
 // LOCAL's current definition: a new one with each session and each applied recenter, never reused, so definitions
 // differ across sessions; 0 before the first session. Poses carry the one they were located in (XrPoseSnapshot
@@ -949,6 +955,11 @@ static void run_frame(const XrFrameState *waited, uint64_t game_present_id) {
             xr_bench_head_apply(atomic_load(&probe_head_yaw_centidegrees) * 0.01 * degree,
                                 atomic_load(&probe_head_pitch_centidegrees) * 0.01 * degree,
                                 snapshot.orientation_xyzw, snapshot.eyes);
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                const float shift = (float)(atomic_load(&probe_head_shift_decimillimetres[axis]) * 0.0001);
+                snapshot.eyes[0].position_xyz[axis] += shift;
+                snapshot.eyes[1].position_xyz[axis] += shift;
+            }
         }
         pthread_mutex_lock(&pose_lock);
         if (epoch == atomic_load(&reset_epoch) && !atomic_load(&stop_requested)) published = snapshot;

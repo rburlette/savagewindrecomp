@@ -516,18 +516,20 @@ static void cmd_head(int argc, char **argv, ControlReply *reply) {
     (void)argc, (void)argv;
     control_fail(reply, "head: a PC VR build only");
 #else
-    extern void xr_probe_head_hold(bool on, double yaw_degrees, double pitch_degrees);
+    extern void xr_probe_head_hold(bool on, double yaw_degrees, double pitch_degrees, const double shift_metres[3]);
+    double shift_metres[3] = {0, 0, 0};
     if (argc == 2 && !strcmp(argv[1], "off")) {
-        xr_probe_head_hold(false, 0, 0);
+        xr_probe_head_hold(false, 0, 0, shift_metres);
         control_field_bool(reply, "held", false);
         return;
     }
-    if (argc != 3) {
-        control_fail(reply, "Usage: head <yaw degrees> <pitch degrees> | head off");
+    if (argc != 3 && argc != 6) {
+        control_fail(reply, "Usage: head <yaw degrees> <pitch degrees> [<right m> <up m> <back m>] | head off");
         return;
     }
     const double yaw = strtod(argv[1], NULL), pitch = strtod(argv[2], NULL);
-    xr_probe_head_hold(true, yaw, pitch);
+    for (int axis = 0; axis < 3 && argc == 6; axis++) shift_metres[axis] = strtod(argv[3 + axis], NULL);
+    xr_probe_head_hold(true, yaw, pitch, shift_metres);
     control_field_bool(reply, "held", true);
     control_field_num(reply, "yaw", yaw);
     control_field_num(reply, "pitch", pitch);
@@ -558,7 +560,8 @@ static void cmd_eyeshot(int argc, char **argv, ControlReply *reply) {
 void rt_data_watch_control_init(void) {
     static const ControlCmd commands[] = {
         {"watch", "<address> [<address> ...]", "Log the code that reads or writes up to four guest words", cmd_watch},
-        {"head", "<yaw degrees> <pitch degrees> | off", "Hold the head turned from the tracked pose (probe)", cmd_head},
+        {"head", "<yaw degrees> <pitch degrees> [<right m> <up m> <back m>] | off",
+         "Hold the head turned, and moved, from the tracked pose (probe)", cmd_head},
         {"eyeshot", "", "Save the next frame's two eye images at full size (probe)", cmd_eyeshot}};
     control_register(commands, 3);
 }
