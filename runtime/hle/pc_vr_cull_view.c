@@ -1,5 +1,5 @@
-// PC VR: the head's view over both eyes for the game's visibility decisions (SAVAGEWIND_PC_VR_HEAD_CULL=1; off by
-// default; docs/evidence/pc-vr-camera-consumers-2026-11-17.md in the project's records).
+// PC VR: the head's view over both eyes for the game's visibility decisions, always in PC VR (a fix, not an option;
+// docs/evidence/pc-vr-camera-consumers-2026-11-17.md in the project's records).
 //
 // The game decides what is on screen from its own camera: its visibility test, and its actor level-of-detail manager,
 // which stops calculating actors outside its view volumes. Head look turns only the two eye cameras, so those
@@ -26,7 +26,6 @@
 #include "../game_sites.h"
 #include "../hle.h"
 #include "../pc_vr.h"
-#include "../pc_vr_config.h"
 #include "pc_vr_cull_view.h"
 #include "pc_vr_cull_view_math.h"
 
@@ -43,7 +42,6 @@ static _Thread_local struct { uint64_t boot, address; } cull_matrix_copy;
 
 void pc_vr_cull_view_publish(uint64_t base_camera, const PcVrHeadLookCamera eyes[2],
                              const float fov_left_right_up_down[2][4]) {
-    if (!pc_vr_config()->diagnostics.head_cull) return;
     PcVrCullView built;
     const bool ok = pc_vr_cull_view_build(eyes, fov_left_right_up_down, &built);
     pthread_mutex_lock(&cull_lock);

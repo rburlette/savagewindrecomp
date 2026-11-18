@@ -256,11 +256,6 @@ static void test_diagnostics(void) {
     const char *bad_copy_wait[] = {"0", "101", "-3", "abc", ""};
     for (unsigned i = 0; i < sizeof bad_copy_wait / sizeof bad_copy_wait[0]; ++i)
         CHECK(!with_setting("SAVAGEWIND_PC_VR_COPY_WAIT_MS", bad_copy_wait[i]).diagnostics.copy_wait_ms);
-    // The head view for the game's visibility decisions: on only with exactly 1, and named in the line when on.
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_COPY_WAIT_MS", "5").diagnostics.head_cull);
-    CHECK(with_setting("SAVAGEWIND_PC_VR_HEAD_CULL", "1").diagnostics.head_cull);
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_HEAD_CULL", "true").diagnostics.head_cull);
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_HEAD_CULL", "0").diagnostics.head_cull);
     // The headset pace: off unless 1 to 6. With it, its offset: -1.5 ms unless a decimal from -50 to 50; without it
     // the offset is nothing.
     config = with_setting("SAVAGEWIND_PC_VR_HEADSET_PACE", "2");

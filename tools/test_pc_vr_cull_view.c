@@ -218,16 +218,11 @@ static void test_patches(void) {
     float pair[2] = {1.5f, 0.8889f};
     const uint64_t fovy_address = (uint64_t)(uintptr_t)&pair[0], aspect_address = (uint64_t)(uintptr_t)&pair[1];
 
-    // The switch off: nothing is kept, and the game keeps its own matrix and field of view.
+    // The game's own matrix and field of view until a view is published.
     test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
-    pc_vr_cull_view_publish(base, eyes, link_fov);
     CHECK(rt_pc_vr_cull_matrix(base) == base + 8 && !guest_allocations);
     rt_pc_vr_cull_fov(base, fovy_address, aspect_address);
     CHECK(pair[0] == 1.5f && pair[1] == 0.8889f);
-
-    // On: the game's own until a view is published.
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_HEAD_CULL", "1", NULL});
-    CHECK(rt_pc_vr_cull_matrix(base) == base + 8 && !guest_allocations);
     pc_vr_cull_view_publish(base, eyes, link_fov);
     // The eyes' base camera gets the head view's matrix, in this thread's one guest copy.
     const uint64_t given = rt_pc_vr_cull_matrix(base);
@@ -314,21 +309,15 @@ static void test_grass(void) {
     for (unsigned i = 0; i < 32; ++i) cpu.v[i] = (__uint128_t)i << 64 | i;
     const Cpu before = cpu;
 
-    // The switch off: the record's own three, no game call.
+    // Before a view is published: the record's own three, no game call.
     test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
     pc_vr_cull_view_reset();
     const unsigned allocations = guest_allocations;
-    pc_vr_cull_view_publish(base, eyes, link_fov);
     memcpy(record, &left_eye, 2);
     CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == volume_address);
     CHECK(rt_pc_vr_cull_grass_matrix(record_address, 0, view_address) == view_address);
     CHECK(rt_pc_vr_cull_grass_matrix(record_address, 1, projection_address) == projection_address);
     CHECK(!guest_call_count && guest_allocations == allocations);
-
-    // On, before a view is published: the same.
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_HEAD_CULL", "1", NULL});
-    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == volume_address);
-    CHECK(!guest_call_count);
     pc_vr_cull_view_publish(base, eyes, link_fov);
 
     // The left eye's record: a volume of the head view, built by the three game calls in order, every register kept.
