@@ -17,6 +17,32 @@ void rt_fatal_trace(void) { fprintf(stderr, "unexpected fatal failure\n"); exit(
 static unsigned guest_allocations;
 void *hle_alloc(uint64_t size) { ++guest_allocations; return calloc(1, (size_t)size); }
 
+// The game's three view volume functions, mocked: the calls are recorded, the copy copies, the two setters leave a
+// mark of what they were given (the matrix's first row, the projection's parameters), and every register they may
+// change is spoiled, as a real call would.
+GameSites g_site;
+enum { MOCK_COPY = 0x7000a00000, MOCK_VIEW = 0x7000a00100, MOCK_PROJECTION = 0x7000a00200, MOCK_PROJ_VTABLE = 0x7001d05380 };
+typedef struct { uint64_t address, first, second; } GuestCall;
+static GuestCall guest_calls[8];
+static unsigned guest_call_count;
+void guest_call(Cpu *cpu, uint64_t address) {
+    CHECK(guest_call_count < 8);
+    guest_calls[guest_call_count++] = (GuestCall){address, cpu->x[0], cpu->x[1]};
+    uint8_t *volume = (uint8_t *)(uintptr_t)cpu->x[0];
+    if (address == MOCK_COPY) memcpy(volume, (const void *)(uintptr_t)cpu->x[1], VOLUME_SIZE);
+    else if (address == MOCK_VIEW) memcpy(volume, (const void *)(uintptr_t)cpu->x[1], 12 * sizeof(float));
+    else if (address == MOCK_PROJECTION) {
+        uint8_t *projection = (uint8_t *)(uintptr_t)cpu->x[1];
+        CHECK(projection[PROJECTION_DIRTY] == 1);
+        memcpy(volume + 0x100, projection + PROJECTION_FOVY, 7 * sizeof(float));
+        memset(projection + PROJECTION_MATRIX, 0x11, 16 * sizeof(float));  // (the game's builder, here a mark)
+        projection[PROJECTION_DIRTY] = 0;
+    } else CHECK(!"a guest function the runtime has no reason to call");
+    for (unsigned i = 0; i < 31; ++i) cpu->x[i] = 0xdead0000 + i;
+    cpu->sp -= 0x40;
+    for (unsigned i = 0; i < 32; ++i) cpu->v[i] = ~(__uint128_t)i;
+}
+
 // The headset's eyes on Link (the run logs' `eye views fov_lrud`): left, right, up, down in radians.
 static const float link_fov[2][4] = {{-0.9425f, 0.6981f, 0.7679f, -0.9599f}, {-0.6981f, 0.9425f, 0.7679f, -0.9599f}};
 
@@ -241,11 +267,143 @@ static void test_patches(void) {
     CHECK(rt_pc_vr_cull_matrix(base) != base + 8 && guest_allocations == 2);
 }
 
+// The grass: a grass view object whose renderer has two eye layers of the base camera and a third of another camera,
+// and the left eye's layer record with its culling volume and matrices.
+static void test_grass(void) {
+    g_site.pcvr_volume_copy = MOCK_COPY, g_site.pcvr_volume_view = MOCK_VIEW;
+    g_site.pcvr_volume_projection = MOCK_PROJECTION, g_site.pcvr_proj_vtable = MOCK_PROJ_VTABLE;
+    const double centre[3] = {-612.0, 189.0, 1596.0};
+    const Frame head = head_frame(0.8, 0.1, 0);
+    PcVrHeadLookCamera eyes[2];
+    Frame eye_frames[2];
+    eye_pair(centre, &head, 0.436, 0, eyes, eye_frames);
+    PcVrCullView expected;
+    CHECK(pc_vr_cull_view_build(eyes, link_fov, &expected));
+    static float base_camera[32], other_camera[32];
+    static uint8_t layers[3][0x400], entries[3 * RENDERER_LAYER_SIZE], renderer[0x200], grass_view[0x200];
+    static uint8_t record[0x620], eye_volume[0x300], eye_view[0x30], eye_projection_matrix[0x40];
+    const uint64_t base = (uint64_t)(uintptr_t)base_camera;
+    for (unsigned index = 0; index < 3; ++index) {
+        uint8_t *layer = layers[index];
+        const uint64_t layer_address = (uint64_t)(uintptr_t)layer, projection = layer_address + 0x288;
+        const uint64_t camera = index == 2 ? (uint64_t)(uintptr_t)other_camera : base, vtable = MOCK_PROJ_VTABLE;
+        const float near_far[2] = {0.5f, 10000.0f}, eye_parameters[7] = {1.7f, 0.75f, 0.66f, 1.13f, 0.95f, -0.12f, 0};
+        memcpy(layer + LAYER_CAMERA, &camera, 8);
+        memcpy(layer + LAYER_PROJECTION, &projection, 8);
+        memcpy(layer + 0x288, &vtable, 8);
+        memcpy(layer + 0x288 + 0x98, near_far, sizeof near_far);
+        memcpy(layer + 0x288 + PROJECTION_FOVY, eye_parameters, sizeof eye_parameters);
+        memcpy(entries + index * RENDERER_LAYER_SIZE + RENDERER_LAYER_OBJECT, &layer_address, 8);
+    }
+    const uint64_t entries_address = (uint64_t)(uintptr_t)entries, renderer_address = (uint64_t)(uintptr_t)renderer;
+    const uint32_t layer_count = 3;
+    memcpy(renderer + RENDERER_LAYER_COUNT, &layer_count, 4);
+    memcpy(renderer + RENDERER_LAYERS, &entries_address, 8);
+    memcpy(grass_view + GRASS_VIEW_RENDERER, &renderer_address, 8);
+    const uint64_t volume_address = (uint64_t)(uintptr_t)eye_volume, view_address = (uint64_t)(uintptr_t)eye_view;
+    const uint64_t projection_address = (uint64_t)(uintptr_t)eye_projection_matrix;
+    memset(eye_volume, 0x3c, sizeof eye_volume);
+    memcpy(record + 0x18, &volume_address, 8);
+    memcpy(record + 0x608, &view_address, 8);
+    memcpy(record + 0x610, &projection_address, 8);
+    const uint64_t record_address = (uint64_t)(uintptr_t)record, grass = (uint64_t)(uintptr_t)grass_view;
+    const uint16_t left_eye = 0, other_layer = 2, missing_layer = 3;
+    static Cpu cpu;
+    for (unsigned i = 0; i < 31; ++i) cpu.x[i] = 0x1000 + i;
+    cpu.sp = 0x72ff000000;
+    for (unsigned i = 0; i < 32; ++i) cpu.v[i] = (__uint128_t)i << 64 | i;
+    const Cpu before = cpu;
+
+    // The switch off: the record's own three, no game call.
+    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    pc_vr_cull_view_reset();
+    const unsigned allocations = guest_allocations;
+    pc_vr_cull_view_publish(base, eyes, link_fov);
+    memcpy(record, &left_eye, 2);
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == volume_address);
+    CHECK(rt_pc_vr_cull_grass_matrix(record_address, 0, view_address) == view_address);
+    CHECK(rt_pc_vr_cull_grass_matrix(record_address, 1, projection_address) == projection_address);
+    CHECK(!guest_call_count && guest_allocations == allocations);
+
+    // On, before a view is published: the same.
+    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_HEAD_CULL", "1", NULL});
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == volume_address);
+    CHECK(!guest_call_count);
+    pc_vr_cull_view_publish(base, eyes, link_fov);
+
+    // The left eye's record: a volume of the head view, built by the three game calls in order, every register kept.
+    const uint64_t first = rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass);
+    CHECK(first != volume_address && guest_allocations == allocations + 1);
+    CHECK(!memcmp(&cpu, &before, sizeof cpu));
+    const uint64_t buffer = first - GRASS_BUFFER_VOLUME;
+    CHECK(guest_call_count == 3);
+    CHECK(guest_calls[0].address == MOCK_COPY && guest_calls[0].first == first && guest_calls[0].second == volume_address);
+    CHECK(guest_calls[1].address == MOCK_VIEW && guest_calls[1].first == first &&
+          guest_calls[1].second == buffer + GRASS_BUFFER_VIEW);
+    CHECK(guest_calls[2].address == MOCK_PROJECTION && guest_calls[2].first == first &&
+          guest_calls[2].second == buffer + GRASS_BUFFER_PROJECTION);
+    // Its view matrix is the head view's; its projection the layer's own class and planes with the head view's field
+    // of view and no offset.
+    CHECK(!memcmp((const void *)(uintptr_t)(buffer + GRASS_BUFFER_VIEW), expected.matrix, sizeof expected.matrix));
+    CHECK(!memcmp((const void *)(uintptr_t)first, expected.matrix, sizeof expected.matrix));
+    const uint8_t *projection = (const uint8_t *)(uintptr_t)(buffer + GRASS_BUFFER_PROJECTION);
+    uint64_t vtable;
+    float near_far[2], parameters[7];
+    memcpy(&vtable, projection, 8);
+    memcpy(near_far, projection + 0x98, sizeof near_far);
+    memcpy(parameters, (const uint8_t *)(uintptr_t)first + 0x100, sizeof parameters);
+    CHECK(vtable == MOCK_PROJ_VTABLE && near_far[0] == 0.5f && near_far[1] == 10000.0f);
+    CHECK(parameters[0] == expected.fovy && parameters[4] == expected.aspect && !parameters[5] && !parameters[6]);
+    CHECK(fabs(parameters[3] - tan(0.5 * expected.fovy)) < 1e-6 && fabs(parameters[1] - sin(0.5 * expected.fovy)) < 1e-6 &&
+          fabs(parameters[2] - cos(0.5 * expected.fovy)) < 1e-6);
+    // Everything else in the volume is the eye's own.
+    CHECK(((const uint8_t *)(uintptr_t)first)[0x30] == 0x3c && ((const uint8_t *)(uintptr_t)first)[VOLUME_SIZE - 1] == 0x3c);
+    // The record's two matrices follow on this thread; another record keeps its own.
+    CHECK(rt_pc_vr_cull_grass_matrix(record_address, 0, view_address) == buffer + GRASS_BUFFER_VIEW);
+    CHECK(rt_pc_vr_cull_grass_matrix(record_address, 1, projection_address) == buffer + GRASS_BUFFER_PROJECTION +
+          PROJECTION_MATRIX);
+    CHECK(rt_pc_vr_cull_grass_matrix(record_address + 0x620, 0, view_address) == view_address);
+
+    // The next frame's region is built in the other buffer, and the one after in the first again.
+    guest_call_count = 0;
+    const uint64_t second = rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass);
+    CHECK(second != first && second - first == GRASS_BUFFER_SIZE && guest_call_count == 3);
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == first);
+    CHECK(guest_allocations == allocations + 1);
+
+    // A layer of another camera, a layer the renderer does not have, a projection of another class: the record's own,
+    // and the matrices after them too.
+    guest_call_count = 0;
+    memcpy(record, &other_layer, 2);
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == volume_address);
+    CHECK(rt_pc_vr_cull_grass_matrix(record_address, 0, view_address) == view_address);
+    memcpy(record, &missing_layer, 2);
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == volume_address);
+    memcpy(record, &left_eye, 2);
+    const uint64_t other_vtable = 0x7001d00000;
+    memcpy(layers[0] + 0x288, &other_vtable, 8);
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == volume_address);
+    CHECK(rt_pc_vr_cull_grass_matrix(record_address, 1, projection_address) == projection_address);
+    CHECK(!guest_call_count);
+    const uint64_t vtable_back = MOCK_PROJ_VTABLE;
+    memcpy(layers[0] + 0x288, &vtable_back, 8);
+
+    // A game reset: the record's own until the next view, then new buffers.
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) != volume_address);
+    pc_vr_cull_view_reset();
+    CHECK(rt_pc_vr_cull_grass_matrix(record_address, 0, view_address) == view_address);
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) == volume_address);
+    pc_vr_cull_view_publish(base, eyes, link_fov);
+    CHECK(rt_pc_vr_cull_grass_volume(&cpu, volume_address, record_address, grass) != volume_address);
+    CHECK(guest_allocations == allocations + 2 && !memcmp(&cpu, &before, sizeof cpu));
+}
+
 int main(void) {
     test_parallel_eyes();
     test_turned_heads();
     test_refusals();
     test_patches();
+    test_grass();
     printf("PC VR cull view fixture: %u checks passed (no game data)\n", checks);
     return 0;
 }

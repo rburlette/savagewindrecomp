@@ -11,9 +11,19 @@
 // head view's instead, for the eyes' base camera only.
 //
 // The last published view is held when a frame has none (D101): a load or a menu keeps what the head last saw.
+//
+// The grass takes the same view (rt_pc_vr_cull_grass_volume, rt_pc_vr_cull_grass_matrix). The game works out one grass
+// region for both eye layers, from the layer record that calculates it, the left eye's: the grass view object's update
+// hands the grass that record's culling volume, view matrix and projection matrix, so grass is made inside the left
+// eye's frustum only and the right eye's outer edge has none. For the record of a layer whose camera is the eyes' base
+// camera, the three patches get the head view's instead: its view matrix, a perspective projection with its field of
+// view (a copy of the layer's own, so the class and the near and far planes stay the game's), and a view volume the
+// game's own code builds from the two, as the grass slot's builder does for a camera of its own.
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
+#include "../game_sites.h"
 #include "../hle.h"
 #include "../pc_vr.h"
 #include "../pc_vr_config.h"
@@ -88,6 +98,104 @@ void rt_pc_vr_cull_fov(uint64_t camera, uint64_t fovy_address, uint64_t aspect_a
     memcpy((void *)(uintptr_t)aspect_address, &aspect, sizeof aspect);
 }
 
+// The game structures the grass patches read (1.9.0): the grass view object's renderer, the renderer's layer entries
+// by the record's layer id (the record's first u16), the entry's render layer, the layer's camera and projection.
+#define GRASS_VIEW_RENDERER 0xf0
+#define RENDERER_LAYER_COUNT 0x108  // (u32)
+#define RENDERER_LAYERS 0x110
+#define RENDERER_LAYER_SIZE 0xe18
+#define RENDERER_LAYER_OBJECT 0x3b8
+#define LAYER_CAMERA 0x80
+#define LAYER_PROJECTION 0x220
+// A perspective projection: its two dirty flags (the logical matrix, then the device one), the logical matrix, and
+// from fovy on its seven parameters (fovy, its half angle's sine, cosine and tangent, aspect, the centre's offset).
+#define PROJECTION_SIZE 0xbc
+#define PROJECTION_DIRTY 0x8
+#define PROJECTION_MATRIX 0xc
+#define PROJECTION_FOVY 0xa0
+#define VOLUME_SIZE 0x2c2
+// One guest buffer: the view matrix, the projection and the volume. Two of them, used in turn, so that a reader still on
+// the last frame's region keeps it whole while the next is built.
+#define GRASS_BUFFER_VIEW 0x0
+#define GRASS_BUFFER_PROJECTION 0x40
+#define GRASS_BUFFER_VOLUME 0x100
+#define GRASS_BUFFER_SIZE 0x400
+
+static pthread_mutex_t grass_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t grass_buffers, grass_buffers_boot;
+static unsigned grass_next;
+static uint64_t grass_built;
+// What this thread last gave for a record: the two matrices follow the volume in the same update.
+static _Thread_local struct { uint64_t boot, record, view, projection_matrix; } grass_given;
+
+uint64_t rt_pc_vr_cull_grass_volume(Cpu *cpu, uint64_t eye_volume, uint64_t layer_record, uint64_t grass_view) {
+    grass_given.record = 0;
+    if (!atomic_load_explicit(&cull_ready, memory_order_acquire) || !g_site.pcvr_volume_copy || !eye_volume)
+        return eye_volume;
+    const uint64_t renderer = LD64(grass_view + GRASS_VIEW_RENDERER);
+    const uint32_t layer_id = renderer ? LD16(layer_record) : 0;
+    if (!renderer || layer_id >= LD32(renderer + RENDERER_LAYER_COUNT)) return eye_volume;
+    const uint64_t layer =
+        LD64(LD64(renderer + RENDERER_LAYERS) + (uint64_t)layer_id * RENDERER_LAYER_SIZE + RENDERER_LAYER_OBJECT);
+    const uint64_t camera = layer ? LD64(layer + LAYER_CAMERA) : 0;
+    const uint64_t layer_projection = layer ? LD64(layer + LAYER_PROJECTION) : 0;
+    // (another layer of the base camera may carry another kind of projection: its parameters are not these)
+    if (!layer_projection || LD64(layer_projection) != g_site.pcvr_proj_vtable) return eye_volume;
+    PcVrCullView view;
+    bool given = false;
+    pthread_mutex_lock(&cull_lock);
+    if (atomic_load_explicit(&cull_ready, memory_order_relaxed) && camera == cull_base_camera) {
+        view = cull_view;
+        given = true;
+    }
+    pthread_mutex_unlock(&cull_lock);
+    if (!given) return eye_volume;
+
+    const uint64_t boot = atomic_load_explicit(&cull_boot, memory_order_acquire);
+    pthread_mutex_lock(&grass_lock);
+    if (grass_buffers_boot != boot) {
+        grass_buffers = (uint64_t)(uintptr_t)hle_alloc(2 * GRASS_BUFFER_SIZE);
+        grass_buffers_boot = boot;
+    }
+    const uint64_t buffer = grass_buffers + grass_next * GRASS_BUFFER_SIZE;
+    grass_next ^= 1;
+    const uint64_t view_matrix = buffer + GRASS_BUFFER_VIEW, projection = buffer + GRASS_BUFFER_PROJECTION;
+    const uint64_t volume = buffer + GRASS_BUFFER_VOLUME;
+    memcpy((void *)(uintptr_t)view_matrix, view.matrix, sizeof view.matrix);
+    memcpy((void *)(uintptr_t)projection, (const void *)(uintptr_t)layer_projection, PROJECTION_SIZE);
+    const double half_fovy = 0.5 * view.fovy;
+    const float parameters[7] = {view.fovy, (float)sin(half_fovy), (float)cos(half_fovy), (float)tan(half_fovy),
+                                 view.aspect, 0, 0};
+    memcpy((void *)(uintptr_t)(projection + PROJECTION_FOVY), parameters, sizeof parameters);
+    // Both matrices built again from them, by the game's own builder when the volume asks for the logical one.
+    const uint8_t dirty[2] = {1, 1};
+    memcpy((void *)(uintptr_t)(projection + PROJECTION_DIRTY), dirty, sizeof dirty);
+    // The volume: the eye's copied whole (every field the game's), then set from the head view's matrix and projection.
+    const Cpu saved = *cpu;
+    cpu->x[0] = volume, cpu->x[1] = eye_volume;
+    guest_call(cpu, g_site.pcvr_volume_copy);
+    cpu->x[0] = volume, cpu->x[1] = view_matrix;
+    guest_call(cpu, g_site.pcvr_volume_view);
+    cpu->x[0] = volume, cpu->x[1] = projection;
+    guest_call(cpu, g_site.pcvr_volume_projection);
+    *cpu = saved;
+    // The first, then one line every 1800 (about a minute at 30 FPS).
+    if (++grass_built == 1 || grass_built % 1800 == 0)
+        LOG("[pc-vr-cull-view] grass regions=%llu fovy_deg=%.2f aspect=%.4f\n", (unsigned long long)grass_built,
+            view.fovy * 57.29578f, view.aspect);
+    pthread_mutex_unlock(&grass_lock);
+    grass_given.boot = boot, grass_given.record = layer_record;
+    grass_given.view = view_matrix, grass_given.projection_matrix = projection + PROJECTION_MATRIX;
+    return volume;
+}
+
+uint64_t rt_pc_vr_cull_grass_matrix(uint64_t layer_record, unsigned projection, uint64_t record_matrix) {
+    if (!grass_given.record || grass_given.record != layer_record ||
+        grass_given.boot != atomic_load_explicit(&cull_boot, memory_order_acquire))
+        return record_matrix;
+    return projection ? grass_given.projection_matrix : grass_given.view;
+}
+
 RT_ON_RESET(pc_vr_cull_view_reset) {
     pthread_mutex_lock(&cull_lock);
     atomic_store_explicit(&cull_ready, false, memory_order_release);
@@ -95,4 +203,9 @@ RT_ON_RESET(pc_vr_cull_view_reset) {
     cull_base_camera = 0;
     cull_published = cull_refused = cull_matrix_given = cull_fov_given = 0;
     pthread_mutex_unlock(&cull_lock);
+    pthread_mutex_lock(&grass_lock);
+    grass_buffers = grass_buffers_boot = 0;
+    grass_next = 0;
+    grass_built = 0;
+    pthread_mutex_unlock(&grass_lock);
 }

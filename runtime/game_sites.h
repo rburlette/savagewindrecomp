@@ -98,7 +98,10 @@
     X(quick_drop_trash_prohibited) \
     X(quick_drop_actor_method) \
     X(actor_info) \
-    X(horse_cam_lr)           /* CameraHorse's return address after calling the camera stick input */
+    X(horse_cam_lr)           /* CameraHorse's return address after calling the camera stick input */ \
+    X(pcvr_volume_view)       /* a view volume set from a view matrix (runtime/hle/pc_vr_cull_view.c) */ \
+    X(pcvr_volume_projection) /* a view volume set from a projection */ \
+    X(pcvr_volume_copy)       /* a view volume copied */
 
 typedef struct {
 #define GAME_SITE_FIELD(n) uint64_t n;

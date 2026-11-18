@@ -1203,6 +1203,32 @@ def _cull_fov(camera):
     return patch
 
 
+# The grass in the same view (rt_pc_vr_cull_grass_volume, rt_pc_vr_cull_grass_matrix). The two eye layers share one
+# grass region, worked out from the layer record that calculates it, the left eye's: each frame the grass view object's
+# update (1.9.0 0x700149056c, x19 the layer record, x20 the grass view object) takes the record's culling volume
+# (+0x18, or +0x20 by the object's flag), projection matrix (+0x610) and view matrix (+0x608) for the grass, so the
+# grass is made inside the left eye's frustum only and the right eye's outer edge has none. Each patch replaces one of
+# those three loads; the runtime answers with the head's view over both eyes for a layer of the eyes' base camera.
+def _ldr_x(dest, base, offset):
+    return 0xf9400000 | offset // 8 << 10 | base << 5 | dest
+
+
+def _grass_volume(gen, address):
+    assert _word(gen, address) == _ldr_x(8, 8, 0x18), hex(_word(gen, address))
+    return ('{ extern uint64_t rt_pc_vr_cull_grass_volume(Cpu *, uint64_t, uint64_t, uint64_t); '
+            'c->x[8] = rt_pc_vr_cull_grass_volume(c, LD64(c->x[8] + 0x18), c->x[19], c->x[20]); }'
+            f'  /* {address:#x}: ldr x8, [x8, #0x18] (the grass\'s culling volume, from its layer record) */')
+
+
+def _grass_matrix(which, offset, what):
+    def patch(gen, address):
+        assert _word(gen, address) == _ldr_x(8, 19, offset), hex(_word(gen, address))
+        return ('{ extern uint64_t rt_pc_vr_cull_grass_matrix(uint64_t, unsigned, uint64_t); '
+                f'c->x[8] = rt_pc_vr_cull_grass_matrix(c->x[19], {which}, LD64(c->x[19] + {offset:#x})); }}'
+                f'  /* {address:#x}: ldr x8, [x19, #{offset:#x}] (the grass\'s {what}, from its layer record) */')
+    return patch
+
+
 # PC VR's eye images (runtime/hle/pc_vr_render_trace.h): the game finishes every render layer with one call of its
 # screen-quad draw for the layer's finished image (kind 1) and one for that image's placement in the final image
 # (kind 2), and shows the frame by drawing the final image to the display (kind 3): through the callback Labo's
@@ -1272,6 +1298,9 @@ PATCHES = {
     'pcvr_vis_cull_matrix': _cull_matrix(20, 1),
     'pcvr_vis2_cull_fov': _cull_fov(20),
     'pcvr_vis2_cull_matrix': _cull_matrix(20, 1),
+    'pcvr_grass_volume': _grass_volume,
+    'pcvr_grass_projection': _grass_matrix(1, 0x610, 'projection matrix'),
+    'pcvr_grass_view': _grass_matrix(0, 0x608, 'view matrix'),
     'pcvr_ui_parallax': _ui_parallax,
     # (the site: ldrb w9 the mask flag, cmp w9, #0, csel the full-screen triangle or the polygon, then the bl)
     'pcvr_lens_draw': _lens_draw(0, "the eye scenes' screen-quad draw: Labo's lens polygon", flag_register=9),

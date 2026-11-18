@@ -504,6 +504,20 @@ SITES = [
          'f9400108/ffc003ff d63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 '
          'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 '
          '91002281', 39),
+    # ... the grass (tools/patches.py _grass_volume, _grass_matrix): the grass view object's update (1.9.0
+    # 0x700149056c) loading the layer record's culling volume, projection matrix and view matrix for the grass
+    Site('pcvr_grass_volume', 'code', '39066128 39402688 8b080e68 f9400d08 f9000128 bd403d00 1e202000', 3),
+    Site('pcvr_grass_projection', 'code', '3500001a/ff00001f f9430a68 9b385789 3dc00100 3d800920 3dc00500', 1),
+    Site('pcvr_grass_view', 'code', '3dc00d00 3d801520 f9430668 3dc00100 3d801920 3dc00500', 2),
+    # ... and the game's own view volume functions the runtime builds the grass's volume with, from the grass slot's
+    # builder (1.9.0 0x7001493110): a volume set from a view matrix (0x7000f8f780) then from a projection (0x7000f90cf4),
+    # and the volume copy (0x700101a468; an identical copy elsewhere makes its own pattern ambiguous)
+    Site('pcvr_volume_view', 'call', '52806a08 910022a1 9b28633b 9100f377 aa1703e0 94000000/fc000000 aa1703e0 aa1603e1 '
+         '94000000/fc000000 3cc3c360', 5),
+    Site('pcvr_volume_projection', 'call', '52806a08 910022a1 9b28633b 9100f377 aa1703e0 94000000/fc000000 aa1703e0 '
+         'aa1603e1 94000000/fc000000 3cc3c360', 8),
+    Site('pcvr_volume_copy', 'call', '52806a08 aa0303e1 9b286336 aa0303f5 9100f2c0 94000000/fc000000 3dc002a0 910c62c8 '
+         '3d800100', 5),
     # sead::LookAtCamera::doUpdateMatrix (tools/patches.py _lookat_update): its first load of the eye (+0x38); eye,
     # at (+0x44) and up (+0x50) make the view matrix written to x1 (free camera, runtime/hle/freecam.c)
     Site('lookat_update', 'code', '2d470801 2d480c00 1e232020 2d491404 1e240440 1e250400 54000000/ff00001f 1e233823', 0),
@@ -601,6 +615,8 @@ OPTIONAL_GROUPS = [
     ('pcvr_rune_test', 'pcvr_rune_test_draw'),
     ('pcvr_labo_fov', 'pcvr_lod_cull_matrix', 'pcvr_lod_cull_fov', 'pcvr_vis_cull_fov', 'pcvr_vis_cull_matrix',
      'pcvr_vis2_cull_fov', 'pcvr_vis2_cull_matrix'),  # (1.9.0 only)
+    ('pcvr_grass_volume', 'pcvr_grass_projection', 'pcvr_grass_view', 'pcvr_volume_view', 'pcvr_volume_projection',
+     'pcvr_volume_copy'),  # (1.9.0 only)
     ('pcvr_ui_parallax',),
     ('pcvr_layer_final_draw', 'pcvr_layer_placement_draw', 'pcvr_display_lens_draw', 'pcvr_display_copy_draw'),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
@@ -866,6 +882,12 @@ KNOWN = {
         'pcvr_vis_cull_matrix': 0x70010ec5d8,
         'pcvr_vis2_cull_fov': 0x70010ec6a0,
         'pcvr_vis2_cull_matrix': 0x70010ec6b8,
+        'pcvr_grass_volume': 0x70014906f4,
+        'pcvr_grass_projection': 0x70014907a0,
+        'pcvr_grass_view': 0x70014907c8,
+        'pcvr_volume_view': 0x7000f8f780,
+        'pcvr_volume_projection': 0x7000f90cf4,
+        'pcvr_volume_copy': 0x700101a468,
         'pcvr_ui_parallax': 0x7000eeee50,
         'pcvr_layer_final_draw': 0x700126c080,
         'pcvr_layer_placement_draw': 0x7000fec358,
