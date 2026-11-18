@@ -534,11 +534,33 @@ static void cmd_head(int argc, char **argv, ControlReply *reply) {
 #endif
 }
 
+// (probe) `eyeshot` saves the next frame's two eye images at full size, as the controller's capture button does
+// (runtime/pc_vr.h pc_vr_eye_shot_request): build/vr-shot-mark<request>-submit0/1-<present>.png in the profile folder.
+static void cmd_eyeshot(int argc, char **argv, ControlReply *reply) {
+#ifndef SAVAGEWIND_WITH_OPENXR
+    (void)argc, (void)argv;
+    control_fail(reply, "eyeshot: a PC VR build only");
+#else
+    extern void pc_vr_eye_shot_request(void);
+    extern unsigned pc_vr_eye_shot_requests(void);
+    extern uint64_t renderer_present_count(void);
+    (void)argv;
+    if (argc != 1) {
+        control_fail(reply, "Usage: eyeshot");
+        return;
+    }
+    pc_vr_eye_shot_request();
+    control_field_int(reply, "request", (int64_t)pc_vr_eye_shot_requests());
+    control_field_int(reply, "frame", (int64_t)renderer_present_count());
+#endif
+}
+
 void rt_data_watch_control_init(void) {
     static const ControlCmd commands[] = {
         {"watch", "<address> [<address> ...]", "Log the code that reads or writes up to four guest words", cmd_watch},
-        {"head", "<yaw degrees> <pitch degrees> | off", "Hold the head turned from the tracked pose (probe)", cmd_head}};
-    control_register(commands, 2);
+        {"head", "<yaw degrees> <pitch degrees> | off", "Hold the head turned from the tracked pose (probe)", cmd_head},
+        {"eyeshot", "", "Save the next frame's two eye images at full size (probe)", cmd_eyeshot}};
+    control_register(commands, 3);
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
