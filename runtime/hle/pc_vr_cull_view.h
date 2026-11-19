@@ -26,3 +26,12 @@ uint64_t rt_pc_vr_cull_grass_volume(Cpu *cpu, uint64_t eye_volume, uint64_t laye
 // The record's view matrix (`projection` 0) or projection matrix (1) for the grass: the head view's when the volume
 // just given to the same record on this thread was; otherwise `record_matrix`.
 uint64_t rt_pc_vr_cull_grass_matrix(uint64_t layer_record, unsigned projection, uint64_t record_matrix);
+
+// The model patches (tools/patches.py _model_detail_depth, _model_size), where the game measures how far a model is
+// for its level of detail and for its size on screen: `volume` the layer's culling volume, `sphere` the model's
+// bounding sphere (its centre), `depth` the sphere's depth along the view axis (negative in front). For any volume
+// but an eye's, the game's own: the depth, and `negative_scaled_radius` (minus the radius times the volume's scale)
+// over the depth. For an eye's, the distance from the point between the two eyes in the depth's place (negative, as
+// the depth is), which a turn of the head does not change and which both eyes share.
+float rt_pc_vr_model_depth(uint64_t volume, uint64_t sphere, float depth);
+float rt_pc_vr_model_size(uint64_t volume, uint64_t sphere, float negative_scaled_radius, float depth);

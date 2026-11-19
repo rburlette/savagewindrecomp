@@ -387,7 +387,82 @@ static void test_grass(void) {
     CHECK(guest_allocations == allocations + 2 && !memcmp(&cpu, &before, sizeof cpu));
 }
 
+// A culling volume as the game keeps it, as far as the model size reads it: the camera's axes and place (the inverse
+// view matrix) and the projection's sideways offset.
+static void eye_volume(uint8_t volume[VOLUME_SIZE], const PcVrHeadLookCamera *eye, const Frame *frame, float offset_x) {
+    memset(volume, 0, VOLUME_SIZE);
+    float inverse_view[12];
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        inverse_view[4 * axis] = (float)frame->right[axis];
+        inverse_view[4 * axis + 1] = (float)frame->up[axis];
+        inverse_view[4 * axis + 2] = (float)-frame->forward[axis];
+        inverse_view[4 * axis + 3] = eye->position[axis];
+    }
+    memcpy(volume + VOLUME_INVERSE_VIEW, inverse_view, sizeof inverse_view);
+    memcpy(volume + VOLUME_OFFSET_X, &offset_x, sizeof offset_x);
+    volume[VOLUME_PERSPECTIVE] = 1;
+}
+
+// A sphere's depth along an eye's view axis, negative in front, as the game hands it over.
+static float view_depth(const PcVrHeadLookCamera *eye, const Frame *frame, const float sphere[4]) {
+    double along = 0;
+    for (unsigned axis = 0; axis < 3; ++axis) along += (sphere[axis] - eye->position[axis]) * frame->forward[axis];
+    return (float)-along;
+}
+
+static void test_model_size(void) {
+    const double centre[3] = {126.0, 123.0, 1597.0};
+    const float scaled_radius = 40.0f * 0.854f;
+    static uint8_t volumes[2][VOLUME_SIZE], plain[VOLUME_SIZE];
+    pc_vr_cull_view_reset();
+    // A hill 900 units away, seen with the head pointing straight at it and 5, 20 and 45 degrees to its side: the
+    // game's own size (by depth) grows as the head turns away; by distance from the point between the eyes it is one
+    // size at every turn and in both eyes.
+    float straight_size = 0;
+    for (unsigned turn = 0; turn < 4; ++turn) {
+        static const double yaws[4] = {0.0, 0.0873, 0.349, 0.785};
+        const Frame head = head_frame(yaws[turn], 0.24, 0.03);
+        const Frame straight = head_frame(0.0, 0.24, 0.03);
+        PcVrHeadLookCamera eyes[2];
+        Frame eye_frames[2];
+        eye_pair(centre, &head, 0.4527, 0, eyes, eye_frames);
+        float sphere[4] = {0, 0, 0, 40.0f};
+        for (unsigned axis = 0; axis < 3; ++axis) sphere[axis] = (float)(centre[axis] + 900.0 * straight.forward[axis]);
+        eye_volume(volumes[0], &eyes[0], &eye_frames[0], -0.1213f);
+        eye_volume(volumes[1], &eyes[1], &eye_frames[1], 0.1213f);
+        eye_volume(plain, &eyes[0], &eye_frames[0], 0);
+        const float depths[2] = {view_depth(&eyes[0], &eye_frames[0], sphere), view_depth(&eyes[1], &eye_frames[1], sphere)};
+        const uint64_t sphere_address = (uint64_t)(uintptr_t)sphere;
+        if (!turn) {
+            // The game's own quotient until a view is published.
+            CHECK(rt_pc_vr_model_size((uint64_t)(uintptr_t)volumes[0], sphere_address, -scaled_radius, depths[0]) ==
+                  -scaled_radius / depths[0]);
+        }
+        pc_vr_cull_view_publish(1, eyes, link_fov);
+        const float left = rt_pc_vr_model_size((uint64_t)(uintptr_t)volumes[0], sphere_address, -scaled_radius, depths[0]);
+        const float right = rt_pc_vr_model_size((uint64_t)(uintptr_t)volumes[1], sphere_address, -scaled_radius, depths[1]);
+        if (!turn) straight_size = left;
+        CHECK(fabsf(left - scaled_radius / 900.0f) < 2e-6f && fabsf(right - left) < 2e-6f);
+        CHECK(fabsf(left - straight_size) < 2e-6f);
+        // (by depth the same hill is a third larger with the head 45 degrees to its side, and so swaps its model)
+        if (turn == 3) CHECK(-scaled_radius / depths[0] > 1.3f * straight_size);
+        // The depth for the level of detail likewise: minus that distance, in both eyes, at every turn.
+        const float left_depth = rt_pc_vr_model_depth((uint64_t)(uintptr_t)volumes[0], sphere_address, depths[0]);
+        const float right_depth = rt_pc_vr_model_depth((uint64_t)(uintptr_t)volumes[1], sphere_address, depths[1]);
+        CHECK(fabsf(left_depth + 900.0f) < 2e-3f && fabsf(right_depth - left_depth) < 2e-3f);
+        // A volume whose projection is centred is no eye's: the game's own quotient and depth.
+        CHECK(rt_pc_vr_model_size((uint64_t)(uintptr_t)plain, sphere_address, -scaled_radius, depths[0]) ==
+              -scaled_radius / depths[0]);
+        CHECK(rt_pc_vr_model_depth((uint64_t)(uintptr_t)plain, sphere_address, depths[0]) == depths[0]);
+        // Nor is one that is off its centre but no perspective (a shadow's).
+        volumes[0][VOLUME_PERSPECTIVE] = 0;
+        CHECK(rt_pc_vr_model_depth((uint64_t)(uintptr_t)volumes[0], sphere_address, depths[0]) == depths[0]);
+    }
+    pc_vr_cull_view_reset();
+}
+
 int main(void) {
+    test_model_size();
     test_parallel_eyes();
     test_turned_heads();
     test_refusals();

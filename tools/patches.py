@@ -1229,6 +1229,50 @@ def _grass_matrix(which, offset, what):
     return patch
 
 
+# A model's size on screen, from which its level of detail is picked (rt_pc_vr_model_size). For every model and
+# model part of a layer the game's entry builders (1.9.0: 32 copies of one template, 0x700104c28c to 0x70010554c8)
+# take radius * the culling volume's scale / the bounding sphere's depth along the view axis. A thing has its greatest
+# depth where the view points straight at it, so it is at its coarsest there and finer to the side: on a television a
+# slow turn of a narrow view, in the headset distant hills that swap models as the head turns. Every copy is the same
+# four instructions with its own registers: ldr the radius from the sphere, ldr the scale from the volume (+0x138),
+# fnmul (minus radius * scale), fdiv by the depth (negative in front). The patch replaces the fdiv; the runtime
+# divides by the distance from the point between the eyes for an eye's volume and as the game does for any other.
+#
+# The level of detail itself comes from the depth the builders store in the entry: the one routine they all call
+# (1.9.0 0x70010575a4; x0 the entry, x3 the culling volume, x4 the bounding sphere, as every one of the 32 passes
+# them) loads it (`ldr s1, [x0, #0x18]`) and raises the level with it. The patch replaces that load; the runtime
+# answers with minus the distance from the point between the eyes for an eye's volume, and the stored depth for any
+# other. The stored depth itself is left as it is for the game's other uses of it.
+def _model_detail_depth(gen, address):
+    assert _word(gen, address) == 0xbd401801, hex(_word(gen, address))  # ldr s1, [x0, #0x18]
+    return ('{ extern float rt_pc_vr_model_depth(uint64_t, uint64_t, float); '
+            'union { uint32_t u; float f; } depth = { .u = LD32(c->x[0] + 0x18) }; '
+            'depth.f = rt_pc_vr_model_depth(c->x[3], c->x[4], depth.f); c->v[1] = depth.u; }'
+            f'  /* {address:#x}: ldr s1, [x0, #0x18] (a model\'s depth for its level of detail: the distance for an '
+            'eye) */')
+
+
+def _model_size(gen, address):
+    radius_load, scale_load = _word(gen, address - 12), _word(gen, address - 8)
+    product, quotient = _word(gen, address - 4), _word(gen, address)
+    assert radius_load & 0xffc00000 == 0xbd400000, hex(radius_load)  # ldr s<n>, [x<sphere>, #<radius>]
+    assert scale_load & 0xfffffc00 == 0xbd413800, hex(scale_load)    # ldr s<s>, [x<volume>, #0x138]
+    assert product & 0xff20fc00 == 0x1e208800, hex(product)          # fnmul s<n>, s<s>, s<n>
+    assert quotient & 0xff20fc00 == 0x1e201800, hex(quotient)        # fdiv s<d>, s<n>, s<depth>
+    sphere, radius = radius_load >> 5 & 31, (radius_load >> 10 & 0xfff) * 4
+    volume = scale_load >> 5 & 31
+    numerator, depth, dest = quotient >> 5 & 31, quotient >> 16 & 31, quotient & 31
+    assert radius_load & 31 == numerator and product & 31 == numerator, (hex(radius_load), hex(product))
+    assert radius >= 12, radius  # (the sphere: its centre's three floats, then the radius)
+    return ('{ extern float rt_pc_vr_model_size(uint64_t, uint64_t, float, float); '
+            f'union {{ uint32_t u; float f; }} size = {{ .u = (uint32_t)c->v[{numerator}] }}, '
+            f'depth = {{ .u = (uint32_t)c->v[{depth}] }}; '
+            f'size.f = rt_pc_vr_model_size(c->x[{volume}], c->x[{sphere}] + {radius - 12:#x}, size.f, depth.f); '
+            f'c->v[{dest}] = size.u; }}'
+            f'  /* {address:#x}: fdiv s{dest}, s{numerator}, s{depth} (a model\'s size on screen: by distance for '
+            'an eye) */')
+
+
 # PC VR's eye images (runtime/hle/pc_vr_render_trace.h): the game finishes every render layer with one call of its
 # screen-quad draw for the layer's finished image (kind 1) and one for that image's placement in the final image
 # (kind 2), and shows the frame by drawing the final image to the display (kind 3): through the callback Labo's
@@ -1301,6 +1345,8 @@ PATCHES = {
     'pcvr_grass_volume': _grass_volume,
     'pcvr_grass_projection': _grass_matrix(1, 0x610, 'projection matrix'),
     'pcvr_grass_view': _grass_matrix(0, 0x608, 'view matrix'),
+    **{'pcvr_model_size_%02d' % number: _model_size for number in range(1, 33)},
+    'pcvr_model_detail_depth': _model_detail_depth,
     'pcvr_ui_parallax': _ui_parallax,
     # (the site: ldrb w9 the mask flag, cmp w9, #0, csel the full-screen triangle or the polygon, then the bl)
     'pcvr_lens_draw': _lens_draw(0, "the eye scenes' screen-quad draw: Labo's lens polygon", flag_register=9),
