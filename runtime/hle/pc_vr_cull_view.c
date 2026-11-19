@@ -39,11 +39,26 @@ static _Atomic uint64_t cull_boot = 1;
 static uint64_t cull_published, cull_refused, cull_matrix_given, cull_fov_given;
 // This thread's guest copy of the matrix: the game reads the matrix through a guest pointer during its own call.
 static _Thread_local struct { uint64_t boot, address; } cull_matrix_copy;
+// Half the distance between the eyes in the game's units, for rt_pc_vr_model_depth (a float's bits; 0 until a view
+// is published).
+static _Atomic uint32_t model_half_separation_bits;
 
 void pc_vr_cull_view_publish(uint64_t base_camera, const PcVrHeadLookCamera eyes[2],
                              const float fov_left_right_up_down[2][4]) {
     PcVrCullView built;
     const bool ok = pc_vr_cull_view_build(eyes, fov_left_right_up_down, &built);
+    // Half the distance between the eyes, in the game's units (rt_pc_vr_model_depth).
+    float separation_squared = 0;
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        const float apart = eyes[1].position[axis] - eyes[0].position[axis];
+        separation_squared += apart * apart;
+    }
+    const float half_separation = 0.5f * sqrtf(separation_squared);
+    if (half_separation > 0) {
+        uint32_t bits;
+        memcpy(&bits, &half_separation, sizeof bits);
+        atomic_store_explicit(&model_half_separation_bits, bits, memory_order_relaxed);
+    }
     pthread_mutex_lock(&cull_lock);
     if (ok) {
         cull_view = built;
@@ -194,7 +209,56 @@ uint64_t rt_pc_vr_cull_grass_matrix(uint64_t layer_record, unsigned projection, 
     return projection ? grass_given.projection_matrix : grass_given.view;
 }
 
+// A model's level of detail by its distance (tools/patches.py _model_detail_depth). The game picks a model's level
+// from the depth of its bounding sphere along the view's axis: the finest until the depth passes the model's own
+// change-over distance, coarser beyond. The depth is the distance times the cosine of the angle from the view's
+// centre, so a thing has its greatest depth where the view points straight at it: in the headset a distant hill just
+// past its change-over distance is the coarse model when looked at and the detailed one a few degrees to the side
+// (the user's captures of 2026-11-18). For an eye's volume the depth gives way to the distance from the point
+// between the two eyes, which a turn of the head does not change and which is the same for both eyes: that point is
+// this eye's own place moved half the eyes' distance along its right axis, toward the other eye.
+//
+// The distance is taken times the play setting MODEL_DISTANCE (runtime/pc_vr_config.h). The distance itself is never
+// less than the depth, so on its own it lands every such model on the coarse side: on Link a third of the models the
+// game's measure showed detailed went a level coarser, and the hill was the coarse model at every turn (the user,
+// 2026-11-18: "always the lower quality model"). The game's change-over distances belong to its own measure, which
+// over a view is shorter than the distance; the setting's factor stands in for that. At 0 the game's depth is kept.
+//
+// An eye's volume is known here by its projection, the only thing the game's routine has of it: a perspective whose
+// centre is off to a side (the left eye's to the left). Every other layer's volume keeps the game's own measure.
+#define VOLUME_INVERSE_VIEW 0x30  // (3x4: the camera's axes in the world by column, its place in the fourth)
+#define VOLUME_OFFSET_X 0x13c
+#define VOLUME_PERSPECTIVE 0x2c0  // (u8)
+
+// False for a volume that is not an eye's, or before the eyes are published.
+static bool model_distance_between_eyes(uint64_t volume, uint64_t sphere, float *distance) {
+    const uint32_t bits = atomic_load_explicit(&model_half_separation_bits, memory_order_relaxed);
+    if (!bits || !*(const uint8_t *)(uintptr_t)(volume + VOLUME_PERSPECTIVE)) return false;
+    float half_separation, offset_x, inverse_view[12], centre[3];
+    memcpy(&half_separation, &bits, sizeof half_separation);
+    memcpy(&offset_x, (const void *)(uintptr_t)(volume + VOLUME_OFFSET_X), sizeof offset_x);
+    if (offset_x == 0) return false;
+    memcpy(inverse_view, (const void *)(uintptr_t)(volume + VOLUME_INVERSE_VIEW), sizeof inverse_view);
+    memcpy(centre, (const void *)(uintptr_t)sphere, sizeof centre);
+    const float toward_other_eye = offset_x < 0 ? half_separation : -half_separation;
+    float distance_squared = 0;
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        const float between_eyes = inverse_view[4 * axis + 3] + toward_other_eye * inverse_view[4 * axis];
+        distance_squared += (centre[axis] - between_eyes) * (centre[axis] - between_eyes);
+    }
+    if (!(distance_squared > 0)) return false;
+    *distance = sqrtf(distance_squared);
+    return true;
+}
+
+float rt_pc_vr_model_depth(uint64_t volume, uint64_t sphere, float depth) {
+    const float factor = (float)pc_vr_config()->play.model_distance;
+    float distance;
+    return factor > 0 && model_distance_between_eyes(volume, sphere, &distance) ? -distance * factor : depth;
+}
+
 RT_ON_RESET(pc_vr_cull_view_reset) {
+    atomic_store_explicit(&model_half_separation_bits, 0, memory_order_relaxed);
     pthread_mutex_lock(&cull_lock);
     atomic_store_explicit(&cull_ready, false, memory_order_release);
     atomic_fetch_add_explicit(&cull_boot, 1, memory_order_release);

@@ -26,6 +26,12 @@ extern "C" {
 #define PC_VR_HUD_DEPTH_DEFAULT 0.9       // times the camera target's distance (D057: where the user set it by hand)
 #define PC_VR_HUD_DEPTH_MIN 0.1
 #define PC_VR_HUD_DEPTH_MAX 4.0
+// (the user's session on Link of 2026-11-18 and two places on the simulator: at 0.8 as many models are detailed as by
+// the game's own measure, the depth along the view, and none is coarser within 30 degrees of the view's centre; the
+// user's look in the headset decides)
+#define PC_VR_MODEL_DISTANCE_DEFAULT 0.8  // times a model's distance, for its level of detail
+#define PC_VR_MODEL_DISTANCE_MIN 0.25
+#define PC_VR_MODEL_DISTANCE_MAX 2.0
 #define PC_VR_SHOT_PRESENTS 8
 // (measured on Link at 90 Hz, 2026-11-15, eye scale 2.7, one or two runs each: starting 1.5 ms before the display
 // frame, the frame still reads the pose published in it, the pose being published right after it is located, and
@@ -45,7 +51,7 @@ enum {
 // taken (the default stays).
 enum {
     PC_VR_SETTING_NATIVE_VIEW_UNITS_PER_METER, PC_VR_SETTING_MENU_DISTANCE, PC_VR_SETTING_HUD_DEPTH,
-    PC_VR_SETTING_EYE_IMAGES_FLIP, PC_VR_SETTING_EYE_SCALE, PC_VR_SETTING_COUNT
+    PC_VR_SETTING_EYE_IMAGES_FLIP, PC_VR_SETTING_EYE_SCALE, PC_VR_SETTING_MODEL_DISTANCE, PC_VR_SETTING_COUNT
 };
 
 typedef struct {
@@ -59,6 +65,9 @@ typedef struct {
         double eye_scale;         // EYE_SCALE: the Labo eye targets' scale, a decimal in (1, 5]; 1: not scaled
         unsigned eye_width, eye_height;  // EYE_SIZE=WxH (PC VR only): the exact eye render and submission size; 0: none
         bool eye_size_malformed;  // EYE_SIZE given but not as pc_vr_parse_eye_size takes it: startup stops
+        double model_distance;    // MODEL_DISTANCE: a model's level of detail by its distance from the point between
+                                  // the eyes times this (runtime/hle/pc_vr_cull_view.c), within [0.25, 2]; 0: by the
+                                  // game's own measure, the depth along the view, which changes as the head turns
         bool display_rate_tracking;  // DISPLAY_RATE_TRACKING=1
         bool ui_parallax;         // UI_PARALLAX=1: the game's own UI screen parallax kept
         bool hud_backdrop;        // HUD_BACKDROP=1: the HUD's backdrops drawn as the game draws them

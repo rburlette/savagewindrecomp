@@ -518,6 +518,10 @@ SITES = [
          'aa1603e1 94000000/fc000000 3cc3c360', 8),
     Site('pcvr_volume_copy', 'call', '52806a08 aa0303e1 9b286336 aa0303f5 9100f2c0 94000000/fc000000 3dc002a0 910c62c8 '
          '3d800100', 5),
+    # ... and a model's level of detail by its distance (tools/patches.py _model_detail_depth): the routine every
+    # builder of a layer's model entries calls to pick the level (1.9.0 0x70010575a4), at its load of the entry's
+    # stored depth
+    Site('pcvr_model_detail_depth', 'code', '7100082a 5400022b bd401801 bd400042 1e222821 1e202020', 2),
     # sead::LookAtCamera::doUpdateMatrix (tools/patches.py _lookat_update): its first load of the eye (+0x38); eye,
     # at (+0x44) and up (+0x50) make the view matrix written to x1 (free camera, runtime/hle/freecam.c)
     Site('lookat_update', 'code', '2d470801 2d480c00 1e232020 2d491404 1e240440 1e250400 54000000/ff00001f 1e233823', 0),
@@ -617,6 +621,7 @@ OPTIONAL_GROUPS = [
      'pcvr_vis2_cull_fov', 'pcvr_vis2_cull_matrix'),  # (1.9.0 only)
     ('pcvr_grass_volume', 'pcvr_grass_projection', 'pcvr_grass_view', 'pcvr_volume_view', 'pcvr_volume_projection',
      'pcvr_volume_copy'),  # (1.9.0 only)
+    ('pcvr_model_detail_depth',),  # (1.9.0 only)
     ('pcvr_ui_parallax',),
     ('pcvr_layer_final_draw', 'pcvr_layer_placement_draw', 'pcvr_display_lens_draw', 'pcvr_display_copy_draw'),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
@@ -888,6 +893,7 @@ KNOWN = {
         'pcvr_volume_view': 0x7000f8f780,
         'pcvr_volume_projection': 0x7000f90cf4,
         'pcvr_volume_copy': 0x700101a468,
+        'pcvr_model_detail_depth': 0x70010575e0,
         'pcvr_ui_parallax': 0x7000eeee50,
         'pcvr_layer_final_draw': 0x700126c080,
         'pcvr_layer_placement_draw': 0x7000fec358,

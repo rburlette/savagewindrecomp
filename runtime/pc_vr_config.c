@@ -28,7 +28,7 @@ static const char *const alias_names[PC_VR_ALIAS_COUNT][2] = {
 
 // Each checked play setting's name in the configuration line, in PC_VR_SETTING_* order.
 static const char *const setting_names[PC_VR_SETTING_COUNT] = {
-    "NATIVE_VIEW_UNITS_PER_METER", "MENU_DISTANCE", "HUD_DEPTH", "EYE_IMAGES_FLIP", "EYE_SCALE",
+    "NATIVE_VIEW_UNITS_PER_METER", "MENU_DISTANCE", "HUD_DEPTH", "EYE_IMAGES_FLIP", "EYE_SCALE", "MODEL_DISTANCE",
 };
 
 static bool exactly_one(const char *value) { return value && !strcmp(value, "1"); }
@@ -103,6 +103,16 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
     if (out->enabled && value && *value &&
         !pc_vr_parse_eye_size(value, &out->play.eye_width, &out->play.eye_height))
         out->play.eye_size_malformed = true;
+    // (0: the game's own measure; otherwise a factor within its range)
+    value = lookup(context, "SAVAGEWIND_PC_VR_MODEL_DISTANCE");
+    double model_distance = PC_VR_MODEL_DISTANCE_DEFAULT;
+    if (value && !(explicit_number(value, &model_distance) &&
+                   (model_distance == 0 || (model_distance >= PC_VR_MODEL_DISTANCE_MIN &&
+                                            model_distance <= PC_VR_MODEL_DISTANCE_MAX)))) {
+        model_distance = PC_VR_MODEL_DISTANCE_DEFAULT;
+        out->settings_ignored |= 1u << PC_VR_SETTING_MODEL_DISTANCE;
+    }
+    out->play.model_distance = model_distance;
     out->play.display_rate_tracking = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING"));
     out->play.ui_parallax = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_UI_PARALLAX"));
     out->play.hud_backdrop = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_HUD_BACKDROP"));
@@ -188,6 +198,7 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
     if (config->play.eye_width)
         describe_append(&line, " EYE_SIZE=%ux%u", config->play.eye_width, config->play.eye_height);
     else describe_append(&line, " EYE_SIZE=none");
+    describe_append(&line, " MODEL_DISTANCE=%.9g", config->play.model_distance);
     describe_append(&line, " DISPLAY_RATE_TRACKING=%d UI_PARALLAX=%d HUD_BACKDROP=%d",
         config->play.display_rate_tracking, config->play.ui_parallax, config->play.hud_backdrop);
     describe_append(&line, " WORLD_HUD=%d", config->play.world_hud);

@@ -35,6 +35,10 @@ uint64_t plat_now_ns(void) { return 1000000000ull; }
 bool labo_motion_active(void) { abort(); }
 void rt_fatal_trace(void) { abort(); }
 void pc_vr_motion_contract_timestamp_reset(void) { abort(); }
+// (what an eye shot's request reads and marks, runtime/pc_vr.c: nothing here asks for one)
+bool control_place_line(char *line, size_t size) { (void)line; (void)size; abort(); }
+XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) { (void)out; abort(); }
+void pc_vr_frame_trace_user_mark(void) { abort(); }
 // The OpenXR runtime's recommended eye size (0: discovery has not run), as xr_runtime.c reports it.
 static unsigned mock_view_width, mock_view_height;
 bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) {
@@ -94,6 +98,7 @@ static void test_defaults(void) {
     CHECK(config.play.menu_distance == 0.77 && config.play.hud_depth == 0.9);
     CHECK(config.play.eye_images_flip == -1 && config.play.eye_scale == 1.0);
     CHECK(!config.play.eye_width && !config.play.eye_height && !config.play.eye_size_malformed);
+    CHECK(config.play.model_distance == 0.8);
     CHECK(!config.play.display_rate_tracking && !config.play.ui_parallax);
     CHECK(!config.play.hud_backdrop && config.play.world_hud && !config.play.world_hud_upright);
     CHECK(config.play.world_hud_test_turn == 0 && config.play.rune_aim == PC_VR_RUNE_AIM_ON);
@@ -180,6 +185,16 @@ static void test_play_settings(void) {
         const PcVrConfig config = with_setting("SAVAGEWIND_PC_VR_EYE_SCALE", scales[i].value);
         CHECK(config.play.eye_scale == scales[i].expected);
         CHECK(config.settings_ignored == (scales[i].expected == 1 ? 1u << PC_VR_SETTING_EYE_SCALE : 0));
+    }
+    // (a model's distance for its level of detail: a factor in [0.25, 2], or 0 for the game's own measure)
+    const struct { const char *value; double expected; bool ignored; } model[] = {
+        {"0.8", 0.8, false}, {"1", 1, false}, {"0.25", 0.25, false}, {"2", 2, false}, {"0", 0, false},
+        {"0.6", 0.6, false}, {"0.2", 0.8, true}, {"2.5", 0.8, true}, {"-1", 0.8, true}, {"", 0.8, true},
+        {"abc", 0.8, true}, {"nan", 0.8, true}};
+    for (unsigned i = 0; i < sizeof model / sizeof model[0]; ++i) {
+        const PcVrConfig config = with_setting("SAVAGEWIND_PC_VR_MODEL_DISTANCE", model[i].value);
+        CHECK(config.play.model_distance == model[i].expected);
+        CHECK(config.settings_ignored == (model[i].ignored ? 1u << PC_VR_SETTING_MODEL_DISTANCE : 0));
     }
     // (taken without PC VR as well, as the renderer always has)
     PcVrConfig desktop;
@@ -312,7 +327,7 @@ static void test_describe(void) {
         &config);
     char text[1024];
     const char *play = "NATIVE_VIEW_UNITS_PER_METER=14.53 MENU_DISTANCE=0.77 HUD_DEPTH=0.9 EYE_IMAGES_FLIP=auto "
-        "EYE_SCALE=3 EYE_SIZE=none DISPLAY_RATE_TRACKING=0 UI_PARALLAX=0 HUD_BACKDROP=0 "
+        "EYE_SCALE=3 EYE_SIZE=none MODEL_DISTANCE=0.8 DISPLAY_RATE_TRACKING=0 UI_PARALLAX=0 HUD_BACKDROP=0 "
         "WORLD_HUD=1 WORLD_HUD_ROLL=world RUNE_AIM=1; diagnostics: LOG_SCREENS; aliases: HEAD_LOOK PROJECTION_TRACE "
         "NATIVE_FOV_TRACE NATIVE_FOV_EXPERIMENT NATIVE_VIEW_EXPERIMENT NATIVE_RENDER_TRACE EYE_IMAGES FIRST_LIGHT; "
         "ignored: none";

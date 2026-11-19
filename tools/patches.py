@@ -1229,6 +1229,26 @@ def _grass_matrix(which, offset, what):
     return patch
 
 
+# A model's level of detail by its distance (rt_pc_vr_model_depth). For every model and model part of a layer the
+# game's entry builders (1.9.0: 32 copies of one template, 0x700104c28c to 0x70010554c8) store the depth of the
+# bounding sphere along the layer volume's view axis in the model's entry for that layer (+0x18, negative in front),
+# and the one routine they all call (1.9.0 0x70010575a4; x0 the entry, x3 the culling volume, x4 the bounding sphere,
+# as every one of the 32 passes them) picks the level from it: the finest until the depth passes the model's own
+# change-over distance, coarser beyond. A thing has its greatest depth where the view points straight at it, so it is
+# at its coarsest there and finer to the side: on a television a slow change as the camera turns, in the headset a
+# distant hill that swaps models as the head turns. The patch replaces the routine's load of the stored depth
+# (`ldr s1, [x0, #0x18]`); the runtime answers with minus the model's distance from the point between the eyes, times
+# the play setting's factor, for an eye's volume, and the stored depth for any other. The stored depth itself is left
+# as it is: the game's other uses of it (the draw order, the size on screen, the shadow maps a model is in) stay.
+def _model_detail_depth(gen, address):
+    assert _word(gen, address) == 0xbd401801, hex(_word(gen, address))  # ldr s1, [x0, #0x18]
+    return ('{ extern float rt_pc_vr_model_depth(uint64_t, uint64_t, float); '
+            'union { uint32_t u; float f; } depth = { .u = LD32(c->x[0] + 0x18) }; '
+            'depth.f = rt_pc_vr_model_depth(c->x[3], c->x[4], depth.f); c->v[1] = depth.u; }'
+            f'  /* {address:#x}: ldr s1, [x0, #0x18] (a model\'s depth for its level of detail: its distance for an '
+            'eye) */')
+
+
 # PC VR's eye images (runtime/hle/pc_vr_render_trace.h): the game finishes every render layer with one call of its
 # screen-quad draw for the layer's finished image (kind 1) and one for that image's placement in the final image
 # (kind 2), and shows the frame by drawing the final image to the display (kind 3): through the callback Labo's
@@ -1301,6 +1321,7 @@ PATCHES = {
     'pcvr_grass_volume': _grass_volume,
     'pcvr_grass_projection': _grass_matrix(1, 0x610, 'projection matrix'),
     'pcvr_grass_view': _grass_matrix(0, 0x608, 'view matrix'),
+    'pcvr_model_detail_depth': _model_detail_depth,
     'pcvr_ui_parallax': _ui_parallax,
     # (the site: ldrb w9 the mask flag, cmp w9, #0, csel the full-screen triangle or the polygon, then the bl)
     'pcvr_lens_draw': _lens_draw(0, "the eye scenes' screen-quad draw: Labo's lens polygon", flag_register=9),

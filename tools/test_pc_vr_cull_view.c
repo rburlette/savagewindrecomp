@@ -1,6 +1,7 @@
 // Asset-free checks of PC VR's head view for the game's visibility decisions: the view that holds both eyes' frusta
-// (runtime/hle/pc_vr_cull_view_math.h) and what the two game patches are answered (runtime/hle/pc_vr_cull_view.c,
-// included here with a mocked guest allocator and the fixture's own configuration).
+// (runtime/hle/pc_vr_cull_view_math.h), what the two game patches are answered, and a model's distance for its level
+// of detail (runtime/hle/pc_vr_cull_view.c, included here with a mocked guest allocator and the fixture's own
+// configuration).
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -387,7 +388,90 @@ static void test_grass(void) {
     CHECK(guest_allocations == allocations + 2 && !memcmp(&cpu, &before, sizeof cpu));
 }
 
+// A culling volume as the game keeps it, as far as the model patch reads it: the camera's axes and place (the inverse
+// view matrix), the projection's sideways offset and its perspective flag.
+static void eye_volume(uint8_t volume[VOLUME_SIZE], const PcVrHeadLookCamera *eye, const Frame *frame, float offset_x) {
+    memset(volume, 0, VOLUME_SIZE);
+    float inverse_view[12];
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        inverse_view[4 * axis] = (float)frame->right[axis];
+        inverse_view[4 * axis + 1] = (float)frame->up[axis];
+        inverse_view[4 * axis + 2] = (float)-frame->forward[axis];
+        inverse_view[4 * axis + 3] = eye->position[axis];
+    }
+    memcpy(volume + VOLUME_INVERSE_VIEW, inverse_view, sizeof inverse_view);
+    memcpy(volume + VOLUME_OFFSET_X, &offset_x, sizeof offset_x);
+    volume[VOLUME_PERSPECTIVE] = 1;
+}
+
+// A sphere's depth along an eye's view axis, negative in front, as the game hands it over.
+static float view_depth(const PcVrHeadLookCamera *eye, const Frame *frame, const float sphere[4]) {
+    double along = 0;
+    for (unsigned axis = 0; axis < 3; ++axis) along += (sphere[axis] - eye->position[axis]) * frame->forward[axis];
+    return (float)-along;
+}
+
+// The user's hill by the bridge (2026-11-18): 1289 units away, its change-over distance 1284. By the game's depth it
+// is past that distance with the head within about 5 degrees of it and short of it with the head turned further away,
+// so it swaps models; by its distance from the point between the eyes times the setting's factor it is one side of it
+// at every turn, in both eyes.
+static void test_model_detail(void) {
+    const double centre[3] = {126.0, 123.0, 1597.0};
+    const float hill_distance = 1289.0f, change_over = 1284.0f;
+    static const double yaws[5] = {0.0, 0.0524, 0.1047, 0.349, 0.785};  // (straight at it; 3, 6, 20, 45 degrees away)
+    static uint8_t volumes[2][VOLUME_SIZE], plain[VOLUME_SIZE];
+    static const struct { const char *setting; float factor; } settings[] = {
+        {NULL, 0.8f}, {"1", 1.0f}, {"0.6", 0.6f}, {"0", 0.0f}, {"3", 0.8f}};  // (3: out of range, the default)
+    for (unsigned chosen = 0; chosen < sizeof settings / sizeof settings[0]; ++chosen) {
+        test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1",
+            settings[chosen].setting ? "SAVAGEWIND_PC_VR_MODEL_DISTANCE" : NULL, settings[chosen].setting, NULL});
+        const float factor = settings[chosen].factor;
+        pc_vr_cull_view_reset();
+        const Frame straight = head_frame(0.0, 0.24, 0.03);
+        float sphere[4] = {0, 0, 0, 40.0f};
+        for (unsigned axis = 0; axis < 3; ++axis)
+            sphere[axis] = (float)(centre[axis] + hill_distance * straight.forward[axis]);
+        const uint64_t sphere_address = (uint64_t)(uintptr_t)sphere;
+        for (unsigned turn = 0; turn < 5; ++turn) {
+            const Frame head = head_frame(yaws[turn], 0.24, 0.03);
+            PcVrHeadLookCamera eyes[2];
+            Frame eye_frames[2];
+            eye_pair(centre, &head, 0.4527, 0, eyes, eye_frames);
+            eye_volume(volumes[0], &eyes[0], &eye_frames[0], -0.1213f);
+            eye_volume(volumes[1], &eyes[1], &eye_frames[1], 0.1213f);
+            eye_volume(plain, &eyes[0], &eye_frames[0], 0);
+            const uint64_t left_volume = (uint64_t)(uintptr_t)volumes[0], right_volume = (uint64_t)(uintptr_t)volumes[1];
+            const float depths[2] = {view_depth(&eyes[0], &eye_frames[0], sphere),
+                                     view_depth(&eyes[1], &eye_frames[1], sphere)};
+            // The game's own measure: past the change-over distance straight on and 3 degrees away, short of it from 6.
+            CHECK((-depths[0] > change_over) == (turn < 2) && (-depths[1] > change_over) == (turn < 2));
+            // Until a view is published, the game's own depth.
+            if (!turn) CHECK(rt_pc_vr_model_depth(left_volume, sphere_address, depths[0]) == depths[0]);
+            pc_vr_cull_view_publish(1, eyes, link_fov);
+            const float left = rt_pc_vr_model_depth(left_volume, sphere_address, depths[0]);
+            const float right = rt_pc_vr_model_depth(right_volume, sphere_address, depths[1]);
+            if (factor > 0) {
+                // Minus the distance times the factor, in both eyes and at every turn.
+                CHECK(fabsf(left + factor * hill_distance) < 5e-3f && fabsf(right - left) < 5e-3f);
+                // (at 1 the hill is past its change-over distance at every turn, the coarse model; at 0.8 short of it)
+                CHECK((-left > change_over) == (factor == 1.0f));
+            } else CHECK(left == depths[0] && right == depths[1]);  // (0: the game's own, swap and all)
+            // A volume whose projection is centred is no eye's: the game's own depth.
+            CHECK(rt_pc_vr_model_depth((uint64_t)(uintptr_t)plain, sphere_address, depths[0]) == depths[0]);
+            // Nor is one that is off its centre but no perspective (a shadow's).
+            volumes[0][VOLUME_PERSPECTIVE] = 0;
+            CHECK(rt_pc_vr_model_depth(left_volume, sphere_address, depths[0]) == depths[0]);
+        }
+    }
+    // A game reset: the game's own depth until the next view.
+    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    pc_vr_cull_view_reset();
+    const float sphere[4] = {0, 0, 0, 1};
+    CHECK(rt_pc_vr_model_depth((uint64_t)(uintptr_t)volumes[1], (uint64_t)(uintptr_t)sphere, -7.0f) == -7.0f);
+}
+
 int main(void) {
+    test_model_detail();
     test_parallel_eyes();
     test_turned_heads();
     test_refusals();
