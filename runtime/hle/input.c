@@ -654,6 +654,7 @@ void input_mouse_update(SDL_Window *w) {
         recompute_keyboard();
     }
     vibration_update(pad, pad_focused() && !host_test);
+    pc_vr_eye_shot_key_poll();  // (PC VR: Right Ctrl saves the eye images, whichever window has the focus)
     static bool cur;
     input_min_hold_maintenance();
     if (atomic_load(&quicksave_active) &&

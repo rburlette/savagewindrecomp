@@ -24,7 +24,12 @@ bool pc_vr_controller_without_focus(void);
 // headset is given in the next frame, saved at full size as build/vr-shot-mark<n>-submit0/1-<present>.png in the data
 // folder (runtime/nvn/vulkan/vr_shots.c). The pair's frame waits for the GPU's copy of them; the files are written by
 // threads of their own.
+// Each request's log line says where it was taken: the player's place and the game camera (a line the control
+// endpoint's `goto` takes) and the head's pose.
 void pc_vr_eye_shot_request(void);
+// The same request from the keyboard: Right Ctrl, whichever window has the focus (Windows only). Called once a
+// frame by the input poll.
+void pc_vr_eye_shot_key_poll(void);
 // The requests so far; the renderer saves one pair for those it has not served yet.
 unsigned pc_vr_eye_shot_requests(void);
 

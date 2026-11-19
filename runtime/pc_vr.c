@@ -21,6 +21,7 @@
 #include "gamelib.h"
 #include "game_sites.h"
 #include "pc_vr_eye_size.h"
+#include "pc_vr_frame_trace.h"
 #include "pc_vr_main.h"
 #include "hle.h"
 #include "rt.h"
@@ -38,7 +39,42 @@ static _Atomic unsigned eye_shot_requests;
 void pc_vr_eye_shot_request(void) {
     if (!pc_vr_enabled()) return;
     const unsigned request = atomic_fetch_add_explicit(&eye_shot_requests, 1, memory_order_relaxed) + 1;
-    LOG("[pc-vr] eye shot %u requested (the capture button)\n", request);
+    // Where the pair was taken, for going back to it: the player's place and the game camera as `pos` gives them (a
+    // line `goto` takes), and the head as the XR runtime last located it (LOCAL space, with the calibration the eye
+    // cameras are placed from).
+    extern bool control_place_line(char *line, size_t size);
+    char place[160] = "not in the world";
+    control_place_line(place, sizeof place);
+    XrPoseSnapshot pose = {0};
+    const bool tracked = xr_runtime_get_pose(&pose) == XR_POSE_VALID;
+    LOG("[pc-vr] eye shot %u requested: place %s; head %s xyzw %.5f %.5f %.5f %.5f; eyes at %.4f %.4f %.4f / "
+        "%.4f %.4f %.4f; calibration heading xyzw %.5f %.5f %.5f %.5f origin %.4f %.4f %.4f\n", request, place,
+        tracked ? "tracked" : "not tracked", pose.orientation_xyzw[0], pose.orientation_xyzw[1],
+        pose.orientation_xyzw[2], pose.orientation_xyzw[3], pose.eyes[0].position_xyz[0],
+        pose.eyes[0].position_xyz[1], pose.eyes[0].position_xyz[2], pose.eyes[1].position_xyz[0],
+        pose.eyes[1].position_xyz[1], pose.eyes[1].position_xyz[2], pose.calibration.heading_xyzw[0],
+        pose.calibration.heading_xyzw[1], pose.calibration.heading_xyzw[2], pose.calibration.heading_xyzw[3],
+        pose.calibration.origin_xyz[0], pose.calibration.origin_xyz[1], pose.calibration.origin_xyz[2]);
+}
+
+// The eye shot's keyboard key, Right Ctrl, read from the keyboard's own state and not from the window's events: in
+// the headset the game's desktop window often lacks the focus, and Windows keeps an Xbox controller's Share button
+// for its own screenshots. A press also marks the late-frame trace, as the capture button does.
+#ifdef _WIN32
+__declspec(dllimport) short __stdcall GetAsyncKeyState(int virtual_key);  // (user32; windows.h is not wanted here)
+#endif
+void pc_vr_eye_shot_key_poll(void) {
+#ifdef _WIN32
+    enum { VIRTUAL_KEY_RIGHT_CONTROL = 0xA3 };
+    if (!pc_vr_enabled()) return;
+    static bool was_down;  // (the input thread alone)
+    const bool down = (GetAsyncKeyState(VIRTUAL_KEY_RIGHT_CONTROL) & 0x8000) != 0;
+    if (down && !was_down) {
+        pc_vr_frame_trace_user_mark();
+        pc_vr_eye_shot_request();
+    }
+    was_down = down;
+#endif
 }
 
 unsigned pc_vr_eye_shot_requests(void) { return atomic_load_explicit(&eye_shot_requests, memory_order_relaxed); }
