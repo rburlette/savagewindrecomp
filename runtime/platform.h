@@ -81,6 +81,7 @@ void plat_exec(char *const argv[]);  // replace the process (NULL = same command
 void plat_exec_wait(char *const argv[]);
 #if defined(_WIN32) || defined(__linux__)
 void plat_terminate(void);  // end the process now, skipping DLL teardown (exit status 0)
+void plat_terminate_status(int status); // same termination contract, explicit exit status
 #endif
 // Windows: false turns off the accessibility shortcuts (Shift five times: Sticky Keys) where their feature is off,
 // true puts them back as they were (the game's window has the focus or not). Elsewhere nothing.

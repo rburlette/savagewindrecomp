@@ -12,6 +12,12 @@
 #include "../../hash.h"
 #include "../shader_archive.h"
 #include "shaders.h"
+#include "../../pc_vr.h"
+#include "vr_field_cloud_shader.h"
+
+#ifndef VR_FIELD_CLOUD_SHADER_ID
+#define VR_FIELD_CLOUD_SHADER_ID __DATE__ " " __TIME__
+#endif
 
 // What the translated shaders depend on besides their binaries: the translator's sources (maxwell_translator_id)
 // and the GLSL -> SPIR-V step's (vk_spirv_id). Caches built from translated shaders (cache/xlate, the pipeline cache,
@@ -437,6 +443,22 @@ int vk_keylog_read(VkKeyLogEntry **out) {
     return n;
 }
 
+// Only the resident field-cloud vertex programs have a different translation in PC VR.
+static VrFieldCloudShader field_cloud_variant(const uint8_t *code, size_t binary_size, int stage) {
+    return stage == STAGE_VERTEX && pc_vr_shader_variants() ? vr_field_cloud_identify(code, binary_size, stage)
+                                                            : VR_FIELD_CLOUD_NONE;
+}
+
+static ShaderInfo *translate_stage(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key, size_t binary_size) {
+    ShaderInfo *info = maxwell_translate(code, max_size, stage, key);
+    if (info && info->msl) {
+        VrFieldCloudShader cloud = field_cloud_variant(code, binary_size, stage);
+        if (cloud != VR_FIELD_CLOUD_NONE && !vr_field_cloud_patch(info, cloud))
+            LOG("[pc-vr-field-cloud] could not replace the facing direction in vertex shader %d\n", cloud);
+    }
+    return info;
+}
+
 // The translation's id (its cache/xlate name) and the header its file has
 static uint64_t xlate_id_as(const char *id, const uint8_t *code, size_t max_size, int stage, const ShaderKey *key,
                             XlateHeader *hd) {
@@ -450,6 +472,8 @@ static uint64_t xlate_id_as(const char *id, const uint8_t *code, size_t max_size
     h = hash64(h, hd, sizeof *hd);
     h = hash64(h, code, hd->bin_size);
     if (maxwell_wet_lighting(code, max_size, stage)) h = hash64(h, "wet", 3);  // (Video > Wet grass fix: its own translation)
+    if (field_cloud_variant(code, hd->bin_size, stage) != VR_FIELD_CLOUD_NONE)
+        h = hash64(h, VR_FIELD_CLOUD_SHADER_ID, sizeof(VR_FIELD_CLOUD_SHADER_ID) - 1);
     return h ? h : 1;
 }
 
@@ -498,7 +522,7 @@ int vk_precompile_one(const uint8_t *code, size_t max_size, int stage, const Sha
     ShaderInfo *si = xlate_load(h, &hd, stage);
     bool made = false;
     if (!si) {
-        si = maxwell_translate(code, max_size, stage, key);
+        si = translate_stage(code, max_size, stage, key, hd.bin_size);
         if (!si->msl) {
             snprintf(why, nwhy, "translation failed: %s", si->error);
             maxwell_free(si);
@@ -533,7 +557,7 @@ ShaderInfo *vk_translate_peek(const uint8_t *code, size_t max_size, int stage, c
 }
 
 ShaderInfo *vk_translate_cached(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key) {
-    if (xlate_off()) return maxwell_translate(code, max_size, stage, key);
+    if (xlate_off()) return translate_stage(code, max_size, stage, key, maxwell_binary_size(code, max_size, stage));
     XlateHeader hd;
     uint64_t h = xlate_id(code, max_size, stage, key, &hd);
     pthread_mutex_lock(&xlate_lock);
@@ -545,7 +569,7 @@ ShaderInfo *vk_translate_cached(const uint8_t *code, size_t max_size, int stage,
     keylog_add(code, max_size, stage, key);
     si = xlate_load(h, &hd, stage);
     if (si && getenv("SAVAGEWIND_XLATE_VERIFY")) {  // (debugging) the cached translation is the one the translator gives
-        ShaderInfo *f = maxwell_translate(code, max_size, stage, key);
+        ShaderInfo *f = translate_stage(code, max_size, stage, key, hd.bin_size);
         ShaderInfo a = *si, b = *f;
         a.msl = b.msl = NULL;
         bool same = f->msl && !strcmp(f->msl, si->msl) && !memcmp(&a, &b, sizeof a);
@@ -559,7 +583,7 @@ ShaderInfo *vk_translate_cached(const uint8_t *code, size_t max_size, int stage,
         maxwell_free(f);
     }
     if (!si) {
-        si = maxwell_translate(code, max_size, stage, key);
+        si = translate_stage(code, max_size, stage, key, hd.bin_size);
         if (!si->msl) return si;
         hd.msl_len = (uint32_t)strlen(si->msl);
         xlate_store(h, &hd, si);

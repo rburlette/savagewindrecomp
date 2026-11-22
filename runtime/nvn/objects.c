@@ -1,5 +1,6 @@
 // NVN objects, builders, and state objects (everything except command recording).
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "../framepace.h"
@@ -8,6 +9,10 @@
 #include "../platform.h"
 #include "../prof.h"
 #include "../perfmon.h"
+#include "../pc_vr.h"
+#include "../pc_vr_pace.h"
+#include "../pc_vr_frame_trace.h"
+#include "../xr/xr_runtime.h"
 #include "nvn.h"
 #include "output_scale.h"  // (dynamic_res_tick: Video > Advanced > Dynamic resolution)
 
@@ -170,7 +175,7 @@ bool nvn_timeline(void) {
 // At most QUEUE_AHEAD presents wait in the queue (SAVAGEWIND_QUEUE_AHEAD, default 1): a guest further ahead waits.
 // SAVAGEWIND_ASYNC_EXEC=0: everything runs on the calling thread (as before).
 enum { QOP_EXEC, QOP_FENCE, QOP_PRESENT, QOP_TEXTURE_FINALIZE, QOP_SYNC_FREE };
-typedef struct { int op; uint64_t a; void *p; } QOp;
+typedef struct { int op; uint64_t a; void *p; NvnPresent present; } QOp;
 #define QCAP 4096
 static QOp g_q[QCAP];
 static uint64_t g_q_done, g_q_put;  // operations run / queued (operation k, from 1, is done once g_q_done >= k)
@@ -208,14 +213,17 @@ static void frame_split_log(void) {
 
 static void qop_run(const QOp *o) {
     switch (o->op) {
-    case QOP_EXEC:
+    case QOP_EXEC: {
         if (frame_split()) g_fs_x0 = plat_now_ns();
+        const uint64_t trace_began_ns = pc_vr_frame_trace_on() ? plat_now_ns() : 0;  // (PC VR: the late-frame trace)
         backend_execute(o->a);
+        pc_vr_frame_trace_executed(trace_began_ns);
         if (frame_split()) g_fs_x1 = plat_now_ns();
         break;
+    }
     case QOP_FENCE: { NvnSync *s = o->p; s->seq = renderer_fence_seq(); s->signaled = 1; break; }
     case QOP_PRESENT:
-        backend_present(o->p);
+        backend_present(&o->present);
         if (frame_split()) frame_split_log();
         break;
     case QOP_TEXTURE_FINALIZE: backend_texture_destroyed(o->p); ((NvnTexture *)o->p)->finalized = true; break;
@@ -265,17 +273,22 @@ static void queue_start(void) {
     pthread_t t;
     pthread_create(&t, NULL, queue_thread, NULL);
 }
-static uint64_t queue_put(int op, uint64_t a, void *p) {
+static uint64_t queue_put_present(int op, uint64_t argument, void *pointer, const NvnPresent *present) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, queue_start);
     pthread_mutex_lock(&g_q_lock);
     queue_block(q_room, op == QOP_PRESENT);
-    g_q[g_q_put % QCAP] = (QOp){op, a, p};
+    QOp *slot = &g_q[g_q_put % QCAP];
+    *slot = (QOp){.op = op, .a = argument, .p = pointer};
+    if (present) slot->present = *present;
     uint64_t k = ++g_q_put;
     if (op == QOP_PRESENT) g_q_presents++;
     pthread_cond_signal(&g_q_work);
     pthread_mutex_unlock(&g_q_lock);
     return k;
+}
+static uint64_t queue_put(int op, uint64_t a, void *p) {
+    return queue_put_present(op, a, p, NULL);
 }
 
 // until the queue has run operation k (0: nothing to wait for; ~0: everything queued so far)
@@ -294,6 +307,7 @@ NVN(nvnQueueSubmitCommands) {
     const uint64_t *handles = AP(2);
     TL("submit %d lists (lr %llx)", n, (unsigned long long)c->x[30]);
     if (frame_split()) g_fs_submit = plat_now_ns();
+    pc_vr_frame_trace_submitted();  // (PC VR: the late-frame trace)
     if (async_exec()) {
         for (int i = 0; i < n; i++) queue_put(QOP_EXEC, handles[i], NULL);
         return;
@@ -362,6 +376,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
        (unsigned long long)vk_completed_seq(), (unsigned long long)c->x[30]);
     // the queue first: up to the fence that sets it (a fence inside a command list: everything submitted so far)
     if (frame_split() && s->ticket) g_fs_sync0 = plat_now_ns();
+    pc_vr_frame_trace_sync(false);  // (PC VR: the late-frame trace)
     if (async_exec()) queue_wait(flush || whole || s->in_list ? ~0ull : s->ticket);
     if (host_work()) kernel_host_work_begin();
     if (flush) renderer_flush();
@@ -369,6 +384,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     else renderer_wait_seq(s->seq);  // only the submission that holds this fence
     if (host_work()) kernel_host_work_end();
     if (frame_split() && s->ticket) g_fs_sync1 = plat_now_ns();
+    pc_vr_frame_trace_sync(true);
     TL("syncwait done");
     RET(0);
 }
@@ -1207,6 +1223,13 @@ static void present_pace(int interval) {
     static int cap = -1;
     static uint64_t last;
     if (cap < 0) cap = getenv("SAVAGEWIND_FPS_CAP") ? atoi(getenv("SAVAGEWIND_FPS_CAP")) : 60;
+    PcVrPacedFrame paced;  // PC VR on the headset's grid (pc_vr_pace.h): its wait in place of the one below
+    if (pc_vr_pace_frame(framepace_on() ? framepace_period_ns() : 0, &paced)) {
+        g_pace_sleep_ns += paced.slept_ns;
+        last = paced.started_ns;
+        framepace_presented(paced.started_ns, paced.on_grid);
+        return;
+    }
     uint64_t period;
     if (framepace_on()) period = framepace_period_ns();
     else {
@@ -1227,31 +1250,48 @@ NVN(nvnQueuePresentTexture) {
     SW_ZONE("nvnQueuePresentTexture");
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+    NvnPresent image = {0};
+    if (i >= 0 && i < w->num) image = nvn_present_snapshot(HOST(NvnTexture, w->textures[i]), w->crop);
+    // This is a CPU game-produced present identity, not a simulation tick or
+    // completed GPU frame. Carry it through the queued snapshot for a future
+    // producer; this CPU wake remains provisional until offer-before-notify.
+    // Re-presentation never wakes the XR frame owner.
+    static _Atomic uint64_t xr_game_present;
+    if (i >= 0 && i < w->num) {
+        image.game_present_id = atomic_fetch_add(&xr_game_present, 1) + 1;
+        xr_runtime_notify_game_present(image.game_present_id);
+    }
     static int logged = -1;
     if (logged != w->interval) { logged = w->interval; LOG("[nvn] window present interval %d\n", w->interval); }
     TL("present (pace)");
-    present_pace(w->interval);
+    const bool pace_after = pc_vr_pace_on();  // (pc_vr_pace.h: the wait comes after the present is handed on)
+    if (!pace_after) present_pace(w->interval);
     if (frame_split()) g_fs_pace = plat_now_ns();
     perfmon_frame();
     {   // Video > Advanced > Dynamic resolution: the scene's size or the upscaler's factor follows the frame rate
         // (nvn/output_scale.c). With frame generation on, the presented rate (generated frames included) is what it
         // holds; frame generation itself is left alone unless it has no net gain.
         static PerfStats ps;
-        perfmon_snapshot(&ps);
+        // (PC VR: only while the Dynamic mode is in use. The first snapshot starts a thread that polls the graphics
+        // card's and the firmware's sensors twice a second for the rest of the run, and no frames are generated.)
+        if (!pc_vr_enabled() || dynamic_res_active()) perfmon_snapshot(&ps);
         // (fps_generated counts the frames made in the last second: a steadier signal than g_fg_active, which is
         // just whether the last present was a generated one)
         dynamic_res_tick(ps.fps, ps.fps_generated, ps.fps_generated > 0);
     }
+    pc_vr_frame_trace_queued(image.game_present_id);  // (PC VR: the late-frame trace)
     TL("present (backend)");
     if (async_exec()) {
-        if (i >= 0 && i < w->num) queue_put(QOP_PRESENT, 0, HOST(NvnTexture, w->textures[i]));
+        if (image.texture) queue_put_present(QOP_PRESENT, 0, NULL, &image);
         TL("present queued");
+        if (pace_after) present_pace(w->interval);
         return;
     }
     if (host_work()) kernel_host_work_begin();
-    if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
+    if (image.texture) backend_present(&image);
     if (host_work()) kernel_host_work_end();
     TL("presented");
+    if (pace_after) present_pace(w->interval);
 }
 
 // ================================================================== small state objects

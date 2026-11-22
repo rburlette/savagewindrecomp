@@ -28,6 +28,10 @@ void color_preset_apply(int i);  // its slider values into g_settings (the LUT s
 // saturation: 1 = as is, 0 = grey; lut_strength 0..1 (0: no LUT).
 typedef struct { float gain[3], contrast, saturation, lut_strength; } ColorGrade;
 bool color_grade_get(ColorGrade *g);
+// PC VR's live A/B keys (hle/input.c), the settings staying as they are: ';' the grade off until pressed again; '''
+// the sliders from the settings' own through each preset and back (the LUT as set).
+void color_grade_toggle_live(void);
+void color_grade_cycle_live(void);
 
 // The LUTs offered: the shipped ones first (their own names), then the player's (file name without extension),
 // rescanned on each call. Index 0 is "None". The setting stores color_lut_id().

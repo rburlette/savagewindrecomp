@@ -123,6 +123,14 @@ static bool link_position(float p[3]) {
     return p[0] != 0 || p[1] != 0 || p[2] != 0;
 }
 
+// (PC VR) The `pos` line for an eye shot's log entry (runtime/pc_vr.c); false before Link is in the world.
+bool control_place_line(char *line, size_t size) {
+    float p[3];
+    if (!link_position(p)) return false;
+    place_string(line, size, p);
+    return true;
+}
+
 // The place in savagewind.log: the `pos` line every PLACE_LOG_NS while Link moves (no line while he stands still: the
 // last one still says where), so a report's log says where its bug happened and `goto` takes the line back.
 // SAVAGEWIND_PLACE_LOG=0: no lines.
@@ -499,6 +507,8 @@ void control_game_init(void) {
     control_prof_init();
     control_input_init();
     control_mem_init();
+    extern void rt_data_watch_control_init(void);  // [pc-vr-audit] runtime/dispatch.c: `watch`
+    rt_data_watch_control_init();
     control_cells_init();
     control_fly_init();
     control_items_init();

@@ -61,11 +61,11 @@ GEN_SRC  := $(wildcard $(GEN)/*.c) $(wildcard $(GEN)/*/*.c)
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/obj/tools/gamelib_entry.o
 RT_SRC   := $(filter-out runtime/control.c runtime/control_game.c,$(wildcard runtime/*.c)) \
             runtime/control.c runtime/control_game.c $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
-            $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
+            $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) $(wildcard runtime/xr/*.c) runtime/platform/$(PLATFORM).c
 RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/platform/*.h) $(wildcard runtime/nvn/*.h) \
             $(wildcard runtime/nvn/maxwell/*.h) $(wildcard runtime/nvn/vulkan/*.h) \
             $(wildcard runtime/nvn/vulkan/exec/*.h) $(wildcard runtime/ui/*.h) \
-            $(wildcard runtime/services/*.h)
+            $(wildcard runtime/services/*.h) $(wildcard runtime/hle/*.h) $(wildcard runtime/xr/*.h)
 UI_SRC   := $(wildcard runtime/ui/*.mm)
 UI_OBJ   := $(patsubst runtime/%.mm,$(B)/rt/%.o,$(UI_SRC))
 IMGUI_OBJ := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.o $(B)/imgui/imgui_widgets.o \
@@ -186,10 +186,11 @@ TRANSLATOR_SRCS := runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 SPIRV_SRCS := runtime/nvn/vulkan/spirv.c
 TRANSLATOR_ID := $(shell cat $(TRANSLATOR_SRCS) | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 SPIRV_ID := $(shell cat $(SPIRV_SRCS) | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
+FIELD_CLOUD_ID := $(shell cat runtime/nvn/vulkan/vr_field_cloud_shader.h | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 SHADER_IDS := $(B)/inc/shader_ids.h
 # (compared with cat and test, not cmp: MSYS2 has no diffutils unless installed, and a rewrite at every make would
 # recompile the translator each time)
-$(shell mkdir -p $(B)/inc && printf '#define TRANSLATOR_ID "%s"\n#define SPIRV_ID "%s"\n' '$(TRANSLATOR_ID)' '$(SPIRV_ID)' > $(SHADER_IDS).new && \
+$(shell mkdir -p $(B)/inc && printf '#define TRANSLATOR_ID "%s"\n#define SPIRV_ID "%s"\n#define VR_FIELD_CLOUD_SHADER_ID "%s"\n' '$(TRANSLATOR_ID)' '$(SPIRV_ID)' '$(FIELD_CLOUD_ID)' > $(SHADER_IDS).new && \
         if [ "$$(cat $(SHADER_IDS) 2>/dev/null)" = "$$(cat $(SHADER_IDS).new)" ]; then rm -f $(SHADER_IDS).new; else mv -f $(SHADER_IDS).new $(SHADER_IDS); fi)
 
 # SW_SOURCE: the source this build is made from, in the log's first line (runtime/main.c): its commit and tree, and
@@ -201,6 +202,13 @@ SW_SOURCE := $(or $(shell git log -1 --format='commit %h, tree %t' 2>/dev/null),
 $(shell mkdir -p $(B) && [ "$$(cat $(B)/source_id 2>/dev/null)" = '$(SW_SOURCE)' ] || echo '$(SW_SOURCE)' > $(B)/source_id)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
+# Compiler depfiles track actual, transitive headers for runtime sources. Objects
+# made before depfiles were introduced need one rebuild to establish that record.
+# windres's Windows resource object does not use the C/C++ compiler.
+RT_DEP_OBJS := $(filter-out $(B)/rt/platform/windows_rc.o,$(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ))
+RT_DEPFILES := $(RT_DEP_OBJS:.o=.d)
+RT_MISSING_DEPS := $(filter-out $(patsubst %.d,%.o,$(wildcard $(RT_DEPFILES))),$(RT_DEP_OBJS))
+RT_DEPFLAGS = -MMD -MP -MF $(@:.o=.d).tmp -MT $@
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -isystem third_party -isystem third_party/stb $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -isystem third_party -Ithird_party/stb $(DEPINC)
 
@@ -268,7 +276,35 @@ XESS_INC := -Ithird_party/xess
 $(B)/rt/nvn/vulkan/xess.o: CXXFLAGS := $(XESS_INC) $(CXXFLAGS)
 $(B)/rt/nvn/vulkan/xess.o: third_party/xess/xess.h third_party/xess/xess_vk.h
 
+# Explicit build variant; use a separate B directory so desktop objects cannot
+# be reused with different feature flags. Khronos headers/loader are external
+# build dependencies, never fetched or installed by this Makefile.
+ifeq ($(OPENXR),1)
+ifeq ($(PLATFORM),macos)
+$(error OPENXR=1 is currently supported on Windows and Linux)
+endif
+ifeq ($(strip $(OPENXR_CFLAGS)),)
+$(error OPENXR=1 requires OPENXR_CFLAGS pointing to official Khronos headers)
+endif
+ifeq ($(strip $(OPENXR_LIBS)),)
+$(error OPENXR=1 requires OPENXR_LIBS for the official Khronos loader)
+endif
+RTFLAGS += -DSAVAGEWIND_WITH_OPENXR=1 $(OPENXR_CFLAGS)
+LDFLAGS += $(OPENXR_LIBS)
+endif
+# PROFILE_PDB=1 (Windows): CodeView debug information and a PDB beside the executable, for profilers that read PDB
+# rather than DWARF (Nsight Systems, Windows Performance Analyzer). Its own build folder (B=...): the objects differ.
+ifeq ($(PROFILE_PDB),1)
+RTFLAGS += -gcodeview
+CXXFLAGS += -gcodeview
+LDFLAGS += -Wl,--pdb=$(B)/savagewind.pdb
+endif
+
 all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (GEN_SRC is a space when there is no generated/)
+
+-include $(wildcard $(RT_DEPFILES))
+.PHONY: force-rt-deps
+$(RT_MISSING_DEPS): force-rt-deps
 
 $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h  # (cpu.h includes them)
 	@mkdir -p $(dir $@)
@@ -278,8 +314,8 @@ $(B)/obj/layout.o: runtime/gamelib.h
 $(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) Makefile  # (the id: the flags are in here too)
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -c $< -o $@
-$(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o: $(SHADER_IDS)
-$(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o: RTFLAGS += -include $(SHADER_IDS)
+$(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o $(B)/rt/nvn/vulkan/shaders.o: $(SHADER_IDS)
+$(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o $(B)/rt/nvn/vulkan/shaders.o: RTFLAGS += -include $(SHADER_IDS)
 $(B)/rt/main.o: $(B)/source_id
 $(B)/rt/main.o: RTFLAGS += -DSW_SOURCE='"$(SW_SOURCE)"'
 $(B)/rt/gamelib.o: $(GAMELIB_SRCS) Makefile
@@ -292,6 +328,8 @@ $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntim
 
 # The profiler's Windows sampler guards its stack walks with SEH (__try).
 $(B)/rt/prof_sampler.o: RTFLAGS += -fms-extensions
+# PC VR: the stall sampler guards its stack walks the same way.
+$(B)/rt/pc_vr_stall_sampler.o: RTFLAGS += -fms-extensions
 # Windows guarded memory scans use SEH.
 $(B)/rt/memscan_os.o: RTFLAGS += -fms-extensions
 
@@ -299,7 +337,8 @@ $(B)/rt/control_places.o: runtime/control_places_data.inc  # (the generated tabl
 
 $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -c $< -o $@
+	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 # SMAA (third_party/smaa, MIT): the reference shader as a C string for runtime/nvn/smaa_data.c (both backends build
 # their passes from it); the non-ASCII bytes in its comments become '?', and its CRLF line ends plain LF (a CR left in
@@ -310,13 +349,15 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
 
-$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(OSFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(OSFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
-$(B)/rt/%.o: runtime/%.m $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.m
 	@mkdir -p $(dir $@)
-	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -fobjc-arc -c $< -o $@
+	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -fobjc-arc $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
 # place gets running copies killed by macOS (code signature of the changed pages). The temp file keeps the real name
@@ -333,9 +374,10 @@ $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	echo $(GAMELIB_ID) > $@.id
 
 $(B)/rt/ui/i18n.o: $(wildcard runtime/ui/i18n/*.inc) runtime/ui/i18n.h
-$(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
+$(B)/rt/ui/%.o: runtime/ui/%.mm
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(UIFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(UIFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 $(B)/imgui/%.o: $(IMGUI)/%.cpp
 	@mkdir -p $(dir $@)
@@ -622,7 +664,7 @@ test-prof: $(B)/test_prof $(B)/test_prof_lifecycle
 .PHONY: test-prof
 
 # The input test includes input.c; discard its unused HLE functions and their runtime dependencies.
-$(B)/test_input_focus: tools/test_input_focus.c tools/test_pointer_disabled.h runtime/hle/input.c $(RT_HDRS)
+$(B)/test_input_focus: tools/test_input_focus.c tools/test_pointer_disabled.h tools/test_input_vr.h runtime/hle/input.c $(RT_HDRS)
 	@mkdir -p $(B)
 	$(CC) -O1 -ffunction-sections -fdata-sections $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_input_focus.c \
 	    $(if $(filter macos,$(PLATFORM)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections) \
@@ -637,7 +679,7 @@ test-input-focus: $(B)/test_input_focus
 # two Controls switches saved and loaded, the turns (motion.c), the apparatus heartbeat, the drag (no game files)
 TEST_LD := $(if $(filter macos,$(PLATFORM)),-Wl$(comma)-dead_strip,-Wl$(comma)--gc-sections) \
            $(if $(filter macos,$(PLATFORM)),-L$(SDL)/lib,$(if $(DEPS),-L$(DEPS)/lib))
-$(B)/test_gyro_bindings: tools/test_gyro_bindings.c tools/test_pointer_disabled.h runtime/hle/input.c runtime/hle/bindings.c $(RT_HDRS)
+$(B)/test_gyro_bindings: tools/test_gyro_bindings.c tools/test_pointer_disabled.h tools/test_input_vr.h runtime/hle/input.c runtime/hle/bindings.c $(RT_HDRS)
 	@mkdir -p $(B)
 	$(CC) -O1 -ffunction-sections -fdata-sections $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_gyro_bindings.c \
 	    runtime/hle/bindings.c $(TEST_LD) -lSDL3 -lm

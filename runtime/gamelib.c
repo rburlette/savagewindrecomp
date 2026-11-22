@@ -103,6 +103,24 @@ static bool take_sites(const GameLibTables *t) {
         }
         *(uint64_t *)((char *)&g_site + want[i].off) = t->sites[k].addr;
     }
+    // PC VR's group: all there, or none (tools/game_sites.py left it out for this version: PC VR stays off).
+    static const struct {
+        const char *name;
+        size_t off;
+    } pc_vr[] = {
+#define GAME_SITE_ENTRY(n) {#n, offsetof(GameSites, n)},
+        GAME_SITES_PC_VR(GAME_SITE_ENTRY)
+#undef GAME_SITE_ENTRY
+    };
+    size_t found = 0;
+    for (size_t i = 0; i < sizeof pc_vr / sizeof pc_vr[0]; i++) {
+        uint32_t k = 0;
+        while (k < *t->nsites && strcmp(t->sites[k].name, pc_vr[i].name)) k++;
+        *(uint64_t *)((char *)&g_site + pc_vr[i].off) = k < *t->nsites ? t->sites[k].addr : 0;
+        found += k < *t->nsites;
+    }
+    if (found != sizeof pc_vr / sizeof pc_vr[0])
+        for (size_t i = 0; i < sizeof pc_vr / sizeof pc_vr[0]; i++) *(uint64_t *)((char *)&g_site + pc_vr[i].off) = 0;
     g_game_version = t->version;
     return true;
 }

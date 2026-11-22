@@ -12,6 +12,7 @@
 #include "../runtime/hle/input.c"
 uint64_t quick_drop_action_filter_buttons(uint64_t b) { return b; }
 #include "test_pointer_disabled.h"
+#include "test_input_vr.h"
 int bind_pad_family(int type, int vendor, int product, const char *name, bool first) { (void)type, (void)vendor, (void)product, (void)name, (void)first; return 0; }
 
 GameSites g_site;
@@ -60,11 +61,13 @@ uint64_t act_scan_pad(uint64_t b, uint32_t host) { (void)b; (void)host; return 0
 uint64_t act_gameplay_buttons(uint64_t raw, int (*held)(int), uint32_t host) { (void)held; (void)host; return raw; }
 void act_publish(uint64_t keys, uint64_t pads) { (void)keys; (void)pads; }
 void act_poll(bool live) { (void)live; }
+bool act_cycle_live(void) { return false; }
 void motion_script(float p, float r, float ps, float ys) { (void)p; (void)r; (void)ps; (void)ys; unexpected_helper(); }
 // (the control endpoint, the virtual gyro and the DSU poll: off here)
 bool control_enabled(void) { return false; }
 bool control_fly_toggle(void) { unexpected_helper(); }
 void control_fly_wheel(float notches) { (void)notches; unexpected_helper(); }
+void pc_vr_frame_trace_user_mark(void) {}  // (PC VR: the fly button's press also marks the late-frame trace)
 // (the free camera, hle/freecam.c: off here)
 bool freecam_active(void) { return false; }
 void freecam_toggle(void) { abort(); }
@@ -153,7 +156,28 @@ static void controls(SDL_Joystick *joy, bool held) {
     pump();
 }
 
+static void test_quicksave_key_bindings(void) {
+    SDL_Scancode keys[QUICKSAVE_B + 1];
+    g_bind_key[BIND_PLUS] = SDL_SCANCODE_TAB;
+    g_bind_key[BIND_R] = SDL_SCANCODE_R;
+    g_bind_key[BIND_LS_UP] = SDL_SCANCODE_W;
+    g_bind_key[BIND_B] = SDL_SCANCODE_LSHIFT;
+    g_bind_key2[BIND_A] = SDL_SCANCODE_RETURN;
+    assert(quicksave_resolve_keys(keys) && keys[QUICKSAVE_A] == SDL_SCANCODE_RETURN);
+    g_bind_key[BIND_A] = SDL_SCANCODE_E;
+    assert(quicksave_resolve_keys(keys) && keys[QUICKSAVE_A] == SDL_SCANCODE_E);
+    g_bind_key2[BIND_X] = SDL_SCANCODE_E;
+    assert(quicksave_resolve_keys(keys) && keys[QUICKSAVE_A] == SDL_SCANCODE_RETURN);
+    g_bind_key2[BIND_A] = SDL_SCANCODE_F5;
+    assert(!quicksave_resolve_keys(keys));
+    g_bind_key2[BIND_A] = BIND_MOUSE + SDL_BUTTON_LEFT;
+    assert(!quicksave_resolve_keys(keys));
+    memset(g_bind_key, 0, sizeof g_bind_key);
+    memset(g_bind_key2, 0, sizeof g_bind_key2);
+}
+
 int main(void) {
+    test_quicksave_key_bindings();
     // Force SDL to deliver background events: the runtime must enforce its own focus policy.
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     assert(SDL_Init(SDL_INIT_GAMEPAD));
@@ -182,6 +206,26 @@ int main(void) {
     focus(true);
     controls(joy, true);
     sample(held, true);
+
+    // In VR the headset keeps the physical controller when the desktop window loses focus.
+    test_vr_enabled = true;
+    SDL_Event selector_click = {.type = SDL_EVENT_MOUSE_BUTTON_DOWN};
+    selector_click.button.button = SDL_BUTTON_LEFT;
+    input_replace_mouse(true);
+    input_handle_event(&selector_click);
+    assert(input_replace_clicks() == 1 && !mouse_down[SDL_BUTTON_LEFT]);
+    input_replace_mouse(false);
+    selector_click.type = SDL_EVENT_MOUSE_BUTTON_UP;
+    input_handle_event(&selector_click);
+    assert(!input_replace_clicks() && !mouse_down[SDL_BUTTON_LEFT]);
+    focus(false);
+    sample(held, true);
+    controls(joy, false);
+    sample(0, false);
+    controls(joy, true);
+    sample(held, true);
+    focus(true);
+    test_vr_enabled = false;
 
     // Losing focus must release cached input even if no further controller event arrives.
     focus(false);
@@ -282,5 +326,4 @@ int main(void) {
     puts("input focus checks passed");
 }
 
-void photo_pad(uint32_t buttons) { (void)buttons; }
 uint64_t quick_replace_buttons(uint64_t b) { return b; }

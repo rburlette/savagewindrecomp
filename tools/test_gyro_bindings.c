@@ -9,6 +9,7 @@
 #include "../runtime/hle/input.c"
 uint64_t quick_drop_action_filter_buttons(uint64_t b) { return b; }
 #include "test_pointer_disabled.h"
+#include "test_input_vr.h"
 bool settings_steam_deck(void) { return false; }
 Settings g_settings;
 static int pitch,roll,yaw;static bool center,captured,paused,apparatus;
@@ -45,6 +46,7 @@ bool framepace_in_event(void){return false;}
 bool control_enabled(void){return false;}
 bool control_fly_toggle(void){abort();}
 void control_fly_wheel(float n){(void)n;abort();}
+void pc_vr_frame_trace_user_mark(void) {}  // (PC VR: the fly button's press also marks the late-frame trace)
 // (the free camera, hle/freecam.c: off here)
 bool freecam_active(void) { return false; }
 void freecam_toggle(void) { abort(); }

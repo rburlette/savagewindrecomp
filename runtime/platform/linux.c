@@ -37,6 +37,9 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     return true;
 }
 
+long plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, size_t max) { return -1; }  // (not tracked)
+int plat_any_written(uint64_t addr, uint64_t size) { return -1; }
+
 // Fresh zero pages over the whole window (the old ones are released at once).
 long plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, size_t max) { return -1; }  // (not tracked)
 int plat_any_written(uint64_t addr, uint64_t size) { return -1; }
@@ -426,7 +429,8 @@ bool plat_file_flush(const char *path) {
 
 // End the process at once, skipping the library teardown: as on Windows, the GPU driver's threads crashed in exit()
 // while the game's threads still submitted work.
-void plat_terminate(void) { _exit(0); }
+void plat_terminate_status(int status) { _exit(status); }
+void plat_terminate(void) { plat_terminate_status(0); }
 
 bool plat_guest_sparse_heap_enabled(void) { return false; }
 

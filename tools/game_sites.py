@@ -333,6 +333,212 @@ SITES = [
     # the pouch taking arrows off for the player's bow (tools/patches.py _remove_arrows; Accessibility > Infinite arrows)
     Site('pouch_remove_arrows', 'code', 'd101c3ff a9017bfd a9026ffc a90367fa a9045ff8 a90557f6 a9064ff4 910043fd '
          '90000008/9f00001f aa0003f3 f9400108/ffc003ff aa0103e0', 0),
+    # PC VR (runtime/pc_vr.c, runtime/hle/pc_vr_head_look.c, pc_vr_projection_trace.c, labo_camera_trace.c,
+    # labo_sensor_trace.c), one optional group: without all of them PC VR stays off.
+    # The camera matrix builder the head look composes into, and the return addresses of its base, layer and eye calls;
+    # the projection builder and device and their callers; a render layer's begin (its end, which no code calls
+    # directly, follows it at +0x58: runtime/hle/pc_vr_projection_trace.c); the Labo VR object's switch, the two managers the
+    # Options screen notifies after it, and the transition calls PC VR redirects; the sensor and mask call returns;
+    # the eight camera types' update entries (their internal call sites keep their offsets); the camera classes'
+    # vtables; the Labo manager's slot and the UI root (automation)
+    Site('pcvr_matrix_builder', 'code', '2d470801 2d480c00 1e232020 2d491404 1e240440 1e250400 54000000/ff00001f '
+         '1e233823', 0),
+    Site('pcvr_base_caller', 'code', 'f8408428 f9401108 d63f0100 aa1303e0 f9400bf3 a8c27bfd 14000000/fc000000', 3),
+    Site('pcvr_layer_base_caller', 'code', '14000000/fc000000 f94102c8 bd437900 bd437d01 bd437102 bd437503 1e222800 '
+         '1e232821', 0),
+    Site('pcvr_eye_caller', 'code', 'f9010ed8 14000000/fc000000 3600001a/fff8001f 79401308 910d22d9 7906a2c8 3cc0c300 '
+         '3d803140', 0),
+    Site('pcvr_proj_builder', 'code', 'bd409800 1e2c1003 52b7f008 2d558801 1e202800 2d569404 b900043f f800c03f', 0),
+    Site('pcvr_proj_device', 'code', '3dc00042 51000468 7100111f 3d800022 3dc00444 3d800424 3dc00840 3d800820', 0),
+    Site('pcvr_proj_build_caller', 'code', '52802008 79001268 f9400268 91013261 91003262 b9408e63 aa1303e0 f9403108', 0),
+    Site('pcvr_proj_device_caller', 'code', '3900267f f9400bf3 a8c27bfd d65f03c0 39402668 35000008/ff00001f '
+         '14000000/fc000000', 0),
+    Site('pcvr_proj_root_return', 'code', '910006e8 92407d17 6b08027f 54000001/ff00001f b944ca88 34000008/ff00001f '
+         'b9403297 34000017/ff00001f', 0),
+    Site('pcvr_proj_sibling_return', 'code', '14000000/fc000000 f94102d7 910f22e0 f941e6e8 f9400d08 d63f0100 f94102c8 '
+         '90000009/9f00001f', 0),
+    Site('pcvr_render_begin', 'code', 'a9be7bfd f9000bf3 910003fd f9400008 f9402433 b9400021 f9403d08 d63f0100', 0),
+    Site('pcvr_render_begin_caller', 'code', '52810408 9b2856c9 b9800928 34000008/ff00001f f9400935 d37df116 f9400288 '
+         'aa1403e0', 0),
+    Site('labo_set_vr', 'code', '52800028 390c0001 390c0408 d65f03c0', 0),
+    Site('labo_end_vr_call', 'code', 'd65f03c0 94000000/fc000000 94000000/fc000000 a8c17bfd 14000000/fc000000', 2),
+    Site('labo_enable_rec_call', 'code', 'd65f03c0 94000000/fc000000 94000000/fc000000 a8c17bfd 14000000/fc000000', 3),
+    Site('labo_vr_notify_1', 'code', 'a9bd7bfd a90157f6 a9024ff4 910003fd 90000008/9f00001f 2a1f03f5 '
+         'f9400108/ffc003ff 12000013 f9400116 b9402ac8 6b15011f f9401ac9 1a9f82a8 f8685934 94000000/fc000000 '
+         'b4000014/ff00001f f9400288 aa0003e1 aa1403e0 f9400908 d63f0100 36000000/fff8001f 710076bf', 0),
+    Site('labo_vr_notify_2', 'code', 'a9bd7bfd a90157f6 a9024ff4 910003fd 90000008/9f00001f 2a1f03f5 '
+         'f9400108/ffc003ff 12000013 f9400116 b9402ac8 6b15011f f9401ac9 1a9f82a8 f8685934 94000000/fc000000 '
+         'b4000014/ff00001f f9400288 aa0003e1 aa1403e0 f9400908 d63f0100 36000000/fff8001f f9400288', 0),
+    Site('labo_sensor_ret', 'code', '7100041f b9000280 5400000b/ff00001f 2d4607e0 f9000e7f 2d470fe2 b900227f 2d434bf1', 0),
+    Site('labo_track_start_ret', 'code', '394002a8 121f1914 f941c260 71000a9f 1a9f17e1 94000000/fc000000 71000a9f '
+         '54000001/ff00001f', 0),
+    Site('pcvr_cam_update_0', 'code', 'd104c3ff 6d0a3bef 6d0b33ed 6d0c2beb 6d0d23e9 a90e7bfd a90f67fc a9105ff8 '
+         'a91157f6 a9124ff4 910383fd 91008015', 0),
+    Site('pcvr_cam_update_1', 'code', 'd104c3ff 6d093bef f90073fc 6d0a33ed 6d0b2beb 6d0c23e9 a90d7bfd a90f67fa', 0),
+    Site('pcvr_cam_update_2', 'code', 'd10203ff 6d032beb 6d0423e9 a9057bfd a90657f6 a9074ff4 910143fd aa0003f3', 0),
+    Site('pcvr_cam_update_3', 'code', 'd10343ff 6d043bef 6d0533ed 6d062beb 6d0723e9 a9087bfd a90967fa a90a5ff8 '
+         'a90b57f6 a90c4ff4 910203fd 91008015 aa0003f3 aa1503e0 94000000/fc000000 b4000000/ff00001f aa0003f4 '
+         '94000000/fc000000 b5000000/ff00001f 6d4723e9 6d462beb 6d4533ed 6d443bef a94c4ff4 a94b57f6 a94a5ff8 a94967fa '
+         'a9487bfd 910343ff d65f03c0 bd486280 aa0003f6 910093e0 bd486e81 9100c3e1 1e213800 bd486682 bd487283 bd486a84 '
+         'bd487685 1e233841 2d0607e0 1e253880 bd003be0 94000000/fc000000 f84243e8 910043e0 a90123ff b9402fe8 b90023e8 '
+         '94000000/fc000000 94000000/fc000000 1e20400a', 0),
+    Site('pcvr_cam_update_4', 'code', 'd10343ff 6d043bef 6d0533ed 6d062beb 6d0723e9 a9087bfd a90967fa a90a5ff8 '
+         'a90b57f6 a90c4ff4 910203fd 91008015 aa0003f3 aa1503e0 94000000/fc000000 b4000000/ff00001f aa0003f4 '
+         '94000000/fc000000 b5000000/ff00001f 6d4723e9 6d462beb 6d4533ed 6d443bef a94c4ff4 a94b57f6 a94a5ff8 a94967fa '
+         'a9487bfd 910343ff d65f03c0 bd486280 aa0003f6 910093e0 bd486e81 9100c3e1 1e213800 bd486682 bd487283 bd486a84 '
+         'bd487685 1e233841 2d0607e0 1e253880 bd003be0 94000000/fc000000 f84243e8 910043e0 a90123ff b9402fe8 b90023e8 '
+         '94000000/fc000000 94000000/fc000000 1e204009', 0),
+    Site('pcvr_cam_update_5', 'code', 'd10243ff 6d023bef 6d0333ed 6d042beb 6d0523e9 a9067bfd a90757f6 a9084ff4 '
+         '910183fd 91008015', 0),
+    Site('pcvr_cam_update_6', 'code', 'd10243ff fd0013ec 6d032beb 6d0423e9 a9057bfd a9065ff8 a90757f6 a9084ff4 '
+         '910143fd 91008015', 0),
+    Site('pcvr_cam_update_7', 'code', 'd102c3ff fd002bea 6d0623e9 a9077bfd a9085ff8 a90957f6 a90a4ff4 9101c3fd '
+         'aa0003f3', 0),
+    Site('pcvr_actor_vtable', 'ref', '90000008/9f00001f 91000108/ffc003ff f9000268 91152109 9115c10a 91166108 '
+         'f9042268 52a7f008', 1),
+    Site('pcvr_eye_vtable', 'ref', '90000008/9f00001f 91000108/ffc003ff f9000268 b9400ac8 f94002c9 f9001e69 b9004268 '
+         'f94002a8', 1),
+    Site('pcvr_proj_vtable', 'ref', '90000009/9f00001f 91000129/ffc003ff f80b401f b9400108 f9000009 bd009400 b9008c08 '
+         'd2906bc8', 1),
+    Site('pcvr_base_vtable', 'ref', '90000009/9f00001f 91000129/ffc003ff b9004268 52a7f008 f9000269 f8054268 aa1303e8 '
+         '9100e129', 1),
+    Site('labo_manager_slot', 'ref', '90000008/9f00001f 52829989 f9400108/ffc003ff f9400108 f941bd08 f9400d08 '
+         '8b090108 885f7d09', 2),
+    Site('automation_screen_root', 'ref', '90000008/9f00001f aa0003f3 f9400108/ffc003ff f9400108 b9402909 f9401908 '
+         '7101393f 52804e09 9a9f8129 f8696914 94000000/fc000000 b4000014/ff00001f f9400288 aa0003e1 aa1403e0 f9400908 '
+         'd63f0100 36000000/fff8001f aa1403e0 94000000/fc000000 37000000/fff8001f aa1403e0', 2),
+    # PC VR's world-tied HUD (tools/patches.py _hud_point; runtime/pc_vr_hud.c): the HUD's world-to-screen helper's last
+    # call, to the Labo VR object's adjustment of the position it writes
+    Site('pcvr_hud_point', 'code', 'f941c100 94000000/fc000000 fd4013e8 a9454ff4 a94457f6 a9437bfd 910183ff d65f03c0', 1),
+    # PC VR's eye masks from the headset (tools/patches.py _lens_draw; runtime/nvn/vulkan/vr_lens_mask.h): the eye
+    # scenes' screen-quad draw. While the Labo display's mask flag is set (the graphics object + 0x35d8), it draws the
+    # lens-shaped 48-index polygon (the object + 0x858) instead of the full-screen triangle (+ 0x478): the bl after
+    # that choice and the load of its index count
+    Site('pcvr_lens_draw', 'code', '38696909 9121610a 9111e108 7100013f 9a8a0100 b9400c02 94000000/fc000000 6d5223e9',
+         6),
+    # ... and Labo's depth mask, drawn in each eye before its scene while the flag is set: the area outside the lens
+    # (the object + 0x8b8, its index count at + 0x8c4) at the nearest depth, so the scene's geometry skips it
+    Site('pcvr_lens_depth_draw', 'code', 'f94002a8 aa1303e1 52800023 b948c502 9122e100 94000000/fc000000 17ffffca '
+         'a9be7bfd', 5),
+    # PC VR's HUD by screen (tools/patches.py _screen_draw; runtime/pc_vr_hud.c): the UI screen manager's draw loop calls
+    # each screen of a draw unit through its vtable (+0x58): the blr, with x0 the screen and w22 its id
+    Site('pcvr_screen_draw', 'code', 'd63f0100 910006e8 110006d6 92407d17 6b0802bf 54000001/ff00001f a9444ff4 f9400bf9', 0),
+    # nn::ui2d::Pane::Draw (tools/patches.py _pane_draw): its call of the pane's own DrawSelf (vtable +0xb0), x0 the pane
+    Site('pcvr_pane_draw', 'code', 'f94002a8 aa1503e0 aa1403e1 aa1303e2 f9405908 d63f0100 394162a8 39416aa9', 5),
+    # ... and its call of each child's Draw (vtable +0xa8), x0 the child: panes that override Draw (capture panes, a
+    # speech balloon's background) draw without going through DrawSelf
+    Site('pcvr_pane_child_draw', 'code', 'f85f8ea8 aa1403e1 aa1503e0 aa1303e2 f9405508 d63f0100 f9400ab5 eb1602bf', 5),
+    # A speech balloon's positioning (tools/patches.py _balloon_point): the store of its pane's x, after projecting the NPC's
+    # head with the same camera calls as the HUD's helper (the camera-space point at sp + 0x1c)
+    Site('pcvr_balloon_point', 'code', 'f9400a68 aa1403e0 bd003100 39416109 bd003508 b900391f 321c0129 39016109', 2),
+    # PC VR's markers by the game's own store (tools/patches.py _marker_store; runtime/pc_vr_hud.c, the marker links),
+    # all in the world screen's own code. Eight callers of the HUD's world-to-screen helper copy its result into a pane
+    # themselves, right after the call: the store of the pane's +0x38 (the pane in x20, x21 or x22), between the load
+    # of the result from the caller's stack and the stores of the pane's translate
+    Site('pcvr_marker_store_1', 'code', 'b9003abf 394162a8 321c0108 bd0036a1 bd0032a0 390162a8 f9400368 '
+         '14000000/fc000000', 0),
+    Site('pcvr_marker_store_2', 'code', 'b9003a9f 39416288 3200e108 2d060680 39016288 14000000/fc000000 aa1f03e0 '
+         'f94007e9', 0),
+    Site('pcvr_marker_store_3', 'code', 'b9003a9f 39416288 321c0108 2d060680 39016288 aa1303e0 94000000/fc000000 '
+         '14000000/fc000000 f95f6e68', 0),
+    Site('pcvr_marker_store_4', 'code', 'b9003a9f 39416288 321c0108 2d060680 39016288 aa1303e0 94000000/fc000000 '
+         '14000000/fc000000 2f00e400', 0),
+    Site('pcvr_marker_store_5', 'code', 'b9003abf 394162a8 321c0108 2d0606a0 390162a8 f95f6e68 f9401108 f9400d08', 0),
+    Site('pcvr_marker_store_6', 'code', 'b9003a9f 39416288 321c0108 bd003681 bd003280 39016288 f95f6e68 f9401108', 0),
+    Site('pcvr_marker_store_7', 'code', 'b9003adf 394162c8 321c0108 2d0606c0 390162c8 14000000/fc000000 '
+         '34000016/ff00001f 14000000/fc000000', 0),
+    Site('pcvr_marker_store_8', 'code', 'b9003a9f 39416288 321c0108 bd003681 bd003280 39016288 f95f9a68 f9401108', 0),
+    # ... the caller that hands the result to a component's set-position function (which writes the pane at
+    # [[component + 8] + 0x18]): that call, x0 the component and x1 the helper's output buffer
+    Site('pcvr_marker_component_call', 'code', '94000000/fc000000 f960de88 2d7e87a0 bc5fc3a2 2d451103 1e240826 '
+         '1f001860 2d460d01', 0),
+    # ... and a second wheel-like piece (its component in x20), whose flag in w25 says whether it follows Link at the
+    # helper's result (its output buffer at sp + 0x18) or is given a fixed HUD place: the flag's two assignments
+    Site('pcvr_marker_wheel_follow', 'code', '2a1f03f9 52801ff6 14000000/fc000000', 0),
+    Site('pcvr_marker_wheel_flat', 'code', '52800039 aa1803f7 0f056682 bc442ee0 1e283801 1e222020 5400000b/ff00001f '
+         '0f016682', 0),
+    # The rune target test's setup (tools/patches.py _rune_test; D078): its call of the Labo VR adjustment of the screen
+    # position it tests (x21 the test's entry, its constants block's address at +0x10; the position at x29 - 0x18)
+    # The UI's screen parallax (tools/patches.py _ui_parallax): the setter that stores it in a view and the views chained
+    # to it (+0x404), called by the Labo display's setup for its three UI views each frame
+    Site('pcvr_ui_parallax', 'code', 'bd040400 f9410400 b5000000/ff00001f d65f03c0', 0),
+    # PC VR's eye images by the game's own code (tools/patches.py _layer_draw; runtime/hle/pc_vr_render_trace.h). Every
+    # render layer is finished the same way: one function draws the layer's HDR scene into its finished image (and
+    # Labo's mask over it), another draws that image into its place in the final image. Each does it with one call of
+    # the screen-quad draw: these two calls
+    Site('pcvr_layer_final_draw', 'code', '94000000/fc000000 52a85408 f941c2c0 aa1503e1 1e270100 aa1403e2 aa1803e3 '
+         'aa1303e4', 0),
+    Site('pcvr_layer_placement_draw', 'code', '94000000/fc000000 aa1803fa b400001a/ff00001f 90000008/9f00001f aa1a03e1 '
+         'f9400108/ffc003ff f9400100 94000000/fc000000', 0),
+    # ... and the frame's display step, which draws the final image to the display: through the callback a display
+    # registers (Labo's lens pass; the blr x8) or, when there is none, with a plain copy (the bl)
+    Site('pcvr_display_lens_draw', 'code', 'd63f0100 910023e8 9101a100 94000000/fc000000 910023e0 94000000/fc000000 '
+         '910603e0 94000000/fc000000', 0),
+    Site('pcvr_display_copy_draw', 'code', '910563e2 94000000/fc000000 14000000/fc000000', 1),
+    Site('pcvr_rune_test', 'code', '94000000/fc000000 2d7d07a0 2d0227ea 910023e3 aa1503e0 2a1f03e2 2a1f03e4 52800025', 0),
+    # ... and the call of the test's draw function (1.9.0 0x700126fb68: x0 the manager, x1 the draw context, x2 the
+    # view), from its only caller 0x700126aa78: the test's screen-quad draws are recorded during it
+    Site('pcvr_rune_test_draw', 'code', '94000000/fc000000 aa1303e0 aa1403e1 2a1f03e2 94000000/fc000000 14000000/fc000000',
+         0),
+    # PC VR's head view for the game's visibility decisions (tools/patches.py _cull_matrix, _cull_fov;
+    # runtime/hle/pc_vr_cull_view.c; 1.9.0 only). The game builds a visibility view from a camera's matrix (the camera
+    # + 8) and its field of view after Labo VR's change of it (1.9.0 0x700126138c: s0 fovy, s1 aspect, x1 and x2
+    # where the changed pair goes), in three places:
+    # ... Labo's change itself, found on its own: the patches check their calls go there
+    Site('pcvr_labo_fov', 'code', '6dbd23e9 a9017bfd a9024ff4 910043fd 1e204028 1e2c1001 aa0203f3 aa0103f4 1e210800 '
+         '1e210909 94000000/fc000000 1e280800 1e291800 94000000/fc000000 1e202800', 0),
+    # ... the actor level-of-detail manager's update (1.9.0 0x70010bb1c8): `add x20, x0, #8`, the matrix its two view
+    # volumes are built from (the camera in x0, kept in x21), and its call of Labo's change
+    Site('pcvr_lod_cull_matrix', 'code', 'f94002a0 94000000/fc000000 b4000000/ff00001f aa1403e2 91002014 aa0003f5 '
+         '910e43e0 aa1403e1 94000000/fc000000 90000008/9f00001f d10013a1 f9400108/ffc003ff bd44bbe0 d10023a2 bd44bfe1 '
+         'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000', 4),
+    Site('pcvr_lod_cull_fov', 'code', 'f94002a0 94000000/fc000000 b4000000/ff00001f aa1403e2 91002014 aa0003f5 '
+         '910e43e0 aa1403e1 94000000/fc000000 90000008/9f00001f d10013a1 f9400108/ffc003ff bd44bbe0 d10023a2 bd44bfe1 '
+         'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000', 17),
+    # ... the visibility test (1.9.0 0x70010ec544, the camera kept in x20): its call of Labo's change and
+    # `add x1, x20, #8`, the matrix for its frustum. Its twin for the camera manager's second set (0x70010ec624) has
+    # the same words, so each pattern starts with the two words before its function: the end of the point wrapper
+    # (movi d0, #0; b) for the test, the twin's own wrapper (ldp s1, s2, [x0, #0x6c]; b) for the twin
+    Site('pcvr_vis_cull_fov', 'code', '2f00e400 14000000/fc000000 d10243ff fd002bea 6d0623e9 a9077bfd a9084ff4 9101c3fd '
+         '90000008/9f00001f 1e20402a 1e204008 bd407400 bd400101/ffc003ff 1e212000 5400000a/ff00001f 90000008/9f00001f '
+         'aa0003f4 1e204049 f9400108/ffc003ff aa0103f3 f9400100/ffc003ff 94000000/fc000000 f9400008 f9400108/ffc003ff '
+         'd63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 f9400108/ffc003ff '
+         'f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 91002281', 33),
+    Site('pcvr_vis_cull_matrix', 'code', '2f00e400 14000000/fc000000 d10243ff fd002bea 6d0623e9 a9077bfd a9084ff4 '
+         '9101c3fd 90000008/9f00001f 1e20402a 1e204008 bd407400 bd400101/ffc003ff 1e212000 5400000a/ff00001f '
+         '90000008/9f00001f aa0003f4 1e204049 f9400108/ffc003ff aa0103f3 f9400100/ffc003ff 94000000/fc000000 f9400008 '
+         'f9400108/ffc003ff d63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 '
+         'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 '
+         '91002281', 39),
+    Site('pcvr_vis2_cull_fov', 'code', '2d4d8801 14000000/fc000000 d10243ff fd002bea 6d0623e9 a9077bfd a9084ff4 9101c3fd '
+         '90000008/9f00001f 1e20402a 1e204008 bd407400 bd400101/ffc003ff 1e212000 5400000a/ff00001f 90000008/9f00001f '
+         'aa0003f4 1e204049 f9400108/ffc003ff aa0103f3 f9400100/ffc003ff 94000000/fc000000 f9400008 f9400108/ffc003ff '
+         'd63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 f9400108/ffc003ff '
+         'f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 91002281', 33),
+    Site('pcvr_vis2_cull_matrix', 'code', '2d4d8801 14000000/fc000000 d10243ff fd002bea 6d0623e9 a9077bfd a9084ff4 '
+         '9101c3fd 90000008/9f00001f 1e20402a 1e204008 bd407400 bd400101/ffc003ff 1e212000 5400000a/ff00001f '
+         '90000008/9f00001f aa0003f4 1e204049 f9400108/ffc003ff aa0103f3 f9400100/ffc003ff 94000000/fc000000 f9400008 '
+         'f9400108/ffc003ff d63f0100 90000008/9f00001f 1e204001 d10053a1 f9400108/ffc003ff bd407680 d10063a2 '
+         'f9400108/ffc003ff f9400100/ffc003ff 94000000/fc000000 910023e0 94000000/fc000000 2d7d03a1 1e204142 1e204123 '
+         '91002281', 39),
+    # ... the grass (tools/patches.py _grass_volume, _grass_matrix): the grass view object's update (1.9.0
+    # 0x700149056c) loading the layer record's culling volume, projection matrix and view matrix for the grass
+    Site('pcvr_grass_volume', 'code', '39066128 39402688 8b080e68 f9400d08 f9000128 bd403d00 1e202000', 3),
+    Site('pcvr_grass_projection', 'code', '3500001a/ff00001f f9430a68 9b385789 3dc00100 3d800920 3dc00500', 1),
+    Site('pcvr_grass_view', 'code', '3dc00d00 3d801520 f9430668 3dc00100 3d801920 3dc00500', 2),
+    # ... and the game's own view volume functions the runtime builds the grass's volume with, from the grass slot's
+    # builder (1.9.0 0x7001493110): a volume set from a view matrix (0x7000f8f780) then from a projection (0x7000f90cf4),
+    # and the volume copy (0x700101a468; an identical copy elsewhere makes its own pattern ambiguous)
+    Site('pcvr_volume_view', 'call', '52806a08 910022a1 9b28633b 9100f377 aa1703e0 94000000/fc000000 aa1703e0 aa1603e1 '
+         '94000000/fc000000 3cc3c360', 5),
+    Site('pcvr_volume_projection', 'call', '52806a08 910022a1 9b28633b 9100f377 aa1703e0 94000000/fc000000 aa1703e0 '
+         'aa1603e1 94000000/fc000000 3cc3c360', 8),
+    Site('pcvr_volume_copy', 'call', '52806a08 aa0303e1 9b286336 aa0303f5 9100f2c0 94000000/fc000000 3dc002a0 910c62c8 '
+         '3d800100', 5),
+    # ... and a model's level of detail by its distance (tools/patches.py _model_detail_depth): the routine every
+    # builder of a layer's model entries calls to pick the level (1.9.0 0x70010575a4), at its load of the entry's
+    # stored depth
+    Site('pcvr_model_detail_depth', 'code', '7100082a 5400022b bd401801 bd400042 1e222821 1e202020', 2),
     # sead::LookAtCamera::doUpdateMatrix (tools/patches.py _lookat_update): its first load of the eye (+0x38); eye,
     # at (+0x44) and up (+0x50) make the view matrix written to x1 (free camera, runtime/hle/freecam.c)
     Site('lookat_update', 'code', '2d470801 2d480c00 1e232020 2d491404 1e240440 1e250400 54000000/ff00001f 1e233823', 0),
@@ -476,7 +682,23 @@ OPTIONAL_GROUPS = [
      'quick_sort_labels', 'pouch_lock', 'pouch_unlock', 'quick_sort_event', 'quick_sort_player_busy'),
     OPT_TWO_SITES,
     ('lookat_update',),  # (the free camera: without it Home does nothing)
+    ('pcvr_matrix_builder', 'pcvr_base_caller', 'pcvr_layer_base_caller', 'pcvr_eye_caller', 'pcvr_proj_builder', 'pcvr_proj_device', 'pcvr_proj_build_caller', 'pcvr_proj_device_caller', 'pcvr_proj_root_return', 'pcvr_proj_sibling_return', 'pcvr_render_begin', 'pcvr_render_begin_caller', 'labo_set_vr', 'labo_end_vr_call', 'labo_enable_rec_call', 'labo_vr_notify_1', 'labo_vr_notify_2', 'labo_sensor_ret', 'labo_track_start_ret', 'pcvr_cam_update_0', 'pcvr_cam_update_1', 'pcvr_cam_update_2', 'pcvr_cam_update_3', 'pcvr_cam_update_4', 'pcvr_cam_update_5', 'pcvr_cam_update_6', 'pcvr_cam_update_7', 'pcvr_actor_vtable', 'pcvr_eye_vtable', 'pcvr_proj_vtable', 'pcvr_base_vtable', 'labo_manager_slot', 'automation_screen_root',),
     ('gyro_scene_actor',),
+    ('pcvr_hud_point',),
+    ('pcvr_lens_draw', 'pcvr_lens_depth_draw'),
+    ('pcvr_screen_draw', 'pcvr_pane_draw', 'pcvr_pane_child_draw'),
+    ('pcvr_balloon_point',),
+    ('pcvr_marker_store_1', 'pcvr_marker_store_2', 'pcvr_marker_store_3', 'pcvr_marker_store_4', 'pcvr_marker_store_5',
+     'pcvr_marker_store_6', 'pcvr_marker_store_7', 'pcvr_marker_store_8', 'pcvr_marker_component_call',
+     'pcvr_marker_wheel_follow', 'pcvr_marker_wheel_flat'),  # (1.9.0 only)
+    ('pcvr_rune_test', 'pcvr_rune_test_draw'),
+    ('pcvr_labo_fov', 'pcvr_lod_cull_matrix', 'pcvr_lod_cull_fov', 'pcvr_vis_cull_fov', 'pcvr_vis_cull_matrix',
+     'pcvr_vis2_cull_fov', 'pcvr_vis2_cull_matrix'),  # (1.9.0 only)
+    ('pcvr_grass_volume', 'pcvr_grass_projection', 'pcvr_grass_view', 'pcvr_volume_view', 'pcvr_volume_projection',
+     'pcvr_volume_copy'),  # (1.9.0 only)
+    ('pcvr_model_detail_depth',),  # (1.9.0 only)
+    ('pcvr_ui_parallax',),
+    ('pcvr_layer_final_draw', 'pcvr_layer_placement_draw', 'pcvr_display_lens_draw', 'pcvr_display_copy_draw'),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
     ('stale_actor_helper', 'stale_actor_kind', 'stale_actor_target', 'stale_actor_flag', 'stale_actor_flag2'),
     ('quick_menu_capture_alpha',),
@@ -735,6 +957,78 @@ KNOWN = {
         'pouch_item_get': 0x7000d921bc,
         'pouch_mgr': 0x7001e18570,
         'main_data': 0x7001b7a000,
+        'pcvr_matrix_builder': 0x7000eb2d5c,
+        'pcvr_base_caller': 0x70010ec518,
+        'pcvr_layer_base_caller': 0x7000eef164,
+        'pcvr_eye_caller': 0x7000eef800,
+        'pcvr_proj_builder': 0x7000eb4a44,
+        'pcvr_proj_device': 0x7000eb4684,
+        'pcvr_proj_build_caller': 0x7000eb4494,
+        'pcvr_proj_device_caller': 0x7000eb44b8,
+        'pcvr_proj_root_return': 0x7000ef1d40,
+        'pcvr_proj_sibling_return': 0x7000eef428,
+        'pcvr_render_begin': 0x7000f747b4,
+        'pcvr_render_begin_caller': 0x7000ef0310,
+        'labo_set_vr': 0x7001260e20,
+        'labo_end_vr_call': 0x7001260ee8,
+        'labo_enable_rec_call': 0x7001260eec,
+        'labo_vr_notify_1': 0x7000e8a360,
+        'labo_vr_notify_2': 0x7000e8a410,
+        'labo_sensor_ret': 0x7001260f68,
+        'labo_track_start_ret': 0x7001266254,
+        'pcvr_cam_update_0': 0x7000bf4e74,
+        'pcvr_cam_update_1': 0x7000c1ce84,
+        'pcvr_cam_update_2': 0x7000bf8858,
+        'pcvr_cam_update_3': 0x7000c1a30c,
+        'pcvr_cam_update_4': 0x7000c21ee8,
+        'pcvr_cam_update_5': 0x7000c245b8,
+        'pcvr_cam_update_6': 0x7000c0e290,
+        'pcvr_cam_update_7': 0x7000c14218,
+        'pcvr_actor_vtable': 0x7001cc64b0,
+        'pcvr_eye_vtable': 0x7001d05158,
+        'pcvr_proj_vtable': 0x7001d05380,
+        'pcvr_base_vtable': 0x7001d1eee0,
+        'labo_manager_slot': 0x7001d66c98,
+        'automation_screen_root': 0x7001d66d58,
+        'pcvr_hud_point': 0x7000e1dec0,
+        'pcvr_lens_draw': 0x700125a8d0,
+        'pcvr_lens_depth_draw': 0x7001261298,
+        'pcvr_screen_draw': 0x7000f714c0,
+        'pcvr_pane_draw': 0x7000027d80,
+        'pcvr_pane_child_draw': 0x7000027dc8,
+        'pcvr_balloon_point': 0x70013f0a50,
+        'pcvr_marker_store_1': 0x7000e1ba70,
+        'pcvr_marker_store_2': 0x7000e1c1c0,
+        'pcvr_marker_store_3': 0x7000e1cdb4,
+        'pcvr_marker_store_4': 0x7000e1ce0c,
+        'pcvr_marker_store_5': 0x7000e1ce48,
+        'pcvr_marker_store_6': 0x7000e1ceec,
+        'pcvr_marker_store_7': 0x7000e1d430,
+        'pcvr_marker_store_8': 0x7000e1d6a4,
+        'pcvr_marker_component_call': 0x7000e1ad88,
+        'pcvr_marker_wheel_follow': 0x7000e1b288,
+        'pcvr_marker_wheel_flat': 0x7000e1aeb4,
+        'pcvr_rune_test': 0x700126f798,
+        'pcvr_rune_test_draw': 0x700126acbc,
+        'pcvr_labo_fov': 0x700126138c,
+        'pcvr_lod_cull_matrix': 0x70010bb2a0,
+        'pcvr_lod_cull_fov': 0x70010bb2d4,
+        'pcvr_vis_cull_fov': 0x70010ec5c0,
+        'pcvr_vis_cull_matrix': 0x70010ec5d8,
+        'pcvr_vis2_cull_fov': 0x70010ec6a0,
+        'pcvr_vis2_cull_matrix': 0x70010ec6b8,
+        'pcvr_grass_volume': 0x70014906f4,
+        'pcvr_grass_projection': 0x70014907a0,
+        'pcvr_grass_view': 0x70014907c8,
+        'pcvr_volume_view': 0x7000f8f780,
+        'pcvr_volume_projection': 0x7000f90cf4,
+        'pcvr_volume_copy': 0x700101a468,
+        'pcvr_model_detail_depth': 0x70010575e0,
+        'pcvr_ui_parallax': 0x7000eeee50,
+        'pcvr_layer_final_draw': 0x700126c080,
+        'pcvr_layer_placement_draw': 0x7000fec358,
+        'pcvr_display_lens_draw': 0x7000ec4ed0,
+        'pcvr_display_copy_draw': 0x7000ec4f2c,
         'main_end': 0x7001e98000,
     },
 }

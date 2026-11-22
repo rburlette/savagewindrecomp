@@ -1,4 +1,5 @@
 // Small services: parental control, add-on content, and other mostly-stubbed interfaces.
+#include <stdatomic.h>
 #include <string.h>
 
 #include "../hle.h"
@@ -21,6 +22,18 @@ static void pctl_service(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 1031: case 1035: case 1018: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // restrictions off
     case 1032: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;
+    case 1065: {  // IsStereoVisionPermitted: positive permission, not a restriction flag
+        // libnx v4.11.1: https://github.com/switchbrew/libnx/blob/v4.11.1/nx/source/services/pctl.c#L124-L129
+        // This service has no parental profile/policy state (see 1031); return the corresponding permitted u8.
+        OUT(uint8_t, 0) = 1;
+        resp_size(resp, 1);
+        static atomic_uint reported;
+        unsigned count = atomic_load_explicit(&reported, memory_order_relaxed);
+        if (count < 4 && atomic_compare_exchange_strong_explicit(&reported, &count, count + 1,
+                                                            memory_order_relaxed, memory_order_relaxed))
+            LOG("[pctl] cmd 1065 IsStereoVisionPermitted -> 1 (no parental profile)\n");
+        break;
+    }
     default: LOG("[pctl] IParentalControlService cmd %u (ok)\n", req->cmd); resp_size(resp, 0x10);
     }
 }
