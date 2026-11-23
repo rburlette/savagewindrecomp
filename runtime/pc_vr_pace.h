@@ -109,6 +109,14 @@ bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced);
 bool pc_vr_pace_pose_wait_on(void);
 void pc_vr_pace_pose_wait(void);
 
+// One paced game frame's length in nanoseconds (two display frames at the play settings: 22.2 ms at 90 Hz, 27.8 ms at
+// 72 Hz); 0 without the pace or before its first frame. For the game's clock (hle/framepace.c rt_vfr_update), on the
+// thread that runs the game's update: a frame that keeps the pace is this long, not the frame limiter's period. With
+// the limiter's 60 frames a second in its place the game's time ran at about 94% of real time at 45 frames a second
+// and about 73% at 36, since the clock makes up only what it owes below a quarter second (the user saw slow motion
+// at 72 Hz, 2026-11-23).
+uint64_t pc_vr_pace_game_period_ns(void);
+
 #ifdef __cplusplus
 }
 #endif

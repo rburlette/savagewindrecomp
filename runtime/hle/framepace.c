@@ -56,6 +56,7 @@
 #include "../window_size.h"
 #include "../pc_vr.h"
 #include "../pc_vr_frame_trace.h"
+#include "../pc_vr_pace.h"
 #include "../automation_state.h"
 
 #ifdef _WIN32
@@ -871,6 +872,8 @@ void rt_vfr_update(uint64_t vfr) {
     } else {
         if (s > 0.25) s = 0.25;  // (a load or a pause in a debugger: not owed)
         double period = framepace_period_ns() / 1e9;
+        const uint64_t paced_period_ns = pc_vr_pace_game_period_ns();  // (PC VR at the headset pace: pc_vr_pace.h)
+        if (paced_period_ns) period = paced_period_ns / 1e9;
         int target = framepace_target();
         if (target != last_target) smooth = period, last_step = 0;  // (a new pace: start from it)
         last_target = target;

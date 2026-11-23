@@ -16,10 +16,18 @@
 static uint64_t previous_start_ns;
 // The same start and the game frame's length, for the pose wait on the thread that builds the eye cameras.
 static _Atomic uint64_t shared_start_ns, shared_game_period_ns;
+// One paced game frame's length, the display frames it takes times the display period; 0: no paced frame yet. Written
+// by the presenting thread, read by the thread that runs the game's update (pc_vr_pace_game_period_ns).
+static _Atomic uint64_t paced_game_period_ns;
 
 RT_ON_RESET(pc_vr_pace_reset) {
     previous_start_ns = 0;
     atomic_store(&shared_start_ns, 0);
+    atomic_store(&paced_game_period_ns, 0);
+}
+
+uint64_t pc_vr_pace_game_period_ns(void) {
+    return pc_vr_pace_on() ? atomic_load(&paced_game_period_ns) : 0;
 }
 
 bool pc_vr_pace_on(void) {
@@ -33,6 +41,7 @@ bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced) {
     if (!xr_runtime_display_clock(&clock.frame_start_ns, &clock.period_ns)) {
         previous_start_ns = 0;
         atomic_store(&shared_start_ns, 0);
+        atomic_store(&paced_game_period_ns, 0);
         return false;
     }
     const PcVrConfig *config = pc_vr_config();
@@ -50,6 +59,7 @@ bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced) {
     previous_start_ns = start_xr_ns;
     atomic_store(&shared_game_period_ns, display_frames * clock.period_ns);
     atomic_store(&shared_start_ns, start_xr_ns);
+    atomic_store(&paced_game_period_ns, display_frames * clock.period_ns);
     // The sleep is in the platform's clock: the same wait from now.
     const uint64_t before_ns = plat_now_ns();
     *paced = (PcVrPacedFrame){.started_ns = before_ns};
