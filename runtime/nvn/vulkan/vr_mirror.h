@@ -46,6 +46,10 @@ bool vr_mirror_takes(const TexBackend *presented, const TexBackend *final_image)
 // left half fits the presented image in at least one pixel. Marks the frame as mirrored, and fills *box with where the
 // half goes. True: the caller ends its render pass and calls vr_mirror_copy.
 bool vr_mirror_due(const TexBackend *presented, const TexBackend *final_image, VrLetterbox *box);
+// Whether the window gets a picture at this present (the count plus one of the frame being recorded or presented):
+// always, but with SAVAGEWIND_PC_VR_NO_DESKTOP_IMAGE=1 (an experiment), when only the unattended endpoint's present is
+// drawn, since the run's end is the window's own shot. For device.c's frame_begin and vr_mirror_due.
+bool vr_mirror_window_drawn(uint64_t present);
 
 // Records the copy of the final image's left half into the presented image, as *box places it: the fitted image
 // (re)allocated if needed, the presented image cleared to black, the half blitted into the fitted image, that copied

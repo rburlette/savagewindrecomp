@@ -1,5 +1,6 @@
 // PC VR renderer: the desktop window's picture (D085). What it shows and why, when it runs, what it replaces, the
 // preconditions and image ownership: vr_mirror.h. Moved here from exec.c (vr_window_mirror); the bodies are exec.c's.
+#include <stdlib.h>
 #include <string.h>
 
 #include "vk.h"
@@ -50,12 +51,23 @@ bool vr_mirror_takes(const TexBackend *presented, const TexBackend *final_image)
     return true;
 }
 
+bool vr_mirror_window_drawn(uint64_t present) {
+    if (!pc_vr_config()->diagnostics.no_desktop_image) return true;
+    // The unattended endpoint is the window's own shot (SAVAGEWIND_WINDOW_SHOT, device.c): that one present is drawn.
+    static long endpoint_present = -1;
+    if (endpoint_present < 0) {
+        const char *setting = getenv("SAVAGEWIND_WINDOW_SHOT");
+        endpoint_present = setting ? atol(setting) : 0;
+    }
+    return endpoint_present > 0 && (long)present == endpoint_present;
+}
+
 bool vr_mirror_due(const TexBackend *presented, const TexBackend *final_image, VrLetterbox *box) {
     const uint64_t present = renderer_present_count() + 1;
     if (vr_mirror.mirrored_present == present) return false;
     vr_mirror.mirrored_present = present;
-    // (an experiment, pc_vr_config.h: no picture for the window, so nothing to copy; the lens pass stays replaced)
-    if (pc_vr_config()->diagnostics.no_desktop_image) return false;
+    // (an experiment: no picture for the window, so nothing to copy; the lens pass stays replaced)
+    if (!vr_mirror_window_drawn(present)) return false;
     // The left half, scaled to fit the presented image and centred in it.
     return vr_letterbox(presented->width, presented->height, final_image->width, final_image->height, box);
 }

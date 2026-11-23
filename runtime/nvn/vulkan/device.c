@@ -34,6 +34,7 @@
 #include "shaders.h"
 #include "vram.h"
 #include "record.h"
+#include "vr_mirror.h"
 #include "vk13.h"
 #include "fsr_api.h"
 #include "xess.h"
@@ -2754,7 +2755,7 @@ static bool frame_begin(const float clear[4], bool hdr_game) {
         LOG("[window] %s (frame %llu)\n", covered ? "covered: not drawn to" : "drawn to again", (unsigned long long)renderer_present_count());
     }
     if (!w || !h || (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) || covered) return false;
-    if (pc_vr_enabled() && pc_vr_config()->diagnostics.no_desktop_image) return false;  // (PC VR experiment: as minimised)
+    if (pc_vr_enabled() && !vr_mirror_window_drawn(renderer_present_count() + 1)) return false;  // (PC VR experiment: as minimised)
     uint64_t tp = SDL_GetTicksNS();
     { SW_ZONE("present/wait_room"); present_wait_room(); }
     g_present_split[4] += SDL_GetTicksNS() - tp;
