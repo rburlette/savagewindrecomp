@@ -69,6 +69,23 @@ static inline uint64_t pc_vr_pace_frame_start(const PcVrDisplayClock *clock, int
     return (uint64_t)start;
 }
 
+// The pose wait (an experiment, 2026-11-23, off unless SAVAGEWIND_PC_VR_POSE_WAIT_BUDGET_MS is set). The game builds
+// its eye cameras on its own thread a few milliseconds after the present before, while the presenting thread still
+// waits out the pace above: measured on Link, a frame's pose is read about 19 ms before its command lists are handed
+// on, of which the game's work is about 7 ms and the rest is waiting, after the pose is taken. This moves that wait
+// in front of the pose: the frame's first eye call waits for the latest display frame that still leaves the game its
+// work budget before its next present, and reads the pose published then.
+//
+// The display frame start to wait for, in the display clock's time: the latest one at least work_budget_ns before
+// next_present_ns, or 0 when that one has already started (nothing to wait for). Needs clock->period_ns above 0.
+static inline uint64_t pc_vr_pace_pose_wait_until(const PcVrDisplayClock *clock, uint64_t next_present_ns,
+                                                  uint64_t work_budget_ns, uint64_t now_ns) {
+    if (next_present_ns < work_budget_ns) return 0;
+    const int64_t display_start = pc_vr_pace_grid_floor((int64_t)(next_present_ns - work_budget_ns),
+        (int64_t)clock->frame_start_ns, (int64_t)clock->period_ns);
+    return display_start > (int64_t)now_ns ? (uint64_t)display_start : 0;
+}
+
 // ---- The process's pace (runtime/pc_vr_pace.c), for the frame limiter's two call sites in runtime/nvn/objects.c.
 
 // PC VR with the headset pace set: the frame's wait comes after its present is handed on, not before.
@@ -85,6 +102,12 @@ typedef struct {
 // False, having done nothing: the pace is off or the headset has shown no display frame yet; the frame limiter then
 // paces as without it. The game's presenting thread only.
 bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced);
+
+// The pose wait, for the frame's first eye call (hle/pc_vr_head_look.c), on the thread that builds the eye cameras and
+// before it takes the frame's pose: waits as pc_vr_pace_pose_wait_until says, then up to 2 ms more for the XR owner's
+// publication of that display frame. pc_vr_pace_pose_wait_on: the pace and the budget are both set.
+bool pc_vr_pace_pose_wait_on(void);
+void pc_vr_pace_pose_wait(void);
 
 #ifdef __cplusplus
 }

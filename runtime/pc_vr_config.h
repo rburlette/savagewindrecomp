@@ -98,6 +98,10 @@ typedef struct {
                                   // eye pair, in milliseconds (100: as before the bound); 0: its own 3 ms
         unsigned headset_pace;    // SAVAGEWIND_PC_VR_HEADSET_PACE=1..6: the game's frames on the headset's grid, each
                                   // at least this many display frames (runtime/pc_vr_pace.h, an experiment); 0: off
+        uint64_t pose_wait_budget_ns;     // with the pace, SAVAGEWIND_PC_VR_POSE_WAIT_BUDGET_MS, above 0 to 20: the
+                                          // frame's first eye call waits for the latest display frame's pose that
+                                          // leaves the game this long before its next present (runtime/pc_vr_pace.h,
+                                          // an experiment); 0: no wait
         int64_t headset_pace_offset_ns;   // with the pace, SAVAGEWIND_PC_VR_HEADSET_PACE_OFFSET_MS, -50 to 50 (-1.5
                                           // when not given): a frame starts this long after a display frame does,
                                           // before it when negative

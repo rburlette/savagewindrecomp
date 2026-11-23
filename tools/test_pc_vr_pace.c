@@ -155,7 +155,37 @@ static void a_display_clock_ahead_of_now(void) {
     CHECK(pc_vr_pace_grid_floor(5, 0, 10) == 0 && pc_vr_pace_grid_floor(10, 0, 10) == 10);
 }
 
+// The pose wait: the latest display frame start that leaves the work budget before the next present.
+static void the_pose_wait(void) {
+    // Display frames start at 100 ms + n periods; the pace starts frames 1.5 ms before every second one.
+    const PcVrDisplayClock clock = {.frame_start_ns = 100 * MILLISECOND, .period_ns = period_90hz};
+    const uint64_t first_display = clock.frame_start_ns, second_display = first_display + period_90hz;
+    const uint64_t next_present = first_display + 2 * period_90hz - 1500000;
+    // The pose is read 2.8 ms into the first display frame; 8.5 ms of work fit after the second one's start.
+    const uint64_t read_ns = first_display + 2800000;
+    CHECK(pc_vr_pace_pose_wait_until(&clock, next_present, 8500000, read_ns) == second_display);
+    // The whole of the room after the second display frame, to the nanosecond; one more leaves only the first.
+    const uint64_t room_ns = next_present - second_display;
+    CHECK(pc_vr_pace_pose_wait_until(&clock, next_present, room_ns, read_ns) == second_display);
+    CHECK(pc_vr_pace_pose_wait_until(&clock, next_present, room_ns + 1, read_ns) == 0);
+    // Read once the second display frame has started: its pose is there already, nothing to wait for.
+    CHECK(pc_vr_pace_pose_wait_until(&clock, next_present, 8500000, second_display) == 0);
+    CHECK(pc_vr_pace_pose_wait_until(&clock, next_present, 8500000, second_display + 3 * MILLISECOND) == 0);
+    // A frame running late (its present already due): never a wait.
+    CHECK(pc_vr_pace_pose_wait_until(&clock, next_present, 8500000, next_present + MILLISECOND) == 0);
+    // A game frame of three display frames (the menus' 30): the wait reaches the third one.
+    CHECK(pc_vr_pace_pose_wait_until(&clock, next_present + period_90hz, 8500000, read_ns) == second_display + period_90hz);
+    // A display clock last seen several frames ago, and one ahead of now, name the same grid.
+    const PcVrDisplayClock stale = {.frame_start_ns = first_display - 5 * period_90hz, .period_ns = period_90hz};
+    const PcVrDisplayClock ahead = {.frame_start_ns = first_display + 3 * period_90hz, .period_ns = period_90hz};
+    CHECK(pc_vr_pace_pose_wait_until(&stale, next_present, 8500000, read_ns) == second_display);
+    CHECK(pc_vr_pace_pose_wait_until(&ahead, next_present, 8500000, read_ns) == second_display);
+    // A budget larger than the time itself: nothing.
+    CHECK(pc_vr_pace_pose_wait_until(&clock, 5 * MILLISECOND, 8500000, 0) == 0);
+}
+
 int main(void) {
+    the_pose_wait();
     display_frames_for_a_limit();
     a_fast_game_keeps_the_grid();
     a_jittering_display_clock();

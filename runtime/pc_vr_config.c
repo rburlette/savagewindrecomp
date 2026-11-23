@@ -151,6 +151,11 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
         if (value && !(explicit_number(value, &pace_offset_ms) && pace_offset_ms >= -50.0 && pace_offset_ms <= 50.0))
             pace_offset_ms = PC_VR_HEADSET_PACE_OFFSET_MS_DEFAULT;
         out->diagnostics.headset_pace_offset_ns = llround(pace_offset_ms * 1e6);
+        value = lookup(context, "SAVAGEWIND_PC_VR_POSE_WAIT_BUDGET_MS");
+        double pose_wait_budget_ms = 0.0;
+        if (value && explicit_number(value, &pose_wait_budget_ms) && pose_wait_budget_ms > 0.0 &&
+            pose_wait_budget_ms <= 20.0)
+            out->diagnostics.pose_wait_budget_ns = (uint64_t)llround(pose_wait_budget_ms * 1e6);
     }
     value = lookup(context, "SAVAGEWIND_PC_VR_BENCH_HEAD");
     out->diagnostics.bench_head_requested = value != NULL;
@@ -230,6 +235,8 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
     if (config->diagnostics.headset_pace)
         describe_append(&line, " HEADSET_PACE=%u HEADSET_PACE_OFFSET_MS=%.6g", config->diagnostics.headset_pace,
                         config->diagnostics.headset_pace_offset_ns / 1e6);
+    if (config->diagnostics.pose_wait_budget_ns)
+        describe_append(&line, " POSE_WAIT_BUDGET_MS=%.6g", config->diagnostics.pose_wait_budget_ns / 1e6);
     if (config->diagnostics.bench_head_start)
         describe_append(&line, " BENCH_HEAD=%llu", (unsigned long long)config->diagnostics.bench_head_start);
     else if (config->diagnostics.bench_head_requested) describe_append(&line, " BENCH_HEAD=invalid");

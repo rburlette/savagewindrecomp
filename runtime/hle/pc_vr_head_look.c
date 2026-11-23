@@ -28,6 +28,7 @@
 #include "../game_sites.h"
 #include "../hle.h"
 #include "../pc_vr.h"
+#include "../pc_vr_pace.h"
 #include "../xr/xr_runtime.h"
 static uint64_t memory_timing_begin(void);
 static void memory_timing_end(unsigned operation, uint64_t start, bool ok);
@@ -331,6 +332,15 @@ static void audit_watch_eyes(uint64_t layer, unsigned side) {
 #endif
 }
 
+// Whether the layer copies the verified base camera: an eye layer of the composition head look is bound to.
+static bool bound_eye_layer(uint64_t layer) {
+    uint64_t layer_base = 0;
+    pthread_mutex_lock(&look_lock);
+    const bool bound = binding_valid && read_u64(layer + LAYER_SOURCE_CAMERA, &layer_base) && layer_base == binding.base;
+    pthread_mutex_unlock(&look_lock);
+    return bound;
+}
+
 // Before the original builder runs for an eye camera: the frame record gives it its native view (see the top of this
 // file). False: not this composition's eye (the builder serves other layers too), or not given its view.
 static bool eye_before_original(uint64_t eye, uint64_t output, uint64_t frame_pointer) {
@@ -339,6 +349,10 @@ static bool eye_before_original(uint64_t eye, uint64_t output, uint64_t frame_po
     // The display's pair of eye layers, known from its own calls before the camera binding below is asked for (after
     // a load the binding comes seconds later): which layers are the eyes', nothing more.
     pc_vr_projection_trace_eye_layer(layer, frame_pointer);
+    // The pose wait (pc_vr_pace.h, an experiment): the first eye call of the bound composition's frame waits, outside
+    // the lock, for the display frame whose pose it then takes below.
+    if (pc_vr_pace_pose_wait_on() && pc_vr_projection_trace_root(frame_pointer) && bound_eye_layer(layer))
+        pc_vr_pace_pose_wait();
     const uint64_t log_now = plat_now_ns();
     pthread_mutex_lock(&look_lock);
     CameraBinding observed;
