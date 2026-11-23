@@ -3405,6 +3405,7 @@ static void present_locked(const NvnPresent *present) {
         fg_real_shot[0] = 0;
         if (shot && getenv("SAVAGEWIND_EXIT_AFTER_SHOT")) exit_after_screenshot();
     } else {
+        vr_mirror_undrawn_frame_scales(total_frames + 1);  // (PC VR: the scales a drawn frame sets above)
         renderer_submit();
     }
 presented:

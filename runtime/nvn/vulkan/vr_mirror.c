@@ -8,6 +8,11 @@
 #include "vr_math.h"
 #include "vr_mirror.h"
 #include "../../pc_vr.h"
+#include "../../settings.h"
+#include "../output_scale.h"
+
+void renderer_set_scale(float sx, float sy);        // (textures.c, as device.c declares them)
+void renderer_set_scene_scale(float sx, float sy);
 
 uint64_t renderer_present_count(void);  // (device.c) the presents so far: the frame being recorded is this plus one
 
@@ -60,6 +65,19 @@ bool vr_mirror_window_drawn(uint64_t present) {
         endpoint_present = setting ? atol(setting) : 0;
     }
     return endpoint_present > 0 && (long)present == endpoint_present;
+}
+
+void vr_mirror_undrawn_frame_scales(uint64_t present) {
+    if (!pc_vr_enabled()) return;
+    // The window's size only places the picture in the window; in PC VR the eye size alone sets the scales
+    // (output_scale.c). No swapchain yet (minimised from the start): any size does.
+    const double window_width = g_vk.sc_extent.width ? g_vk.sc_extent.width : 1920;
+    const double window_height = g_vk.sc_extent.height ? g_vk.sc_extent.height : 1080;
+    OutScale scale;
+    output_scale(window_width, window_height, g_settings.wide_view, &scale);
+    renderer_set_scale((float)scale.sx, (float)scale.sy);
+    renderer_set_scene_scale((float)scale.scene_sx, (float)scale.scene_sy);
+    renderer_set_shadow_size(shadow_map_size(present));
 }
 
 bool vr_mirror_due(const TexBackend *presented, const TexBackend *final_image, VrLetterbox *box) {

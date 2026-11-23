@@ -50,6 +50,11 @@ bool vr_mirror_due(const TexBackend *presented, const TexBackend *final_image, V
 // always, but with SAVAGEWIND_PC_VR_NO_DESKTOP_IMAGE=1 (an experiment), when only the unattended endpoint's present is
 // drawn, since the run's end is the window's own shot. For device.c's frame_begin and vr_mirror_due.
 bool vr_mirror_window_drawn(uint64_t present);
+// For device.c's present in a frame that does not draw to the window (undrawn by the experiment above, minimised or
+// covered): sets the final image's, the scene's and the shadow maps' scales as a drawn frame does, in PC VR only.
+// Without it a window never drawn leaves the final image at the console's 1920x1080 and the headset's eye images at
+// its halves, 960x1080 (every run of the experiment before 2026-11-23 evening).
+void vr_mirror_undrawn_frame_scales(uint64_t present);
 
 // Records the copy of the final image's left half into the presented image, as *box places it: the fitted image
 // (re)allocated if needed, the presented image cleared to black, the half blitted into the fitted image, that copied
