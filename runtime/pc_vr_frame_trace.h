@@ -116,9 +116,11 @@ void pc_vr_frame_trace_present_end(uint64_t present_id);
 void pc_vr_frame_trace_late(uint64_t present_id, unsigned shown, unsigned unfinished, bool copy_carried, uint64_t spare_ns);
 // The finish watcher's thread (nvn/vulkan/vr_eyes.c): the GPU finished the present's eye pair at finished_ns, as a
 // wait on the renderer's timeline saw it (the wake-up of that wait included, some tenths of a millisecond). Written
-// for every offered frame as "[pc-vr] finish <present> <on grid> <lists ms> <offered ms> <finished ms>", the last two
-// from the frame's start: what a late frame's row cannot say, when each frame's GPU work was done.
-void pc_vr_frame_trace_gpu_finished(uint64_t present_id, uint64_t finished_ns);
+// for every offered frame as "[pc-vr] finish <present> <on grid> <lists ms> <offered ms> <submitted ms> <finished ms>",
+// the last three from the frame's start: what a late frame's row cannot say, when each frame's GPU work was done.
+// submitted_ns: when the watcher saw that the driver had the pair's submission (0: not known), which splits the time
+// after the offer into the hand-over to the driver and the driver's and the GPU's own.
+void pc_vr_frame_trace_gpu_finished(uint64_t present_id, uint64_t submitted_ns, uint64_t finished_ns);
 // The thread that runs the game's update, as it begins one (hle/framepace.c rt_vfr_update): the stall sampler's.
 void pc_vr_frame_trace_update(void);
 // The user's mark, "I saw a hitch just now": a press of the controller's Capture / Share / Mute button (hle/input.c;

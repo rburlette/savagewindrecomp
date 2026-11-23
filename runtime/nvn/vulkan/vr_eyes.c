@@ -52,11 +52,20 @@ static void *vr_finish_thread(void *unused) {
         vr_finish.first = (vr_finish.first + 1) % VR_FINISH_WATCHES;
         --vr_finish.count;
         pthread_mutex_unlock(&vr_finish.lock);
+        // When the driver had the pair's submission (the recorder's vkQueueSubmit2 returned): looked at five times a
+        // millisecond, so the recorder itself is left alone. Without the recorder the submit was made before the offer.
+        uint64_t submitted_ns = 0;
+        if (rec_on()) {
+            const uint64_t give_up_ns = plat_now_ns() + 500000000ull;
+            while (rec_submitted() < watch.ready_value && plat_now_ns() < give_up_ns)
+                plat_wait_until_ns(plat_now_ns() + 200000);
+            submitted_ns = plat_now_ns();
+        }
         const VkSemaphoreWaitInfo wait = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
             .pSemaphores = &g_vk.timeline, .pValues = &watch.ready_value};
         // (half a second: a pair whose work does not finish in that time is not reported)
         if (vkWaitSemaphores(g_vk.dev, &wait, 500000000ull) == VK_SUCCESS)
-            pc_vr_frame_trace_gpu_finished(watch.present_id, plat_now_ns());
+            pc_vr_frame_trace_gpu_finished(watch.present_id, submitted_ns, plat_now_ns());
     }
     return NULL;
 }
