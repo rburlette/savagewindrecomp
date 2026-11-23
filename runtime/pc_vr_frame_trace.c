@@ -156,6 +156,19 @@ void pc_vr_frame_trace_present_end(uint64_t present_id) {
     pthread_mutex_unlock(&trace_lock);
 }
 
+void pc_vr_frame_trace_gpu_finished(uint64_t present_id, uint64_t finished_ns) {
+    if (!pc_vr_frame_trace_on() || !present_id) return;
+    pthread_mutex_lock(&trace_lock);
+    const PcVrFrameRecord *found = record_of(present_id);
+    const PcVrFrameRecord frame = found ? *found : (PcVrFrameRecord){0};
+    pthread_mutex_unlock(&trace_lock);
+    if (!frame.start_ns || finished_ns < frame.start_ns) return;
+    // (the offer's time is written by the queue's thread a moment after the watch begins: -1 when the GPU was first)
+    LOG("[pc-vr] finish %llu %d %.3f %.3f %.3f\n", (unsigned long long)present_id, frame.on_grid, frame.exec_ns / 1e6,
+        frame.offered_ns >= frame.start_ns ? (double)(frame.offered_ns - frame.start_ns) / 1e6 : -1.0,
+        (double)(finished_ns - frame.start_ns) / 1e6);
+}
+
 void pc_vr_frame_trace_late(uint64_t present_id, unsigned shown, unsigned unfinished, bool copy_carried, uint64_t spare_ns) {
     if (!pc_vr_frame_trace_on() || !present_id) return;
     char text[(PC_VR_FRAME_TRACE_ROWS + 2) * 320];

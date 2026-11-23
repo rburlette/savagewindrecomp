@@ -6,6 +6,7 @@
 #include "record.h"
 #include "vr_math.h"
 #include "vr_mirror.h"
+#include "../../pc_vr.h"
 
 uint64_t renderer_present_count(void);  // (device.c) the presents so far: the frame being recorded is this plus one
 
@@ -53,6 +54,8 @@ bool vr_mirror_due(const TexBackend *presented, const TexBackend *final_image, V
     const uint64_t present = renderer_present_count() + 1;
     if (vr_mirror.mirrored_present == present) return false;
     vr_mirror.mirrored_present = present;
+    // (an experiment, pc_vr_config.h: no picture for the window, so nothing to copy; the lens pass stays replaced)
+    if (pc_vr_config()->diagnostics.no_desktop_image) return false;
     // The left half, scaled to fit the presented image and centred in it.
     return vr_letterbox(presented->width, presented->height, final_image->width, final_image->height, box);
 }

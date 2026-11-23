@@ -94,6 +94,9 @@ typedef struct {
         bool log_screens;         // SAVAGEWIND_LOG_SCREENS: a number above 0
         bool no_headset_mask;     // SAVAGEWIND_PC_VR_NO_HEADSET_MASK=1: Labo's mask draws cover the whole image, the
                                   // depth mask nothing (D114 A/B runs)
+        bool no_desktop_image;    // SAVAGEWIND_PC_VR_NO_DESKTOP_IMAGE=1: nothing is drawn to the desktop window, as
+                                  // while it is minimised, and the left eye is not copied for it (an experiment: what
+                                  // the window's picture costs the eye pair)
         unsigned copy_wait_ms;    // SAVAGEWIND_PC_VR_COPY_WAIT_MS=1..100: the XR owner's first wait for its copy of an
                                   // eye pair, in milliseconds (100: as before the bound); 0: its own 3 ms
         unsigned headset_pace;    // SAVAGEWIND_PC_VR_HEADSET_PACE=1..6: the game's frames on the headset's grid, each

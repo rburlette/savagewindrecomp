@@ -114,6 +114,11 @@ void pc_vr_frame_trace_present_end(uint64_t present_id);
 // display frame that took it the pair was offered (0: after it began). A pair with neither was offered too late: the
 // queue's thread was still running its lists.
 void pc_vr_frame_trace_late(uint64_t present_id, unsigned shown, unsigned unfinished, bool copy_carried, uint64_t spare_ns);
+// The finish watcher's thread (nvn/vulkan/vr_eyes.c): the GPU finished the present's eye pair at finished_ns, as a
+// wait on the renderer's timeline saw it (the wake-up of that wait included, some tenths of a millisecond). Written
+// for every offered frame as "[pc-vr] finish <present> <on grid> <lists ms> <offered ms> <finished ms>", the last two
+// from the frame's start: what a late frame's row cannot say, when each frame's GPU work was done.
+void pc_vr_frame_trace_gpu_finished(uint64_t present_id, uint64_t finished_ns);
 // The thread that runs the game's update, as it begins one (hle/framepace.c rt_vfr_update): the stall sampler's.
 void pc_vr_frame_trace_update(void);
 // The user's mark, "I saw a hitch just now": a press of the controller's Capture / Share / Mute button (hle/input.c;

@@ -122,6 +122,14 @@ void rec_CmdBlitImage(VkCommandBuffer commands, VkImage source, VkImageLayout so
     (void)filter;
     ++calls.blits;
 }
+// (the finish watcher: off here, so its thread never starts and nothing waits on the timeline)
+bool pc_vr_frame_trace_on(void) { return false; }
+void pc_vr_frame_trace_gpu_finished(uint64_t present_id, uint64_t finished_ns) { (void)present_id; (void)finished_ns; }
+uint64_t plat_now_ns(void) { return 0; }
+VKAPI_ATTR VkResult VKAPI_CALL vkWaitSemaphores(VkDevice device, const VkSemaphoreWaitInfo *wait, uint64_t timeout) {
+    (void)device; (void)wait; (void)timeout;
+    return VK_SUCCESS;
+}
 uint64_t vk_pending_seq(void) { return script.pending_seq; }
 uint64_t renderer_present_count(void) { return script.present_count; }
 void renderer_submit(void) { ++calls.submits; }
