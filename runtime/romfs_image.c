@@ -39,6 +39,7 @@ struct RomfsImage {
     uint8_t **preloaded;     // (experiment) by file: its whole data in memory (romfs_image_preload); NULL: from its file
     uint8_t **decompressed;  // (experiment) by file: a Yaz0 file's data decompressed (NULL: not one, or not kept)
     uint64_t *decompressed_size;
+    uint64_t *prefix_hash;   // (experiment) by file, when the files are not kept: the hash of its first bytes
 };
 
 // (profiling) romfs_image_open_stats. The clock is the C library's, not the platform's: tools/test_romfs.c builds
@@ -167,15 +168,24 @@ ssize_t romfs_image_pread(RomfsImage *img, void *dst_, uint64_t n, uint64_t off)
 // romfs_image_preload's threads: each takes the next file not yet taken, reads it whole into its own block.
 typedef struct {
     RomfsImage *img;
+    bool keep;                     // the files kept in memory; else only the Yaz0 ones read, decompressed and let go
     uint8_t **blocks;
     RomfsDecompressFn decompress;  // NULL: keep the files as they are
     uint8_t **decompressed;
-    uint64_t *decompressed_size;
+    uint64_t *decompressed_size, *prefix_hash;
     _Atomic int next_file;
     _Atomic bool failed;
-    _Atomic uint64_t open_ns, read_ns, slowest_open_ns, slowest_read_ns;
+    _Atomic uint64_t files_read, bytes_read, open_ns, read_ns, slowest_open_ns, slowest_read_ns;
     _Atomic uint64_t decompressed_files, decompressed_in, decompressed_out, decompress_ns, decompress_failed;
 } PreloadWork;
+
+// What romfs_image_find_decompressed compares when the files are not kept: a hash of a Yaz0 file's first bytes
+enum { PREFIX_HASHED = 4096 };
+static uint64_t prefix_hash(const uint8_t *data, uint64_t size) {  // (FNV-1a)
+    uint64_t hash = 0xcbf29ce484222325ull;
+    for (uint64_t k = 0; k < size && k < PREFIX_HASHED; k++) hash = (hash ^ data[k]) * 0x100000001b3ull;
+    return hash;
+}
 
 static void atomic_max(_Atomic uint64_t *slot, uint64_t value) {
     uint64_t seen = atomic_load_explicit(slot, memory_order_relaxed);
@@ -187,12 +197,15 @@ static void *preload_thread(void *arg) {
     const RomfsLayout *layout = &work->img->layout;
     for (int i; !atomic_load(&work->failed) && (i = atomic_fetch_add(&work->next_file, 1)) < layout->nfiles;) {
         const RomfsLayoutFile *file = &layout->files[i];
-        uint8_t *block = malloc(file->size ? file->size : 1);
         const uint64_t open_start_ns = monotonic_ns();
-        int fd = block ? open(file->path, O_RDONLY | O_BINARY) : -1;
+        int fd = open(file->path, O_RDONLY | O_BINARY);
         const uint64_t read_start_ns = monotonic_ns();
+        uint8_t head[4] = {0};
+        const bool wanted = work->keep ||
+                            (file->size >= 16 && fd >= 0 && pread(fd, head, 4, 0) == 4 && !memcmp(head, "Yaz0", 4));
+        uint8_t *block = fd >= 0 && wanted ? malloc(file->size ? file->size : 1) : NULL;
         uint64_t done = 0;
-        while (fd >= 0 && done < file->size) {
+        while (block && done < file->size) {
             const uint64_t chunk = file->size - done < (256u << 20) ? file->size - done : (256u << 20);
             const ssize_t got = pread(fd, block + done, (size_t)chunk, (off_t)done);
             if (got <= 0) break;
@@ -200,13 +213,19 @@ static void *preload_thread(void *arg) {
         }
         const uint64_t end_ns = monotonic_ns();
         if (fd >= 0) close(fd);
-        if (done != file->size) {
+        if (fd < 0 || (wanted && done != file->size)) {
             LOG("[romfs] preload: can't read %s\n", file->path);
             free(block);
             atomic_store(&work->failed, true);
             break;
         }
-        work->blocks[i] = block;
+        atomic_fetch_add_explicit(&work->open_ns, read_start_ns - open_start_ns, memory_order_relaxed);
+        atomic_fetch_add_explicit(&work->read_ns, end_ns - read_start_ns, memory_order_relaxed);
+        atomic_max(&work->slowest_open_ns, read_start_ns - open_start_ns);
+        atomic_max(&work->slowest_read_ns, end_ns - read_start_ns);
+        if (!block) continue;
+        atomic_fetch_add_explicit(&work->files_read, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&work->bytes_read, file->size, memory_order_relaxed);
         if (work->decompress && file->size >= 16 && !memcmp(block, "Yaz0", 4)) {
             const uint64_t decompress_start_ns = monotonic_ns();
             size_t out_size = 0;
@@ -214,6 +233,7 @@ static void *preload_thread(void *arg) {
             atomic_fetch_add_explicit(&work->decompress_ns, monotonic_ns() - decompress_start_ns, memory_order_relaxed);
             if (out) {
                 work->decompressed[i] = out, work->decompressed_size[i] = out_size;
+                if (!work->keep) work->prefix_hash[i] = prefix_hash(block, file->size);
                 atomic_fetch_add_explicit(&work->decompressed_files, 1, memory_order_relaxed);
                 atomic_fetch_add_explicit(&work->decompressed_in, file->size, memory_order_relaxed);
                 atomic_fetch_add_explicit(&work->decompressed_out, out_size, memory_order_relaxed);
@@ -221,10 +241,8 @@ static void *preload_thread(void *arg) {
                 atomic_fetch_add_explicit(&work->decompress_failed, 1, memory_order_relaxed);
             }
         }
-        atomic_fetch_add_explicit(&work->open_ns, read_start_ns - open_start_ns, memory_order_relaxed);
-        atomic_fetch_add_explicit(&work->read_ns, end_ns - read_start_ns, memory_order_relaxed);
-        atomic_max(&work->slowest_open_ns, read_start_ns - open_start_ns);
-        atomic_max(&work->slowest_read_ns, end_ns - read_start_ns);
+        if (work->keep) work->blocks[i] = block;
+        else free(block);
     }
     return NULL;
 }
@@ -271,8 +289,13 @@ bool romfs_image_find_decompressed(const void *src_, uint64_t len, const uint8_t
         else if (layout->files[mid].start > at) hi = mid - 1;
         else {
             if (!img->decompressed[mid]) return false;
-            const uint64_t compare = len < layout->files[mid].size ? len : layout->files[mid].size;
-            if (memcmp(src, img->preloaded[mid], (size_t)compare)) return false;
+            const uint64_t file_size = layout->files[mid].size;
+            if (img->preloaded) {  // the chunk's bytes are the file's own
+                if (memcmp(src, img->preloaded[mid], (size_t)(len < file_size ? len : file_size))) return false;
+            } else {  // the file's first bytes, by their hash (the read noted above says which file they came from)
+                const uint64_t hashed = file_size < PREFIX_HASHED ? file_size : PREFIX_HASHED;
+                if (len < hashed || prefix_hash(src, file_size) != img->prefix_hash[mid]) return false;
+            }
             *data = img->decompressed[mid], *size = img->decompressed_size[mid];
             return true;
         }
@@ -280,18 +303,21 @@ bool romfs_image_find_decompressed(const void *src_, uint64_t len, const uint8_t
     return false;
 }
 
-bool romfs_image_preload(RomfsImage *img, int threads, RomfsDecompressFn decompress, RomfsPreloadStats *stats) {
+bool romfs_image_preload(RomfsImage *img, int threads, RomfsDecompressFn decompress, bool keep_files,
+                         RomfsPreloadStats *stats) {
     memset(stats, 0, sizeof *stats);
-    if (img->bin_fd >= 0 || img->preloaded || threads < 1) return false;
+    if (img->bin_fd >= 0 || img->preloaded || img->decompressed || threads < 1 || (!keep_files && !decompress)) return false;
     if (threads > 64) threads = 64;
     const int nfiles = img->layout.nfiles;
-    PreloadWork work = {.img = img, .blocks = calloc((size_t)nfiles + 1, sizeof(uint8_t *)), .decompress = decompress};
+    PreloadWork work = {.img = img, .keep = keep_files, .blocks = calloc((size_t)nfiles + 1, sizeof(uint8_t *)),
+                        .decompress = decompress};
     if (!work.blocks) return false;
     if (decompress) {
         work.decompressed = calloc((size_t)nfiles + 1, sizeof(uint8_t *));
         work.decompressed_size = calloc((size_t)nfiles + 1, sizeof(uint64_t));
-        if (!work.decompressed || !work.decompressed_size) {
-            free(work.blocks), free(work.decompressed), free(work.decompressed_size);
+        work.prefix_hash = calloc((size_t)nfiles + 1, sizeof(uint64_t));
+        if (!work.decompressed || !work.decompressed_size || !work.prefix_hash) {
+            free(work.blocks), free(work.decompressed), free(work.decompressed_size), free(work.prefix_hash);
             return false;
         }
     }
@@ -314,14 +340,16 @@ bool romfs_image_preload(RomfsImage *img, int threads, RomfsDecompressFn decompr
             free(work.blocks[i]);
             if (work.decompressed) free(work.decompressed[i]);
         }
-        free(work.blocks), free(work.decompressed), free(work.decompressed_size);
+        free(work.blocks), free(work.decompressed), free(work.decompressed_size), free(work.prefix_hash);
         return false;
     }
-    for (int i = 0; i < nfiles; i++) stats->bytes += img->layout.files[i].size;
-    stats->files = (uint64_t)nfiles;
-    img->preloaded = work.blocks;
+    stats->files = atomic_load(&work.files_read), stats->bytes = atomic_load(&work.bytes_read);
+    if (keep_files) img->preloaded = work.blocks;
+    else free(work.blocks);  // (each let go already)
     if (decompress) {
         img->decompressed = work.decompressed, img->decompressed_size = work.decompressed_size;
+        if (keep_files) free(work.prefix_hash);
+        else img->prefix_hash = work.prefix_hash;
         atomic_fetch_add(&decompressed_images, 1);
     }
     return true;
@@ -340,7 +368,7 @@ void romfs_image_close(RomfsImage *img) {
             if (noted_reads[k].img == img) noted_reads[k].img = NULL, noted_reads[k].size = 0;
         pthread_mutex_unlock(&noted_lock);
         for (int i = 0; i < img->layout.nfiles; i++) free(img->decompressed[i]);
-        free(img->decompressed), free(img->decompressed_size);
+        free(img->decompressed), free(img->decompressed_size), free(img->prefix_hash);
     }
     for (int k = 0; k < OPEN_FILES; k++)
         if (img->open[k].fd >= 0) close(img->open[k].fd);

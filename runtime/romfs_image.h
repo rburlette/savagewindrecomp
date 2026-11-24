@@ -27,7 +27,8 @@ void romfs_image_open_stats(uint64_t *opens, uint64_t *reopens, uint64_t *open_n
 
 // (experiment) Every file of a folder image read into memory with `threads` threads, before any read: the image's
 // reads after it are copies from memory, with no file opened or read. false: it could not (memory, a file), and the
-// image goes on reading its files. Before the image is shared between threads.
+// image goes on reading its files. Before the image is shared between threads. Without keep_files (decompress given),
+// only the Yaz0 files are read, kept decompressed, and let go: the reads go to the files as before.
 // With decompress (a Yaz0 decoder: services/archive.c yaz0_unpack), each Yaz0 file is kept decompressed as well, for
 // the game's stream decoder to copy from (hle/yaz0.c, romfs_image_find_decompressed).
 typedef uint8_t *(*RomfsDecompressFn)(const uint8_t *data, size_t size, size_t *out_size);
@@ -39,7 +40,8 @@ typedef struct {
     uint64_t decompressed_files, decompressed_in, decompressed_out, decompress_ns, decompress_failed;
     int threads;
 } RomfsPreloadStats;
-bool romfs_image_preload(RomfsImage *img, int threads, RomfsDecompressFn decompress, RomfsPreloadStats *stats);
+bool romfs_image_preload(RomfsImage *img, int threads, RomfsDecompressFn decompress, bool keep_files,
+                         RomfsPreloadStats *stats);
 // (experiment) A read of the image's [off, off + size) went to dst (services/fs.c): kept for the lookup below while
 // any image holds decompressed files. Any thread.
 void romfs_image_note_read(RomfsImage *img, const void *dst, uint64_t size, uint64_t off);

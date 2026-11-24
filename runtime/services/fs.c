@@ -1725,15 +1725,18 @@ static Service *open_image(int k, const char *dir, const char *name) {
             (plat_now_ns() - t0) / 1e9);
         // (experiment) SAVAGEWIND_ROMFS_PRELOAD=<threads>: every file of the image read into memory now, at its mount
         // (the boot, before the title screen), so that the game's reads open and read no file (romfs_image_preload).
-        // With SAVAGEWIND_ROMFS_DECOMPRESS=1 too, each Yaz0 file is also kept decompressed, and the game's stream
-        // decoder copies a whole file from there instead of decoding it (hle/yaz0.c).
-        const char *preload = getenv("SAVAGEWIND_ROMFS_PRELOAD");
-        if (preload && atoi(preload) > 0) {
-            const char *decompress = getenv("SAVAGEWIND_ROMFS_DECOMPRESS");
+        // With SAVAGEWIND_ROMFS_DECOMPRESS=1, each Yaz0 file is kept decompressed, and the game's stream decoder copies
+        // a whole file from there instead of decoding it (hle/yaz0.c); alone, without the files kept (16 threads).
+        const char *preload = getenv("SAVAGEWIND_ROMFS_PRELOAD"), *decompress = getenv("SAVAGEWIND_ROMFS_DECOMPRESS");
+        const int preload_threads = preload ? atoi(preload) : 0;
+        const bool decompressing = decompress && atoi(decompress) > 0;
+        if (preload_threads > 0 || decompressing) {
             RomfsPreloadStats s;
-            if (romfs_image_preload(m->img, atoi(preload), decompress && atoi(decompress) > 0 ? yaz0_unpack : NULL, &s)) {
-                LOG("[fs] romfs preload %s: %llu files, %.0f MB in %.2f s with %d threads; opens %.2f s summed (%.3f ms "
-                    "each, slowest %.1f), reads %.2f s summed (slowest %.1f ms)\n", dir, (unsigned long long)s.files,
+            if (romfs_image_preload(m->img, preload_threads > 0 ? preload_threads : 16, decompressing ? yaz0_unpack : NULL,
+                                    preload_threads > 0, &s)) {
+                LOG("[fs] romfs %s %s: %llu files, %.0f MB in %.2f s with %d threads; opens %.2f s summed (%.3f ms "
+                    "each, slowest %.1f), reads %.2f s summed (slowest %.1f ms)\n",
+                    preload_threads > 0 ? "preload" : "files read to decompress", dir, (unsigned long long)s.files,
                     s.bytes / 1048576.0, s.wall_ns / 1e9, s.threads, s.open_ns / 1e9, s.files ? s.open_ns / 1e6 / s.files : 0,
                     s.slowest_open_ns / 1e6, s.read_ns / 1e9, s.slowest_read_ns / 1e6);
                 if (s.decompressed_files || s.decompress_failed)
