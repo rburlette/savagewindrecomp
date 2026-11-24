@@ -91,6 +91,15 @@ static int file_fd(RomfsImage *img, int i, int *slot) {
         if (!o->busy && (pick < 0 || o->used < img->open[pick].used)) pick = k;
     }
     const uint64_t open_start_ns = monotonic_ns();
+    // (debug) SAVAGEWIND_DEBUG_ROMFS_FIRST_OPEN_MS=<ms>: each file's first open takes that much longer, as a cold one
+    // does on a machine whose virus scanner reads a file at its first open (about 9 ms on the user's, 2026-11-24), so
+    // a run with the scanner's cache warm can still be compared with a cold one.
+    static long first_open_delay_us = -1;
+    if (first_open_delay_us < 0) {
+        const char *e = getenv("SAVAGEWIND_DEBUG_ROMFS_FIRST_OPEN_MS");
+        first_open_delay_us = e ? (long)(atof(e) * 1000) : 0;
+    }
+    if (first_open_delay_us > 0 && img->opened_before && !img->opened_before[i]) usleep((useconds_t)first_open_delay_us);
     int fd = open(img->layout.files[i].path, O_RDONLY | O_BINARY);
     atomic_fetch_add_explicit(&open_time_ns, monotonic_ns() - open_start_ns, memory_order_relaxed);
     atomic_fetch_add_explicit(&open_count, 1, memory_order_relaxed);

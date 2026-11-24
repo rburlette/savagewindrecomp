@@ -211,6 +211,31 @@ static void core_request_end(uint64_t started_ns) {
     hold_request_ns += request_ns < hold_ns ? request_ns : hold_ns;
 }
 
+// (experiment) SAVAGEWIND_REQUEST_CORE_RELEASE=1: a service request lets the caller's core go while the service runs,
+// as on the console, where the caller blocks and the service runs in a process of its own. Holding it, a file read
+// kept the core's other threads waiting: on the Kakariko route the game's update (priority 44) waited out the file
+// thread's (47) first opens of about 9 ms each, up to 282 ms in a frame (docs/evidence of the root repository,
+// pc-vr-file-opens-core-waits-2026-11-24.md). No handler runs guest code (services/audio.c's guest calls are in HLE
+// functions and its own threads), so none needs the core; the core is taken back before guest code runs again.
+static bool request_core_release(void) {
+    static int on = -1;  // (read once; the same answer from any thread)
+    if (on < 0) {
+        const char *e = getenv("SAVAGEWIND_REQUEST_CORE_RELEASE");
+        on = e && strcmp(e, "0") != 0;
+    }
+    return on > 0;
+}
+
+static int sync_request(Cpu *c, uint32_t handle) {
+    const bool release = request_core_release();
+    const uint64_t request_start_ns = release ? 0 : core_request_begin();
+    if (release) kernel_host_work_begin();
+    const int result = ipc_handle_request(c, handle);
+    if (release) kernel_host_work_end();
+    core_request_end(request_start_ns);
+    return result;
+}
+
 // Whether t is the waiter that gets the core next. Caller holds k->m.
 static bool core_next(Core *k, KThread *t) {
     for (int i = 0; i < k->nwaiting; i++) {
@@ -1199,18 +1224,11 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = h;
         break;
     }
-    case 0x21: {  // SendSyncRequest
-        const uint64_t request_start_ns = core_request_begin();
-        x[0] = ipc_handle_request(c, (uint32_t)x[0]);
-        core_request_end(request_start_ns);
-        break;
-    }
+    case 0x21: x[0] = sync_request(c, (uint32_t)x[0]); break;  // SendSyncRequest
     case 0x22: {  // SendSyncRequestWithUserBuffer(buf, size, handle)
         uint64_t saved = c->tpidrro;
         c->tpidrro = x[0];
-        const uint64_t request_start_ns = core_request_begin();
-        x[0] = ipc_handle_request(c, (uint32_t)x[2]);
-        core_request_end(request_start_ns);
+        x[0] = sync_request(c, (uint32_t)x[2]);
         c->tpidrro = saved;
         break;
     }
