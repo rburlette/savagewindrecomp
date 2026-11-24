@@ -7,6 +7,7 @@
 
 #include "hle.h"
 #include "kernel.h"
+#include "pc_vr_frame_trace.h"
 #include "platform.h"
 #include "prof.h"
 
@@ -152,6 +153,64 @@ static bool cores_on(void) {
     return g_cores_on;
 }
 
+// (diagnostics) SAVAGEWIND_LOG_CORE_WAIT_MS=<ms>: each wait for a core of at least that long, written with the threads
+// that let the core go while it lasted, how long each had held it and how much of that inside a service request
+// (svc_impl's SendSyncRequest: a file read runs there with the caller's core held). With the PC VR frame trace, the
+// present the wait came after and the waiter's part in the frame. Off, a flag read at each core hand-over.
+static double core_wait_log_ms = -2;  // -1: off
+static bool core_wait_log_on(void) {
+    if (core_wait_log_ms == -2) {
+        const char *e = getenv("SAVAGEWIND_LOG_CORE_WAIT_MS");
+        core_wait_log_ms = e ? atof(e) : -1;
+    }
+    return core_wait_log_ms >= 0;
+}
+typedef struct {
+    uint32_t handle;
+    int prio;
+    uint64_t held_ns, request_ns, released_ns;
+} CoreHold;
+enum { CORE_HOLDS = 16, CORE_WAIT_LINE_CAP = 20000 };
+static CoreHold core_holds[4][CORE_HOLDS];  // (the core's m) its last holders that let it go with a thread waiting
+static uint64_t core_holds_made[4];
+static __thread uint64_t hold_start_ns, hold_request_ns;  // the calling thread's hold of its core, with the log on
+
+static void core_wait_write(const KThread *t, int core, uint64_t waited_ns, const CoreHold *holds, int count,
+                            uint64_t dropped) {
+    static unsigned lines;
+    if (__atomic_fetch_add(&lines, 1, __ATOMIC_RELAXED) >= CORE_WAIT_LINE_CAP) return;
+    // the holders together, by thread
+    CoreHold by_thread[CORE_HOLDS];
+    unsigned times[CORE_HOLDS];
+    int threads = 0;
+    for (int i = 0; i < count; i++) {
+        int j = 0;
+        while (j < threads && by_thread[j].handle != holds[i].handle) j++;
+        if (j == threads) by_thread[threads] = holds[i], by_thread[threads].held_ns = by_thread[threads].request_ns = 0,
+                          times[threads++] = 0;
+        by_thread[j].held_ns += holds[i].held_ns, by_thread[j].request_ns += holds[i].request_ns, times[j]++;
+    }
+    char held_by[640] = "";
+    size_t length = 0;
+    for (int j = 0; j < threads && length < sizeof held_by - 80; j++)
+        length += (size_t)snprintf(held_by + length, sizeof held_by - length, " guest-%x(p%d) %.1f ms, %.1f in requests, x%u;",
+                                   by_thread[j].handle, by_thread[j].prio, by_thread[j].held_ns / 1e6,
+                                   by_thread[j].request_ns / 1e6, times[j]);
+    const char *role = pc_vr_frame_trace_thread_role();
+    LOG("[kernel] core wait: core %d, guest-%x (prio %d%s%s) waited %.1f ms after present %llu; held by:%s%s\n", core,
+        t->handle, t->prio, role ? ", " : "", role ? role : "", waited_ns / 1e6,
+        (unsigned long long)pc_vr_frame_trace_present(), threads ? held_by : " none seen;",
+        dropped ? " (more not kept)" : "");
+}
+
+// A service request's time with the core held, added to the thread's hold (core_wait_log_on).
+static uint64_t core_request_begin(void) { return core_wait_log_on() && hold_start_ns ? plat_now_ns() : 0; }
+static void core_request_end(uint64_t started_ns) {
+    if (!started_ns || !hold_start_ns) return;  // (the core let go inside it and not taken back)
+    const uint64_t now_ns = plat_now_ns(), request_ns = now_ns - started_ns, hold_ns = now_ns - hold_start_ns;
+    hold_request_ns += request_ns < hold_ns ? request_ns : hold_ns;
+}
+
 // Whether t is the waiter that gets the core next. Caller holds k->m.
 static bool core_next(Core *k, KThread *t) {
     for (int i = 0; i < k->nwaiting; i++) {
@@ -167,7 +226,10 @@ static void core_acquire(KThread *t) {
     if (one_core < 0) one_core = getenv("SAVAGEWIND_ONE_CORE") != NULL;
     int idx = one_core ? 0 : t->core & 3;
     Core *k = &g_cores[idx];
+    const bool log_waits = core_wait_log_on() && t == t_cur;
+    const uint64_t wait_start_ns = log_waits ? plat_now_ns() : 0;
     kmutex_lock(&k->m);
+    const uint64_t holds_before = core_holds_made[idx];
     t->core_ticket = k->next_ticket++;
     if (k->nwaiting < 64) k->waiting[k->nwaiting++] = t;
     core_best_update(k);
@@ -177,13 +239,35 @@ static void core_acquire(KThread *t) {
     core_best_update(k);
     if (!k->owner) k->owner = t;  // (during a reboot the core may stay with another thread: run anyway)
     t->core_held = k->owner == t ? idx : -1;
+    CoreHold holds[CORE_HOLDS];
+    int hold_count = 0;
+    uint64_t now_ns = 0, holds_made = 0;
+    if (log_waits) {
+        now_ns = plat_now_ns();
+        holds_made = core_holds_made[idx] - holds_before;
+        if (now_ns - wait_start_ns >= core_wait_log_ms * 1e6)
+            for (uint64_t made = core_holds_made[idx] - (holds_made < CORE_HOLDS ? holds_made : CORE_HOLDS);
+                 made < core_holds_made[idx]; made++)
+                holds[hold_count++] = core_holds[idx][made % CORE_HOLDS];
+    }
     kmutex_unlock(&k->m);
+    if (log_waits) {
+        hold_start_ns = t->core_held >= 0 ? now_ns : 0, hold_request_ns = 0;
+        if (now_ns - wait_start_ns >= core_wait_log_ms * 1e6)
+            core_wait_write(t, idx, now_ns - wait_start_ns, holds, hold_count, holds_made > CORE_HOLDS ? holds_made - CORE_HOLDS : 0);
+    }
 }
 
 static void core_release(KThread *t) {
     if (!t || t->core_held < 0) return;
     Core *k = &g_cores[t->core_held];
     kmutex_lock(&k->m);
+    if (k->nwaiting && t == t_cur && hold_start_ns) {  // (core_wait_log_on: only then is a hold's start kept)
+        const uint64_t now_ns = plat_now_ns();
+        core_holds[t->core_held][core_holds_made[t->core_held]++ % CORE_HOLDS] =
+            (CoreHold){t->handle, t->prio, now_ns - hold_start_ns, hold_request_ns, now_ns};
+    }
+    if (t == t_cur) hold_start_ns = 0;
     if (k->owner == t) k->owner = NULL;
     t->core_held = -1;
     kcond_broadcast(&k->cv);
@@ -1115,11 +1199,18 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = h;
         break;
     }
-    case 0x21: x[0] = ipc_handle_request(c, (uint32_t)x[0]); break;  // SendSyncRequest
+    case 0x21: {  // SendSyncRequest
+        const uint64_t request_start_ns = core_request_begin();
+        x[0] = ipc_handle_request(c, (uint32_t)x[0]);
+        core_request_end(request_start_ns);
+        break;
+    }
     case 0x22: {  // SendSyncRequestWithUserBuffer(buf, size, handle)
         uint64_t saved = c->tpidrro;
         c->tpidrro = x[0];
+        const uint64_t request_start_ns = core_request_begin();
         x[0] = ipc_handle_request(c, (uint32_t)x[2]);
+        core_request_end(request_start_ns);
         c->tpidrro = saved;
         break;
     }

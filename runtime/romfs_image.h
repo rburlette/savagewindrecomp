@@ -19,6 +19,9 @@ uint64_t romfs_image_size(const RomfsImage *img);
 // n bytes of the image at off, past its end zeros; any thread. n, or -1 when a file couldn't be read (logged).
 ssize_t romfs_image_pread(RomfsImage *img, void *dst, uint64_t n, uint64_t off);
 void romfs_image_close(RomfsImage *img);
+// (profiling) The files opened to serve reads since the start, every image together: how many, how many of them were
+// opened before (closed again for want of a free slot), and the time the opens took. Any thread.
+void romfs_image_open_stats(uint64_t *opens, uint64_t *reopens, uint64_t *open_ns);
 
 #ifdef __cplusplus
 }

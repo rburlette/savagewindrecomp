@@ -6,7 +6,9 @@
 
 #include "hle.h"
 #include "pc_vr_config.h"
+#include "perfcount.h"
 #include "platform.h"
+#include "romfs_image.h"
 #include "rt.h"
 
 // The frames by present. A record is made by the game's thread when its present goes to the queue, completed by the
@@ -22,7 +24,14 @@ static struct {
     bool on_grid;
     unsigned pace_frames;
 } making;
-static uint64_t previous_queued_ns, previous_present_id;
+static uint64_t previous_queued_ns, previous_present_id;  // (the present's read by any thread: pc_vr_frame_trace_present)
+// The game's thread only: the file counts at the present before (pc_vr_frame_trace_queued's io line).
+static struct {
+    uint64_t reads, bytes, read_ns, opens, reopens, open_ns;
+} files_before;
+static unsigned io_lines_written;
+enum { IO_LINE_CAP = 30000 };
+static __thread const char *thread_role;  // pc_vr_frame_trace_thread_role
 
 // The queue's thread only: the command lists run since the last present, and its counts at the last offer.
 static struct {
@@ -58,7 +67,33 @@ void pc_vr_frame_trace_started(uint64_t started_ns, uint64_t slept_ns, bool on_g
     pc_vr_stall_sampler_frame(started_ns, previous_present_id);
 }
 
+uint64_t pc_vr_frame_trace_present(void) { return __atomic_load_n(&previous_present_id, __ATOMIC_RELAXED); }
+
+const char *pc_vr_frame_trace_thread_role(void) { return thread_role; }
+
+// The io line of the frame whose present goes to the queue now (pc_vr_frame_trace.h). The game's thread.
+static void write_file_reads(uint64_t present_id) {
+    uint64_t opens, reopens, open_ns;
+    romfs_image_open_stats(&opens, &reopens, &open_ns);
+    const uint64_t reads = atomic_load_explicit(&g_perfcount[PC_FILE_READS], memory_order_relaxed);
+    const uint64_t bytes = atomic_load_explicit(&g_perfcount[PC_FILE_BYTES], memory_order_relaxed);
+    const uint64_t read_ns = atomic_load_explicit(&g_perfcount[PC_FILE_NS], memory_order_relaxed);
+    const uint64_t frame_reads = reads - files_before.reads, frame_opens = opens - files_before.opens;
+    if ((frame_reads || frame_opens) && files_before.reads + files_before.opens && io_lines_written < IO_LINE_CAP) {
+        if (!io_lines_written++)
+            LOG("[pc-vr] io columns: present reads MB read-ms opens reopens open-ms (every thread's reads since the "
+                "present before; read-ms holds open-ms)\n");
+        LOG("[pc-vr] io %llu %llu %.2f %.2f %llu %llu %.2f\n", (unsigned long long)present_id,
+            (unsigned long long)frame_reads, (bytes - files_before.bytes) / 1048576.0, (read_ns - files_before.read_ns) / 1e6,
+            (unsigned long long)frame_opens, (unsigned long long)(reopens - files_before.reopens),
+            (open_ns - files_before.open_ns) / 1e6);
+    }
+    files_before.reads = reads, files_before.bytes = bytes, files_before.read_ns = read_ns;
+    files_before.opens = opens, files_before.reopens = reopens, files_before.open_ns = open_ns;
+}
+
 void pc_vr_frame_trace_update(void) {
+    thread_role = "update";
     pc_vr_stall_sampler_register(false);
     pc_vr_stall_sampler_moved();
 }
@@ -87,9 +122,11 @@ void pc_vr_frame_trace_queued(uint64_t present_id) {
     if (!pc_vr_frame_trace_on() || !present_id) return;
     extern uint64_t g_fs_vfr;  // (nvn/objects.c: when the game's frame update began, set in hle/framepace.c)
     const uint64_t now_ns = plat_now_ns();
+    thread_role = "present";
     pc_vr_stall_sampler_register(true);
     pc_vr_stall_sampler_presented();
-    previous_present_id = present_id;
+    write_file_reads(present_id);
+    __atomic_store_n(&previous_present_id, present_id, __ATOMIC_RELAXED);
     // Without the pace a frame starts where the present before it went out.
     const PcVrFrameRecord made = {.present_id = present_id,
         .start_ns = making.start_ns ? making.start_ns : previous_queued_ns, .slept_ns = making.slept_ns,

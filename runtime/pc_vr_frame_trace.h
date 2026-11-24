@@ -97,7 +97,10 @@ void pc_vr_frame_trace_started(uint64_t started_ns, uint64_t slept_ns, bool on_g
 // The game's thread, in the frame: a wait on a sync begins and ends; a command list goes to the queue.
 void pc_vr_frame_trace_sync(bool ended);
 void pc_vr_frame_trace_submitted(void);
-// The game's thread: the frame's present goes to the queue, with the identity that names the frame from here on.
+// The game's thread: the frame's present goes to the queue, with the identity that names the frame from here on. A
+// frame in which the game read its files (any thread, since the present before) is written as "[pc-vr] io <present>
+// <reads> <MB> <read ms> <opens> <reopens> <open ms>": the read time holds the opens' (runtime/romfs_image.c), a reopen
+// is a file opened before and closed again for want of a free slot.
 void pc_vr_frame_trace_queued(uint64_t present_id);
 // The queue's thread: one of the next present's command lists ran, from began_ns to now.
 void pc_vr_frame_trace_executed(uint64_t began_ns);
@@ -128,6 +131,11 @@ void pc_vr_frame_trace_update(void);
 // it came after, so that what was seen can be laid beside the trace; a person's press comes about half a second after
 // what they saw.
 void pc_vr_frame_trace_user_mark(void);
+// For the kernel's core-wait lines (kernel.c, SAVAGEWIND_LOG_CORE_WAIT_MS): the last present that went to the queue
+// (the frame being made is the one after it), and the calling thread's part in the frame: "update" (the thread that
+// runs the game's update), "present" (the one that queues its present) or NULL. Any thread, with or without the trace.
+uint64_t pc_vr_frame_trace_present(void);
+const char *pc_vr_frame_trace_thread_role(void);
 
 // ---- The stall sampler (runtime/pc_vr_stall_sampler.c, Windows only): while a frame stalls (no stage of it moving,
 // outside a sync wait), what the thread of the game's update and the presenting thread are in, read every couple of

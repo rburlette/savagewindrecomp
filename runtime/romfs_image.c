@@ -8,9 +8,11 @@
 
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -33,7 +35,23 @@ struct RomfsImage {
     pthread_mutex_t lock;
     OpenFile open[OPEN_FILES];
     uint64_t tick;
+    uint8_t *opened_before;  // (profiling) by file: opened once already, so another open is a reopen
 };
+
+// (profiling) romfs_image_open_stats. The clock is the C library's, not the platform's: tools/test_romfs.c builds
+// this file on its own.
+static _Atomic uint64_t open_count, reopen_count, open_time_ns;
+static uint64_t monotonic_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+}
+
+void romfs_image_open_stats(uint64_t *opens, uint64_t *reopens, uint64_t *open_ns) {
+    *opens = atomic_load_explicit(&open_count, memory_order_relaxed);
+    *reopens = atomic_load_explicit(&reopen_count, memory_order_relaxed);
+    *open_ns = atomic_load_explicit(&open_time_ns, memory_order_relaxed);
+}
 
 RomfsImage *romfs_image_open(const char *dir, char *why, size_t why_size) {
     RomfsImage *img = calloc(1, sizeof *img);
@@ -44,6 +62,7 @@ RomfsImage *romfs_image_open(const char *dir, char *why, size_t why_size) {
     char layout_why[256] = "";
     if (stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode) && romfs_layout(dir, &img->layout, layout_why, sizeof layout_why)) {
         img->size = img->layout.size;
+        img->opened_before = calloc((size_t)img->layout.nfiles + 1, 1);
         return img;
     }
     char bin[1100];
@@ -71,7 +90,12 @@ static int file_fd(RomfsImage *img, int i, int *slot) {
         }
         if (!o->busy && (pick < 0 || o->used < img->open[pick].used)) pick = k;
     }
+    const uint64_t open_start_ns = monotonic_ns();
     int fd = open(img->layout.files[i].path, O_RDONLY | O_BINARY);
+    atomic_fetch_add_explicit(&open_time_ns, monotonic_ns() - open_start_ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(&open_count, 1, memory_order_relaxed);
+    if (img->opened_before && img->opened_before[i]) atomic_fetch_add_explicit(&reopen_count, 1, memory_order_relaxed);
+    else if (img->opened_before) img->opened_before[i] = 1;
     *slot = fd >= 0 ? pick : -1;
     if (*slot < 0) return fd;
     if (img->open[pick].fd >= 0) close(img->open[pick].fd);
@@ -129,6 +153,7 @@ void romfs_image_close(RomfsImage *img) {
     for (int k = 0; k < OPEN_FILES; k++)
         if (img->open[k].fd >= 0) close(img->open[k].fd);
     if (img->bin_fd >= 0) close(img->bin_fd);
+    free(img->opened_before);
     romfs_layout_free(&img->layout);
     pthread_mutex_destroy(&img->lock);
     free(img);
