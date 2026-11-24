@@ -3,6 +3,7 @@
 // read from its own file, the gaps zeros), so the game data isn't kept twice. The game's reads (runtime/services/fs.c)
 // and the shader precompilation (runtime/nvn/shader_archive.c) both go through it.
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -22,6 +23,18 @@ void romfs_image_close(RomfsImage *img);
 // (profiling) The files opened to serve reads since the start, every image together: how many, how many of them were
 // opened before (closed again for want of a free slot), and the time the opens took. Any thread.
 void romfs_image_open_stats(uint64_t *opens, uint64_t *reopens, uint64_t *open_ns);
+
+// (experiment) Every file of a folder image read into memory with `threads` threads, before any read: the image's
+// reads after it are copies from memory, with no file opened or read. false: it could not (memory, a file), and the
+// image goes on reading its files. Before the image is shared between threads.
+typedef struct {
+    uint64_t files, bytes;
+    uint64_t wall_ns;                   // the whole preload
+    uint64_t open_ns, read_ns;          // summed over the threads
+    uint64_t slowest_open_ns, slowest_read_ns;
+    int threads;
+} RomfsPreloadStats;
+bool romfs_image_preload(RomfsImage *img, int threads, RomfsPreloadStats *stats);
 
 #ifdef __cplusplus
 }

@@ -1722,6 +1722,19 @@ static Service *open_image(int k, const char *dir, const char *name) {
         }
         LOG("[fs] romfs image %s: %llu MB, laid out in %.2f s\n", dir, (unsigned long long)(romfs_image_size(m->img) >> 20),
             (plat_now_ns() - t0) / 1e9);
+        // (experiment) SAVAGEWIND_ROMFS_PRELOAD=<threads>: every file of the image read into memory now, at its mount
+        // (the boot, before the title screen), so that the game's reads open and read no file (romfs_image_preload)
+        const char *preload = getenv("SAVAGEWIND_ROMFS_PRELOAD");
+        if (preload && atoi(preload) > 0) {
+            RomfsPreloadStats s;
+            if (romfs_image_preload(m->img, atoi(preload), &s))
+                LOG("[fs] romfs preload %s: %llu files, %.0f MB in %.2f s with %d threads; opens %.2f s summed (%.3f ms "
+                    "each, slowest %.1f), reads %.2f s summed (slowest %.1f ms)\n", dir, (unsigned long long)s.files,
+                    s.bytes / 1048576.0, s.wall_ns / 1e9, s.threads, s.open_ns / 1e9, s.files ? s.open_ns / 1e6 / s.files : 0,
+                    s.slowest_open_ns / 1e6, s.read_ns / 1e9, s.slowest_read_ns / 1e6);
+            else
+                LOG("[fs] romfs preload %s failed after %.2f s: reads go to the files\n", dir, s.wall_ns / 1e9);
+        }
         m->ov_sub = k ? "aoc/0010/" : "";  // (the add-on content's place in a mod's folder, as on the Wii U)
         R = m;
         rom_index();

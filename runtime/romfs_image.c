@@ -36,6 +36,7 @@ struct RomfsImage {
     OpenFile open[OPEN_FILES];
     uint64_t tick;
     uint8_t *opened_before;  // (profiling) by file: opened once already, so another open is a reopen
+    uint8_t **preloaded;     // (experiment) by file: its whole data in memory (romfs_image_preload); NULL: from its file
 };
 
 // (profiling) romfs_image_open_stats. The clock is the C library's, not the platform's: tools/test_romfs.c builds
@@ -113,6 +114,10 @@ static int file_fd(RomfsImage *img, int i, int *slot) {
 }
 
 static bool read_file(RomfsImage *img, int i, uint8_t *dst, uint64_t n, uint64_t off) {
+    if (img->preloaded) {  // (no lock: written before the image was shared, never after)
+        memcpy(dst, img->preloaded[i] + off, n);
+        return true;
+    }
     int slot;
     pthread_mutex_lock(&img->lock);
     int fd = file_fd(img, i, &slot);
@@ -157,8 +162,88 @@ ssize_t romfs_image_pread(RomfsImage *img, void *dst_, uint64_t n, uint64_t off)
     return (ssize_t)n;
 }
 
+// romfs_image_preload's threads: each takes the next file not yet taken, reads it whole into its own block.
+typedef struct {
+    RomfsImage *img;
+    uint8_t **blocks;
+    _Atomic int next_file;
+    _Atomic bool failed;
+    _Atomic uint64_t open_ns, read_ns, slowest_open_ns, slowest_read_ns;
+} PreloadWork;
+
+static void atomic_max(_Atomic uint64_t *slot, uint64_t value) {
+    uint64_t seen = atomic_load_explicit(slot, memory_order_relaxed);
+    while (value > seen && !atomic_compare_exchange_weak_explicit(slot, &seen, value, memory_order_relaxed, memory_order_relaxed)) {}
+}
+
+static void *preload_thread(void *arg) {
+    PreloadWork *work = arg;
+    const RomfsLayout *layout = &work->img->layout;
+    for (int i; !atomic_load(&work->failed) && (i = atomic_fetch_add(&work->next_file, 1)) < layout->nfiles;) {
+        const RomfsLayoutFile *file = &layout->files[i];
+        uint8_t *block = malloc(file->size ? file->size : 1);
+        const uint64_t open_start_ns = monotonic_ns();
+        int fd = block ? open(file->path, O_RDONLY | O_BINARY) : -1;
+        const uint64_t read_start_ns = monotonic_ns();
+        uint64_t done = 0;
+        while (fd >= 0 && done < file->size) {
+            const uint64_t chunk = file->size - done < (256u << 20) ? file->size - done : (256u << 20);
+            const ssize_t got = pread(fd, block + done, (size_t)chunk, (off_t)done);
+            if (got <= 0) break;
+            done += (uint64_t)got;
+        }
+        const uint64_t end_ns = monotonic_ns();
+        if (fd >= 0) close(fd);
+        if (done != file->size) {
+            LOG("[romfs] preload: can't read %s\n", file->path);
+            free(block);
+            atomic_store(&work->failed, true);
+            break;
+        }
+        work->blocks[i] = block;
+        atomic_fetch_add_explicit(&work->open_ns, read_start_ns - open_start_ns, memory_order_relaxed);
+        atomic_fetch_add_explicit(&work->read_ns, end_ns - read_start_ns, memory_order_relaxed);
+        atomic_max(&work->slowest_open_ns, read_start_ns - open_start_ns);
+        atomic_max(&work->slowest_read_ns, end_ns - read_start_ns);
+    }
+    return NULL;
+}
+
+bool romfs_image_preload(RomfsImage *img, int threads, RomfsPreloadStats *stats) {
+    memset(stats, 0, sizeof *stats);
+    if (img->bin_fd >= 0 || img->preloaded || threads < 1) return false;
+    if (threads > 64) threads = 64;
+    const int nfiles = img->layout.nfiles;
+    PreloadWork work = {.img = img, .blocks = calloc((size_t)nfiles + 1, sizeof(uint8_t *))};
+    if (!work.blocks) return false;
+    const uint64_t start_ns = monotonic_ns();
+    pthread_t workers[64];
+    int started = 0;
+    for (; started < threads; started++)
+        if (pthread_create(&workers[started], NULL, preload_thread, &work)) break;
+    if (!started) preload_thread(&work);
+    for (int k = 0; k < started; k++) pthread_join(workers[k], NULL);
+    stats->wall_ns = monotonic_ns() - start_ns;
+    stats->threads = started ? started : 1;
+    stats->open_ns = atomic_load(&work.open_ns), stats->read_ns = atomic_load(&work.read_ns);
+    stats->slowest_open_ns = atomic_load(&work.slowest_open_ns), stats->slowest_read_ns = atomic_load(&work.slowest_read_ns);
+    if (atomic_load(&work.failed)) {
+        for (int i = 0; i < nfiles; i++) free(work.blocks[i]);
+        free(work.blocks);
+        return false;
+    }
+    for (int i = 0; i < nfiles; i++) stats->bytes += img->layout.files[i].size;
+    stats->files = (uint64_t)nfiles;
+    img->preloaded = work.blocks;
+    return true;
+}
+
 void romfs_image_close(RomfsImage *img) {
     if (!img) return;
+    if (img->preloaded) {
+        for (int i = 0; i < img->layout.nfiles; i++) free(img->preloaded[i]);
+        free(img->preloaded);
+    }
     for (int k = 0; k < OPEN_FILES; k++)
         if (img->open[k].fd >= 0) close(img->open[k].fd);
     if (img->bin_fd >= 0) close(img->bin_fd);
