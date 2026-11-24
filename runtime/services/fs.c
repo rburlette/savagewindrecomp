@@ -1670,6 +1670,7 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         ssize_t n = romfs_read(m, (uint8_t *)(uintptr_t)b->addr, size, off);
         perfcount_add(PC_FILE_READS, 1), perfcount_add(PC_FILE_NS, plat_now_ns() - ft0);
         if (n > 0) perfcount_add(PC_FILE_BYTES, (uint64_t)n);
+        if (n > 0) romfs_image_note_read(m->img, (const void *)(uintptr_t)b->addr, (uint64_t)n, off);  // (hle/yaz0.c)
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
         if (m != &images[0]) {  // (add-on content: its shrines and Divine Beasts)
             const char *path = image_file_at(m, off);
@@ -1723,17 +1724,25 @@ static Service *open_image(int k, const char *dir, const char *name) {
         LOG("[fs] romfs image %s: %llu MB, laid out in %.2f s\n", dir, (unsigned long long)(romfs_image_size(m->img) >> 20),
             (plat_now_ns() - t0) / 1e9);
         // (experiment) SAVAGEWIND_ROMFS_PRELOAD=<threads>: every file of the image read into memory now, at its mount
-        // (the boot, before the title screen), so that the game's reads open and read no file (romfs_image_preload)
+        // (the boot, before the title screen), so that the game's reads open and read no file (romfs_image_preload).
+        // With SAVAGEWIND_ROMFS_DECOMPRESS=1 too, each Yaz0 file is also kept decompressed, and the game's stream
+        // decoder copies a whole file from there instead of decoding it (hle/yaz0.c).
         const char *preload = getenv("SAVAGEWIND_ROMFS_PRELOAD");
         if (preload && atoi(preload) > 0) {
+            const char *decompress = getenv("SAVAGEWIND_ROMFS_DECOMPRESS");
             RomfsPreloadStats s;
-            if (romfs_image_preload(m->img, atoi(preload), &s))
+            if (romfs_image_preload(m->img, atoi(preload), decompress && atoi(decompress) > 0 ? yaz0_unpack : NULL, &s)) {
                 LOG("[fs] romfs preload %s: %llu files, %.0f MB in %.2f s with %d threads; opens %.2f s summed (%.3f ms "
                     "each, slowest %.1f), reads %.2f s summed (slowest %.1f ms)\n", dir, (unsigned long long)s.files,
                     s.bytes / 1048576.0, s.wall_ns / 1e9, s.threads, s.open_ns / 1e9, s.files ? s.open_ns / 1e6 / s.files : 0,
                     s.slowest_open_ns / 1e6, s.read_ns / 1e9, s.slowest_read_ns / 1e6);
-            else
+                if (s.decompressed_files || s.decompress_failed)
+                    LOG("[fs] romfs preload %s: %llu Yaz0 files decompressed, %.0f MB to %.0f MB, %.2f s summed; %llu "
+                        "failed\n", dir, (unsigned long long)s.decompressed_files, s.decompressed_in / 1048576.0,
+                        s.decompressed_out / 1048576.0, s.decompress_ns / 1e9, (unsigned long long)s.decompress_failed);
+            } else {
                 LOG("[fs] romfs preload %s failed after %.2f s: reads go to the files\n", dir, s.wall_ns / 1e9);
+            }
         }
         m->ov_sub = k ? "aoc/0010/" : "";  // (the add-on content's place in a mod's folder, as on the Wii U)
         R = m;

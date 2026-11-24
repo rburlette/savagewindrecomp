@@ -4,6 +4,7 @@
 // and the shader precompilation (runtime/nvn/shader_archive.c) both go through it.
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -27,14 +28,24 @@ void romfs_image_open_stats(uint64_t *opens, uint64_t *reopens, uint64_t *open_n
 // (experiment) Every file of a folder image read into memory with `threads` threads, before any read: the image's
 // reads after it are copies from memory, with no file opened or read. false: it could not (memory, a file), and the
 // image goes on reading its files. Before the image is shared between threads.
+// With decompress (a Yaz0 decoder: services/archive.c yaz0_unpack), each Yaz0 file is kept decompressed as well, for
+// the game's stream decoder to copy from (hle/yaz0.c, romfs_image_find_decompressed).
+typedef uint8_t *(*RomfsDecompressFn)(const uint8_t *data, size_t size, size_t *out_size);
 typedef struct {
     uint64_t files, bytes;
     uint64_t wall_ns;                   // the whole preload
     uint64_t open_ns, read_ns;          // summed over the threads
     uint64_t slowest_open_ns, slowest_read_ns;
+    uint64_t decompressed_files, decompressed_in, decompressed_out, decompress_ns, decompress_failed;
     int threads;
 } RomfsPreloadStats;
-bool romfs_image_preload(RomfsImage *img, int threads, RomfsPreloadStats *stats);
+bool romfs_image_preload(RomfsImage *img, int threads, RomfsDecompressFn decompress, RomfsPreloadStats *stats);
+// (experiment) A read of the image's [off, off + size) went to dst (services/fs.c): kept for the lookup below while
+// any image holds decompressed files. Any thread.
+void romfs_image_note_read(RomfsImage *img, const void *dst, uint64_t size, uint64_t off);
+// The decompressed copy of the Yaz0 file whose start a noted read put at src, when the len bytes there are that file's
+// own (compared with its preloaded copy). false: none. Any thread.
+bool romfs_image_find_decompressed(const void *src, uint64_t len, const uint8_t **data, uint64_t *size);
 
 #ifdef __cplusplus
 }

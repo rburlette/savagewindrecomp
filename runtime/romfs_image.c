@@ -37,6 +37,8 @@ struct RomfsImage {
     uint64_t tick;
     uint8_t *opened_before;  // (profiling) by file: opened once already, so another open is a reopen
     uint8_t **preloaded;     // (experiment) by file: its whole data in memory (romfs_image_preload); NULL: from its file
+    uint8_t **decompressed;  // (experiment) by file: a Yaz0 file's data decompressed (NULL: not one, or not kept)
+    uint64_t *decompressed_size;
 };
 
 // (profiling) romfs_image_open_stats. The clock is the C library's, not the platform's: tools/test_romfs.c builds
@@ -166,9 +168,13 @@ ssize_t romfs_image_pread(RomfsImage *img, void *dst_, uint64_t n, uint64_t off)
 typedef struct {
     RomfsImage *img;
     uint8_t **blocks;
+    RomfsDecompressFn decompress;  // NULL: keep the files as they are
+    uint8_t **decompressed;
+    uint64_t *decompressed_size;
     _Atomic int next_file;
     _Atomic bool failed;
     _Atomic uint64_t open_ns, read_ns, slowest_open_ns, slowest_read_ns;
+    _Atomic uint64_t decompressed_files, decompressed_in, decompressed_out, decompress_ns, decompress_failed;
 } PreloadWork;
 
 static void atomic_max(_Atomic uint64_t *slot, uint64_t value) {
@@ -201,6 +207,20 @@ static void *preload_thread(void *arg) {
             break;
         }
         work->blocks[i] = block;
+        if (work->decompress && file->size >= 16 && !memcmp(block, "Yaz0", 4)) {
+            const uint64_t decompress_start_ns = monotonic_ns();
+            size_t out_size = 0;
+            uint8_t *out = work->decompress(block, (size_t)file->size, &out_size);
+            atomic_fetch_add_explicit(&work->decompress_ns, monotonic_ns() - decompress_start_ns, memory_order_relaxed);
+            if (out) {
+                work->decompressed[i] = out, work->decompressed_size[i] = out_size;
+                atomic_fetch_add_explicit(&work->decompressed_files, 1, memory_order_relaxed);
+                atomic_fetch_add_explicit(&work->decompressed_in, file->size, memory_order_relaxed);
+                atomic_fetch_add_explicit(&work->decompressed_out, out_size, memory_order_relaxed);
+            } else {
+                atomic_fetch_add_explicit(&work->decompress_failed, 1, memory_order_relaxed);
+            }
+        }
         atomic_fetch_add_explicit(&work->open_ns, read_start_ns - open_start_ns, memory_order_relaxed);
         atomic_fetch_add_explicit(&work->read_ns, end_ns - read_start_ns, memory_order_relaxed);
         atomic_max(&work->slowest_open_ns, read_start_ns - open_start_ns);
@@ -209,13 +229,72 @@ static void *preload_thread(void *arg) {
     return NULL;
 }
 
-bool romfs_image_preload(RomfsImage *img, int threads, RomfsPreloadStats *stats) {
+// romfs_image_find_decompressed: the images holding decompressed files, and the latest reads of any image
+static _Atomic int decompressed_images;
+enum { NOTED_READS = 64 };
+static struct {
+    const uint8_t *dst;
+    uint64_t size, off;
+    RomfsImage *img;
+} noted_reads[NOTED_READS];
+static unsigned noted_next;
+static pthread_mutex_t noted_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void romfs_image_note_read(RomfsImage *img, const void *dst, uint64_t size, uint64_t off) {
+    if (!atomic_load_explicit(&decompressed_images, memory_order_relaxed) || !img->decompressed) return;
+    pthread_mutex_lock(&noted_lock);
+    const unsigned slot = noted_next++ % NOTED_READS;
+    noted_reads[slot].dst = dst, noted_reads[slot].size = size, noted_reads[slot].off = off, noted_reads[slot].img = img;
+    pthread_mutex_unlock(&noted_lock);
+}
+
+bool romfs_image_find_decompressed(const void *src_, uint64_t len, const uint8_t **data, uint64_t *size) {
+    if (!atomic_load_explicit(&decompressed_images, memory_order_relaxed)) return false;
+    const uint8_t *src = src_;
+    RomfsImage *img = NULL;
+    uint64_t at = 0;
+    pthread_mutex_lock(&noted_lock);
+    for (unsigned k = 0; k < NOTED_READS && k < noted_next; k++) {  // (the latest first)
+        const unsigned slot = (noted_next - 1 - k) % NOTED_READS;
+        if (src >= noted_reads[slot].dst && src < noted_reads[slot].dst + noted_reads[slot].size) {
+            img = noted_reads[slot].img, at = noted_reads[slot].off + (uint64_t)(src - noted_reads[slot].dst);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&noted_lock);
+    if (!img || !img->decompressed) return false;
+    const RomfsLayout *layout = &img->layout;
+    int lo = 0, hi = layout->nfiles - 1;
+    while (lo <= hi) {  // the file that starts at `at`
+        const int mid = (lo + hi) / 2;
+        if (layout->files[mid].start < at) lo = mid + 1;
+        else if (layout->files[mid].start > at) hi = mid - 1;
+        else {
+            if (!img->decompressed[mid]) return false;
+            const uint64_t compare = len < layout->files[mid].size ? len : layout->files[mid].size;
+            if (memcmp(src, img->preloaded[mid], (size_t)compare)) return false;
+            *data = img->decompressed[mid], *size = img->decompressed_size[mid];
+            return true;
+        }
+    }
+    return false;
+}
+
+bool romfs_image_preload(RomfsImage *img, int threads, RomfsDecompressFn decompress, RomfsPreloadStats *stats) {
     memset(stats, 0, sizeof *stats);
     if (img->bin_fd >= 0 || img->preloaded || threads < 1) return false;
     if (threads > 64) threads = 64;
     const int nfiles = img->layout.nfiles;
-    PreloadWork work = {.img = img, .blocks = calloc((size_t)nfiles + 1, sizeof(uint8_t *))};
+    PreloadWork work = {.img = img, .blocks = calloc((size_t)nfiles + 1, sizeof(uint8_t *)), .decompress = decompress};
     if (!work.blocks) return false;
+    if (decompress) {
+        work.decompressed = calloc((size_t)nfiles + 1, sizeof(uint8_t *));
+        work.decompressed_size = calloc((size_t)nfiles + 1, sizeof(uint64_t));
+        if (!work.decompressed || !work.decompressed_size) {
+            free(work.blocks), free(work.decompressed), free(work.decompressed_size);
+            return false;
+        }
+    }
     const uint64_t start_ns = monotonic_ns();
     pthread_t workers[64];
     int started = 0;
@@ -227,14 +306,24 @@ bool romfs_image_preload(RomfsImage *img, int threads, RomfsPreloadStats *stats)
     stats->threads = started ? started : 1;
     stats->open_ns = atomic_load(&work.open_ns), stats->read_ns = atomic_load(&work.read_ns);
     stats->slowest_open_ns = atomic_load(&work.slowest_open_ns), stats->slowest_read_ns = atomic_load(&work.slowest_read_ns);
+    stats->decompressed_files = atomic_load(&work.decompressed_files), stats->decompress_ns = atomic_load(&work.decompress_ns);
+    stats->decompressed_in = atomic_load(&work.decompressed_in), stats->decompressed_out = atomic_load(&work.decompressed_out);
+    stats->decompress_failed = atomic_load(&work.decompress_failed);
     if (atomic_load(&work.failed)) {
-        for (int i = 0; i < nfiles; i++) free(work.blocks[i]);
-        free(work.blocks);
+        for (int i = 0; i < nfiles; i++) {
+            free(work.blocks[i]);
+            if (work.decompressed) free(work.decompressed[i]);
+        }
+        free(work.blocks), free(work.decompressed), free(work.decompressed_size);
         return false;
     }
     for (int i = 0; i < nfiles; i++) stats->bytes += img->layout.files[i].size;
     stats->files = (uint64_t)nfiles;
     img->preloaded = work.blocks;
+    if (decompress) {
+        img->decompressed = work.decompressed, img->decompressed_size = work.decompressed_size;
+        atomic_fetch_add(&decompressed_images, 1);
+    }
     return true;
 }
 
@@ -243,6 +332,15 @@ void romfs_image_close(RomfsImage *img) {
     if (img->preloaded) {
         for (int i = 0; i < img->layout.nfiles; i++) free(img->preloaded[i]);
         free(img->preloaded);
+    }
+    if (img->decompressed) {  // (closed when no read is running: a reboot; its noted reads are forgotten)
+        atomic_fetch_sub(&decompressed_images, 1);
+        pthread_mutex_lock(&noted_lock);
+        for (int k = 0; k < NOTED_READS; k++)
+            if (noted_reads[k].img == img) noted_reads[k].img = NULL, noted_reads[k].size = 0;
+        pthread_mutex_unlock(&noted_lock);
+        for (int i = 0; i < img->layout.nfiles; i++) free(img->decompressed[i]);
+        free(img->decompressed), free(img->decompressed_size);
     }
     for (int k = 0; k < OPEN_FILES; k++)
         if (img->open[k].fd >= 0) close(img->open[k].fd);

@@ -11,18 +11,57 @@
 //
 // SAVAGEWIND_YAZ0=0: the game's code. =2: both, compared: the native result is worked out on a copy, the game's code
 // runs, and its exit (yaz0_stream_ret) checks the state, the result and every byte written ("[yaz0] check").
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../cpu.h"
+#include "../platform.h"
+#include "../romfs_image.h"
 #include "../rt.h"
 
 static int yaz0_mode(void) {
     static int m = -1;
     if (m < 0) m = getenv("SAVAGEWIND_YAZ0") ? atoi(getenv("SAVAGEWIND_YAZ0")) : 1;
     return m;
+}
+
+// (experiment) SAVAGEWIND_ROMFS_DECOMPRESS=1, with SAVAGEWIND_ROMFS_PRELOAD (services/fs.c): a stream whose first chunk
+// is the start of a RomFS file kept decompressed in memory (romfs_image_find_decompressed) is not decoded. The game's
+// code reads the header alone (the chunk cut to its 16 bytes); at its return the whole file is copied to the output and
+// the stream reported done, and later chunks of it are taken without output. Every way out of the game's decoder is
+// the hooked ret (1.9.0: its blocks past it all branch back to it), so a cut chunk is always finished here.
+static bool copy_whole_files(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("SAVAGEWIND_ROMFS_DECOMPRESS") && atoi(getenv("SAVAGEWIND_ROMFS_DECOMPRESS")) > 0;
+    return on > 0;
+}
+
+// The decoder's times and counts (always): the game's code's calls (a stream's first, with its header), the native
+// calls, the whole-file copies. Written as "[yaz0]" lines at powers of two of the streams and every 4096 after.
+static _Atomic uint64_t game_calls, game_ns, native_calls, native_ns, native_out, copies, copy_ns, copy_out;
+static _Atomic uint64_t not_found, not_copied, later_chunks_taken;
+static __thread struct {
+    bool timed, pending;  // a call of the game's code in progress (timed to its return); a copy waiting for it
+    uint8_t *s;
+    const uint8_t *src;
+    uint32_t len;
+    const uint8_t *data;
+    uint64_t size, start_ns;
+} call;
+static __thread uint8_t *copied_state;  // the stream last copied whole on this thread: its later chunks are taken
+
+static void write_counts(void) {
+    const uint64_t streams = atomic_load_explicit(&game_calls, memory_order_relaxed);
+    if (streams & (streams - 1) && streams % 4096) return;
+    LOG("[yaz0] %llu streams, their first calls in the game's code %.1f ms; %llu native calls %.1f ms, %.1f MB out; "
+        "%llu copied whole %.1f MB in %.1f ms; %llu not found, %llu not copied, %llu later chunks taken\n",
+        (unsigned long long)streams, atomic_load(&game_ns) / 1e6, (unsigned long long)atomic_load(&native_calls),
+        atomic_load(&native_ns) / 1e6, atomic_load(&native_out) / 1048576.0, (unsigned long long)atomic_load(&copies),
+        atomic_load(&copy_out) / 1048576.0, atomic_load(&copy_ns) / 1e6, (unsigned long long)atomic_load(&not_found),
+        (unsigned long long)atomic_load(&not_copied), (unsigned long long)atomic_load(&later_chunks_taken));
 }
 
 // The decoder on host pointers: s the 0x1c-byte state, dst its output pointer (s's own +0, or a copy's), src/len the
@@ -140,11 +179,39 @@ int rt_yaz0(Cpu *c) {
     uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
     const uint8_t *src = (const uint8_t *)(uintptr_t)c->x[1];
     uint32_t len = (uint32_t)c->x[2];
-    if (!mode || s[0x1a] || !len) return 0;
+    call.timed = call.pending = false;
+    if (!mode || !len) return 0;
+    if (s[0x1a]) {  // a stream's first call, with its header: the game's code, timed to its return (rt_yaz0_done)
+        if (s == copied_state) copied_state = NULL;
+        call.timed = true, call.s = s, call.start_ns = plat_now_ns();
+        if (mode == 1 && copy_whole_files() && s[0x1a] == 16 && len > 16 && !memcmp(src, "Yaz0", 4)) {
+            if (romfs_image_find_decompressed(src, len, &call.data, &call.size)) {
+                call.pending = true, call.src = src, call.len = len;
+                c->x[2] = 16;  // (the game's code reads the header alone)
+            } else {
+                atomic_fetch_add_explicit(&not_found, 1, memory_order_relaxed);
+            }
+        }
+        return 0;
+    }
     uint64_t d; memcpy(&d, s, 8);
     if (mode != 2) {
+        if (s == copied_state) {  // more input of a stream already copied whole
+            int32_t left; memcpy(&left, s + 8, 4);
+            if (left == 0) {
+                atomic_fetch_add_explicit(&later_chunks_taken, 1, memory_order_relaxed);
+                c->x[0] = 0;
+                return 1;
+            }
+            copied_state = NULL;
+        }
+        const uint64_t start_ns = plat_now_ns();
         bool stored;
         c->x[0] = yaz0_run(s, (uint8_t *)(uintptr_t)d, src, len, &stored);
+        uint64_t end; memcpy(&end, s, 8);
+        atomic_fetch_add_explicit(&native_ns, plat_now_ns() - start_ns, memory_order_relaxed);
+        atomic_fetch_add_explicit(&native_calls, 1, memory_order_relaxed);
+        if (stored) atomic_fetch_add_explicit(&native_out, end - d, memory_order_relaxed);
         return 1;
     }
     // check mode: on a copy of the state and of the output (and the 4 KB before it, which copies read)
@@ -169,8 +236,49 @@ int rt_yaz0(Cpu *c) {
     return 0;
 }
 
-// The decoder's return (game code): the check mode's comparison
+// The header read by the game's code (its return value what is still to write, nothing written yet): the whole file from
+// its decompressed copy, or, when the stream wants something else, the rest of the chunk natively, as the game's code
+// would have gone on.
+static void finish_whole_file(Cpu *c) {
+    uint8_t *s = call.s;
+    int32_t left; memcpy(&left, s + 8, 4);
+    uint32_t cut; memcpy(&cut, s + 0xc, 4);
+    uint64_t d; memcpy(&d, s, 8);
+    const uint64_t start_ns = plat_now_ns();
+    if (!s[0x1a] && (int32_t)c->x[0] == left && left > 0 &&
+        ((uint64_t)left == call.size || ((uint64_t)left < call.size && cut))) {
+        memcpy((void *)(uintptr_t)d, call.data, (size_t)left);
+        const uint64_t end = d + (uint64_t)left;
+        const int32_t none = 0;
+        memcpy(s, &end, 8), memcpy(s + 8, &none, 4), memcpy(s + 0x14, &none, 4);  // all written, no copy half read
+        s[0x10] = 0;                                                               // no flag bits left
+        c->x[0] = 0;
+        copied_state = s;
+        atomic_fetch_add_explicit(&copies, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&copy_out, (uint64_t)left, memory_order_relaxed);
+        atomic_fetch_add_explicit(&copy_ns, plat_now_ns() - start_ns, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_add_explicit(&not_copied, 1, memory_order_relaxed);
+    if (!s[0x1a]) {
+        bool stored;
+        c->x[0] = yaz0_run(s, (uint8_t *)(uintptr_t)d, call.src + 16, call.len - 16, &stored);
+    }
+}
+
+// The decoder's return (game code): the timing of a stream's first call and its whole-file copy; the check mode's
+// comparison
 void rt_yaz0_done(Cpu *c) {
+    if (call.timed) {
+        call.timed = false;
+        atomic_fetch_add_explicit(&game_ns, plat_now_ns() - call.start_ns, memory_order_relaxed);
+        atomic_fetch_add_explicit(&game_calls, 1, memory_order_relaxed);
+        if (call.pending) {
+            call.pending = false;
+            finish_whole_file(c);
+        }
+        write_counts();
+    }
     if (!chk.on) return;
     chk.on = false;
     bool ok = (uint32_t)c->x[0] == chk.result;
