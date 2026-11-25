@@ -1,5 +1,5 @@
-// PC VR: the game's frames paced by the headset. An experiment (2026-11-15), off unless SAVAGEWIND_PC_VR_HEADSET_PACE
-// is set; without it the frame limiter (runtime/nvn/objects.c present_pace) is as upstream has it.
+// PC VR: the game's frames paced by the headset. Since 2026-11-15, the play setting since D130 (vr_headset_pace = 2
+// in savagewind.ini); with 0 the frame limiter (runtime/nvn/objects.c present_pace) is as upstream has it.
 //
 // Why. The frame limiter keeps a grid of its own, a frame every 1 / frame rate from wherever the first one fell, and
 // waits at the present, before the frame's image is offered to the headset. With the headset at 90 Hz and the game at
@@ -17,8 +17,8 @@
 //    image goes to the headset at once and the spare time is spent before the next frame reads its pose;
 //  - a late frame never waits: it starts at once, and the grid carries on from the display frame it fell in.
 // The game's clock follows the frames' real lengths as before (framepace_presented). The head pose should reach the
-// game every display frame with it (SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING=1), or the pose read after the wait is the
-// one published for the present before it.
+// game every display frame with it (the configuration's display_rate_tracking, on with the pace), or the pose read
+// after the wait is the one published for the present before it.
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
@@ -69,7 +69,7 @@ static inline uint64_t pc_vr_pace_frame_start(const PcVrDisplayClock *clock, int
     return (uint64_t)start;
 }
 
-// The pose wait (an experiment, 2026-11-23, off unless SAVAGEWIND_PC_VR_POSE_WAIT_BUDGET_MS is set). The game builds
+// The pose wait (2026-11-23, vr_pose_wait_ms: 8.5 since D130; 0 turns it off). The game builds
 // its eye cameras on its own thread a few milliseconds after the present before, while the presenting thread still
 // waits out the pace above: measured on Link, a frame's pose is read about 19 ms before its command lists are handed
 // on, of which the game's work is about 7 ms and the rest is waiting, after the pose is taken. This moves that wait

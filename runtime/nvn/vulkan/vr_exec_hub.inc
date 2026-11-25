@@ -284,7 +284,7 @@ static bool vr_backdrop_source(const NvnTexture *texture) { return texture && (t
 static bool vr_backdrop_pictures_black, vr_backdrop_erase;
 static VrBackdropFate vr_hud_backdrop_fate(Prog *program) {
     const VrBackdropFate fate = vr_backdrop_fate_of_role(vr_draw_role);
-    if (pc_vr_config()->play.hud_backdrop || !fate) return VR_BACKDROP_NONE;
+    if (pc_vr_config()->diagnostics.hud_backdrop || !fate) return VR_BACKDROP_NONE;
     for (int i = 0; i < program->fi->ntex; i++)
         if (vr_backdrop_source(shader_texture_object(1, &program->fi->tex[i]))) return fate;
     return VR_BACKDROP_NONE;
@@ -544,7 +544,7 @@ static bool vr_world_hud_patch(uint64_t address, uint64_t size, VkDescriptorBuff
 // _rscale), and returns true.
 static bool vr_world_hud_draw(void) {
     const PcVrConfig *config = pc_vr_config();
-    if (!config->play.world_hud || !st.rt.color[0]) return false;
+    if (!config->diagnostics.world_hud || !st.rt.color[0]) return false;
     // D088: where the draw goes. Exactly: the game stored a reported point into its pane, or one of its parents
     // (vr_draw_marker, the binding: the helper's markers, the speech balloons), or its pane belongs to an aiming
     // reticle (vr_draw_role). A piece at the game's own fixed HUD place (PC_VR_MARKER_FLAT) and everything else stay
@@ -606,8 +606,8 @@ static bool vr_world_hud_draw(void) {
     const double focus = pc_vr_camera_focus_distance();
     // Project the marker's panes, or the reticle and its count on the aim ray, as one card for both eyes.
     VrHudMarkerPlacement placed;
-    vr_hud_marker_move(&seen, marker, viewport, labo_offset, tan_per_pixel, focus, config->play.world_hud_upright,
-                       config->play.world_hud_test_turn, &vr_world_hud.move, &placed);
+    vr_hud_marker_move(&seen, marker, viewport, labo_offset, tan_per_pixel, focus, config->diagnostics.world_hud_upright,
+                       config->diagnostics.world_hud_test_turn, &vr_world_hud.move, &placed);
     ++vr_world_hud.draws;
     ++vr_world_hud.frame_draws;
     // (a large pane placed: the binding or role took one that the size cap before backlog 9 left on the panel)

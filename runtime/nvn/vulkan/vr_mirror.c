@@ -57,7 +57,7 @@ bool vr_mirror_takes(const TexBackend *presented, const TexBackend *final_image)
 }
 
 bool vr_mirror_window_drawn(uint64_t present) {
-    if (!pc_vr_config()->diagnostics.no_desktop_image) return true;
+    if (pc_vr_config()->settings.desktop_picture) return true;
     // The unattended endpoint is the window's own shot (SAVAGEWIND_WINDOW_SHOT, device.c): that one present is drawn.
     static long endpoint_present = -1;
     if (endpoint_present < 0) {

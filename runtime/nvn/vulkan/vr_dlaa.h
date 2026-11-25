@@ -1,5 +1,5 @@
-// PC VR renderer: NVIDIA DLAA or DLSS on each eye image (SAVAGEWIND_PC_VR_DLAA=1 and SAVAGEWIND_PC_VR_DLSS_RATIO,
-// pc_vr_config.h; DLSS is the play default since D132).
+// PC VR renderer: NVIDIA DLAA or DLSS on each eye image (vr_antialiasing, vr_dlss_ratio and
+// vr_dlss_eye_scale in savagewind.ini, pc_vr_config.h; DLSS is the play default since D132).
 //
 // Responsible for: each eye's temporal anti-aliasing, with an NGX feature and a history per eye (dlss.h
 // VK_DLSS_SLOT_LEFT_EYE, _RIGHT_EYE), at the eye's placement into the final image (exec.c scene_post, after the eye's
@@ -40,8 +40,8 @@
 
 // The modes, cycled in this order by the '9' key (runtime/hle/input.c) while the switch is on and DLSS runs here (an
 // NVIDIA RTX GPU with NGX, and NVIDIA's library next to savagewind.exe): none (the eye images as the game makes them,
-// its FXAA on), DLAA at the configured eye scale, DLSS from SAVAGEWIND_PC_VR_DLSS_RATIO times smaller (1.5) up to
-// SAVAGEWIND_PC_VR_DLSS_EYE_SCALE (3.0). The run starts in DLAA, or in DLSS when the ratio is given. A change takes
+// its FXAA on), DLAA at the configured eye scale, DLSS from vr_dlss_ratio times smaller (1.5) up to
+// vr_dlss_eye_scale (3.0). The run starts in the mode vr_antialiasing names (dlss, or dlaa). A change takes
 // effect at the next present: the eye size (pc_vr_eye_scale_override) and the eye targets' scale change with it, the
 // renderer makes its scaled targets and the XR owner its swapchains again at the new sizes, and the histories start
 // over.

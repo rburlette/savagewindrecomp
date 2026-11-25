@@ -803,8 +803,7 @@ void vk_translator_setup(void) {
 static bool gpu_overlap(void) {
     static int on = -1;
     if (on < 0) {
-        const char *option = getenv("SAVAGEWIND_GPU_OVERLAP");
-        on = option ? atoi(option) != 0 : !pc_vr_enabled();
+        on = getenv("SAVAGEWIND_GPU_OVERLAP") ? atoi(getenv("SAVAGEWIND_GPU_OVERLAP")) != 0 : !pc_vr_enabled();
         LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; SAVAGEWIND_GPU_OVERLAP=0/1: off/on, PC VR default off)\n",
             on ? "on" : "off");
     }
@@ -9184,7 +9183,7 @@ static void draw(CmdRec *r, bool indexed) {
     vr_draw_screen = nvn_screen_tag(r);  // (D088: the UI screen that recorded it, and its pane's marker)
     vr_draw_role = (PcVrPaneRole)nvn_pane_role(r);
     vr_draw_certificate = nvn_render_certificate(r);
-    vr_draw_rune_aim = (nvn_layer_draw(r) & PC_VR_LAYER_DRAW_RUNE_TEST) ? pc_vr_config()->play.rune_aim : PC_VR_RUNE_AIM_OFF;
+    vr_draw_rune_aim = (nvn_layer_draw(r) & PC_VR_LAYER_DRAW_RUNE_TEST) ? pc_vr_config()->diagnostics.rune_aim : PC_VR_RUNE_AIM_OFF;
     vr_draw_marker = nvn_marker_tag(r);
     vr_draw_pane = 0;
     if (vr_draw_marker & PC_VR_PANE_LOG_TAG) {  // [pc-vr-audit] SAVAGEWIND_LOG_PANES: the pane's number, no marker

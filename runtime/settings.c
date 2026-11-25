@@ -10,6 +10,7 @@
 #include "input_bind.h"
 #include "language.h"
 #include "handheld.h"
+#include "pc_vr_settings.inc"  // (PC VR's lines: vr, vr_*)
 
 bool fsr3_upscaler_enabled(void);  // (nvn/output_scale.c: SAVAGEWIND_FSR3=0 hides FSR 3 / 4)
 
@@ -758,7 +759,8 @@ void settings_load(void) {
                 if (!strcmp(val, g_voice_languages[i].folder)) g_settings.voice_language = i;
         }
         else if (!strcmp(key, "menu_tip_seen")) g_settings.menu_tip_seen = atoi(val) != 0, tip_key = true;
-        else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
+        else if (!pc_vr_settings_take(key, val))  // (vr, vr_*: runtime/pc_vr_config.h)
+            bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
     if (version < 2) {
@@ -1062,6 +1064,7 @@ bool settings_save_to(const char *path) {
     fprintf(f, "text_speed = %s\n", k_text_speed[ts >= 0 && ts < TEXT_SPEED_COUNT ? ts : TEXT_SPEED_NORMAL]);
     fprintf(f, "menu_tip_seen = %d\n", g_settings.menu_tip_seen);
     fprintf(f, "camera_keep_stealth = %d\n", g_settings.camera_keep_stealth);
+    pc_vr_settings_write(f);  // (vr, vr_*: runtime/pc_vr_config.h)
     bind_settings_save(f);
     fclose(f);
     return true;

@@ -898,7 +898,7 @@ void pc_vr_projection_trace_init(void) {
         LOG("[pc-vr-projection] disabled: no PC VR sites for this game version\n");
         return;
     }
-    const double units_per_meter = pc_vr_config()->play.native_view_units_per_meter;  // (finite, above 0: its parse)
+    const double units_per_meter = pc_vr_config()->settings.native_view_units_per_meter;  // (finite, above 0: its parse)
     pthread_mutex_lock(&projection_lock);
     if (!projection_registered) {
         const GuestFn builder = dispatch_lookup(PROJ_BUILDER), device = dispatch_lookup(PROJ_DEVICE);

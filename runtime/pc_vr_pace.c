@@ -32,7 +32,7 @@ uint64_t pc_vr_pace_game_period_ns(void) {
 
 bool pc_vr_pace_on(void) {
     const PcVrConfig *config = pc_vr_config();
-    return config->enabled && config->diagnostics.headset_pace;
+    return config->enabled && config->settings.headset_pace;
 }
 
 bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced) {
@@ -46,15 +46,15 @@ bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced) {
     }
     const PcVrConfig *config = pc_vr_config();
     const unsigned display_frames =
-        pc_vr_pace_display_frames(config->diagnostics.headset_pace, limit_period_ns, clock.period_ns);
+        pc_vr_pace_display_frames(config->settings.headset_pace, limit_period_ns, clock.period_ns);
     const uint64_t now_xr_ns = xr_runtime_pose_clock_ns();
-    const uint64_t start_xr_ns = pc_vr_pace_frame_start(&clock, config->diagnostics.headset_pace_offset_ns,
+    const uint64_t start_xr_ns = pc_vr_pace_frame_start(&clock, config->settings.headset_pace_offset_ns,
         display_frames * clock.period_ns, previous_start_ns, now_xr_ns);
     static bool logged;
     if (!logged) {
         logged = true;
         LOG("[pc-vr] headset pace: a game frame every %u display frames of %.3f ms, starting %+.3f ms from one's start\n",
-            display_frames, clock.period_ns / 1e6, config->diagnostics.headset_pace_offset_ns / 1e6);
+            display_frames, clock.period_ns / 1e6, config->settings.headset_pace_offset_ns / 1e6);
     }
     previous_start_ns = start_xr_ns;
     atomic_store(&shared_game_period_ns, display_frames * clock.period_ns);
@@ -75,11 +75,11 @@ bool pc_vr_pace_frame(uint64_t limit_period_ns, PcVrPacedFrame *paced) {
 }
 
 bool pc_vr_pace_pose_wait_on(void) {
-    return pc_vr_pace_on() && pc_vr_config()->diagnostics.pose_wait_budget_ns;
+    return pc_vr_pace_on() && pc_vr_config()->settings.pose_wait_budget_ns;
 }
 
 void pc_vr_pace_pose_wait(void) {
-    const uint64_t work_budget_ns = pc_vr_config()->diagnostics.pose_wait_budget_ns;
+    const uint64_t work_budget_ns = pc_vr_config()->settings.pose_wait_budget_ns;
     if (!pc_vr_pace_pose_wait_on()) return;
     const uint64_t paced_start_ns = atomic_load(&shared_start_ns);
     PcVrDisplayClock clock;

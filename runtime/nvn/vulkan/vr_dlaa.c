@@ -60,15 +60,9 @@ static float vr_dlaa_bias;
 
 bool vr_dlaa_enabled(void) { return vr_dlaa_mode != VR_DLAA_MODE_NONE; }
 
-// The DLSS mode's render ratio and eye scale: the configuration's, else 1.5 (NVIDIA's Quality) and 3.0.
-static double vr_dlss_ratio(void) {
-    const double ratio = pc_vr_config()->diagnostics.dlss_ratio;
-    return ratio > 1 ? ratio : 1.5;
-}
-static double vr_dlss_eye_scale(void) {
-    const double scale = pc_vr_config()->diagnostics.dlss_eye_scale;
-    return scale > 1 ? scale : 3.0;
-}
+// The DLSS mode's render ratio and eye scale (vr_dlss_ratio, vr_dlss_eye_scale: 1.5, NVIDIA's Quality, and 3.0)
+static double vr_dlss_ratio(void) { return pc_vr_config()->settings.dlss_ratio; }
+static double vr_dlss_eye_scale(void) { return pc_vr_config()->settings.dlss_eye_scale; }
 
 double vr_dlaa_render_ratio(void) { return vr_dlaa_mode == VR_DLAA_MODE_DLSS ? vr_dlss_ratio() : 1; }
 
@@ -97,15 +91,16 @@ void vr_dlaa_present(void) {
     if (!vr_dlaa_decided) {  // (the first present: DLSS is up by now, or will not be)
         vr_dlaa_decided = true;
         const PcVrConfig *config = pc_vr_config();
-        if (!config->diagnostics.dlaa) return;
+        if (!config->enabled || config->settings.antialiasing == PC_VR_ANTIALIASING_OFF) return;  // (every present)
         if (!vk_dlss_available()) {
             LOG("[pc-vr-dlaa] switched on, but DLSS does not run here: the eye images as they are\n");
             return;
         }
         atomic_store(&vr_dlaa_switchable, 1);
-        if (mode < 0) mode = config->diagnostics.dlss_ratio > 1 ? VR_DLAA_MODE_DLSS : VR_DLAA_MODE_DLAA;
+        if (mode < 0)
+            mode = config->settings.antialiasing == PC_VR_ANTIALIASING_DLSS ? VR_DLAA_MODE_DLSS : VR_DLAA_MODE_DLAA;
         LOG("[pc-vr-dlaa] the 9 key cycles none, DLAA at eye scale %.3g, DLSS from %.3g times smaller up to eye "
-            "scale %.3g\n", config->play.eye_scale, vr_dlss_ratio(), vr_dlss_eye_scale());
+            "scale %.3g\n", config->settings.eye_scale, vr_dlss_ratio(), vr_dlss_eye_scale());
     }
     if (mode < 0 || (mode == vr_dlaa_mode && atomic_load(&vr_dlaa_shown) >= 0)) return;
     vr_dlaa_mode = mode;

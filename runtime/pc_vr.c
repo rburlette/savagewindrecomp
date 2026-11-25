@@ -1,4 +1,4 @@
-// PC VR launch and startup (SAVAGEWIND_PC_VR=1). Interface: runtime/pc_vr.h.
+// PC VR launch and startup (vr = 1 in savagewind.ini). Interface: runtime/pc_vr.h.
 //
 // What this file does:
 //  - answers the launch settings, from the process's configuration (runtime/pc_vr_config.h);
@@ -91,13 +91,13 @@ void pc_vr_eye_scale_override(double scale) {
 // which comes before the Vulkan device and any render target.
 bool pc_vr_eye_size(unsigned *width, unsigned *height) {
     const PcVrConfig *config = pc_vr_config();
-    *width = config->play.eye_width;
-    *height = config->play.eye_height;
-    if (config->play.eye_width) return true;
+    *width = config->diagnostics.eye_width;
+    *height = config->diagnostics.eye_height;
+    if (config->diagnostics.eye_width) return true;
     const double override = atomic_load_explicit(&eye_scale_override, memory_order_relaxed);
     unsigned view_width, view_height;
     return config->enabled && xr_runtime_recommended_eye_size(&view_width, &view_height) &&
-           pc_vr_eye_size_for_view(override > 1 ? override : config->play.eye_scale, view_width, view_height, width,
+           pc_vr_eye_size_for_view(override > 1 ? override : config->settings.eye_scale, view_width, view_height, width,
                                    height);
 }
 
@@ -166,7 +166,7 @@ static void pc_vr_call(Cpu *cpu, const Cpu *saved, uint64_t address, uint64_t x0
 void pc_vr_startup_poll(void) {
     if (!pc_vr_enabled()) return;
 #ifndef _WIN32
-    FATAL("SAVAGEWIND_PC_VR requires native Windows for this prototype\n");
+    FATAL("PC VR (vr = 1) requires native Windows for this prototype\n");
 #endif
     uint64_t seen = atomic_load(&startup_seen_at);
     if (!seen) return; // The original title-menu hook has not run yet.
@@ -270,8 +270,8 @@ PcVrHostFn pc_vr_lifecycle_lookup(const char *name) {
 }
 
 // The PC VR 2D content as world-locked quads, its only way to the headset (D068): menus (D056)
-// SAVAGEWIND_PC_VR_MENU_DISTANCE metres ahead (default 0.77, the user's choice in the headset), the gameplay HUD (D057)
-// at SAVAGEWIND_PC_VR_HUD_DEPTH times the camera target's distance (default 0.9: where the user set it by hand, at or a
+// vr_menu_distance metres ahead (default 0.77, the user's choice in the headset), the gameplay HUD (D057)
+// at vr_hud_depth times the camera target's distance (default 0.9: where the user set it by hand, at or a
 // little in front of Link); both from the configuration (pc_vr_config.h), whose eye images they need. Live steps stay
 // within each panel's range.
 static pthread_mutex_t panel_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -289,7 +289,7 @@ static void panel_read_locked(PcVrPanel which) {
     panels[which].read = true;
     const PcVrConfig *config = pc_vr_config();
     panels[which].active = config->enabled;  // (the play configuration has the eye images)
-    panels[which].launch = which == PC_VR_PANEL_MENU ? config->play.menu_distance : config->play.hud_depth;
+    panels[which].launch = which == PC_VR_PANEL_MENU ? config->settings.menu_distance : config->settings.hud_depth;
     panels[which].depth = panels[which].launch;
 }
 

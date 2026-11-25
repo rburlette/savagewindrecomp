@@ -198,8 +198,8 @@ static bool format_is_float(VkFormat f) {  // (uncompressed: these can hold NaN 
 //             vertical scale on both axes. At its guest size it held one map texel per 1080p pixel, so at 4K the map
 //             was the 1080p picture stretched 2x. Also the HUD minimap's capture (288x288: its 192x192 pane at 1.5x,
 //             drawn from the map tiles and put through the round mask onto the HUD), for the same reason
-//   RS_EYE    Labo VR's per-eye targets (800x900, and their same-shaped fractions), only with an explicit
-//             SAVAGEWIND_PC_VR_EYE_SCALE (in the headset's view shape, eye_scale_on): the headset copies these
+//   RS_EYE    Labo VR's per-eye targets (800x900, and their same-shaped fractions), only with PC VR's
+//             vr_eye_scale above 1 (in the headset's view shape, eye_scale_on): the headset copies these
 //             pixels, so their count sets its sharpness
 static float g_rs[6][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
 static uint32_t g_shadow_size;

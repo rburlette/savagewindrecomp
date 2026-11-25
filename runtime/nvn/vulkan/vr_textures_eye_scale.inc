@@ -1,7 +1,7 @@
 // Part of textures.c (D133): PC VR's eye targets' scale.
 // Included where it stands by textures.c, so it compiles in textures.c's translation unit as before.
 
-// PC VR eye scale (1 = off, up to 5: 4000x4500), exact decimal text only. The eye chain's shape (0.87..0.91, the
+// PC VR eye scale (vr_eye_scale, PC VR only; 1 = off, up to 5: 4000x4500). The eye chain's shape (0.87..0.91, the
 // 800x900 Labo eye targets and their fractions) is otherwise never scaled. In PC VR the scale's pixels take the
 // OpenXR runtime's view shape (pc_vr.c pc_vr_eye_size: 2451x2644 at 3.0 on Link), one factor per axis, so each eye
 // renders in the shape the headset shows it in; uniform (Labo's 8:9) only without a discovered runtime.
@@ -17,7 +17,7 @@ static bool eye_scale_from_size(void) {
     g_rs[RS_EYE][0] = scale_x;
     g_rs[RS_EYE][1] = scale_y;
     LOG("[pc-vr-eye-size] exact eye renders %ux%u (%s); final halves match, poses/FOV unchanged\n", width, height,
-        pc_vr_config()->play.eye_width ? "SAVAGEWIND_PC_VR_EYE_SIZE" : "the eye scale's pixels in the runtime's view shape");
+        pc_vr_config()->diagnostics.eye_width ? "SAVAGEWIND_PC_VR_EYE_SIZE" : "the eye scale's pixels in the runtime's view shape");
     if (ratio > 1)
         LOG("[pc-vr-eye-size] eyes rendered %.4g times smaller (%ldx%ld), DLSS bringing them up to %ux%u\n", ratio,
             lround(width / ratio), lround(height / ratio), width, height);
@@ -35,16 +35,17 @@ static bool eye_scale_on(void) {
         on = 1;
         return on;
     }
-    // (SAVAGEWIND_PC_VR_EYE_SCALE: the configuration takes a decimal in (1, 5], and leaves 1 otherwise)
+    // (vr_eye_scale, PC VR's only: the configuration takes a number within [1, 5], 1 not scaled, and keeps its default
+    // otherwise; a desktop run of the game's own Labo mode keeps its eye targets as the game makes them)
     const PcVrConfig *config = pc_vr_config();
-    const double scale = config->play.eye_scale;
+    const double scale = config->enabled ? config->settings.eye_scale : 1.0;
+    if (config->settings_ignored >> PC_VR_SETTING_EYE_SCALE & 1)
+        LOG("[pc-vr-eye-scale] ignored vr_eye_scale (needs a number from 1 to 5)\n");
     if (scale > 1.0) {
         g_rs[RS_EYE][0] = g_rs[RS_EYE][1] = (float)scale;
         on = 1;
         LOG("[pc-vr-eye-scale] Labo eye targets scaled %.3fx (800x900 -> %ldx%ld)\n", scale,
             lround(800 * scale), lround(900 * scale));
-    } else if (config->settings_ignored >> PC_VR_SETTING_EYE_SCALE & 1) {
-        LOG("[pc-vr-eye-scale] ignored SAVAGEWIND_PC_VR_EYE_SCALE (needs a decimal in (1, 5])\n");
     }
     return on;
 }

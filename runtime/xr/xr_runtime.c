@@ -517,8 +517,8 @@ bool xr_runtime_discover(void) {
     memset(&xr_perf, 0, sizeof xr_perf);
     const PcVrConfig *config = pc_vr_config();
     xr_perf.enabled = config->diagnostics.perf;
-    xr.display_rate_tracking = config->play.display_rate_tracking;
-    xr_target_refresh_enabled = config->diagnostics.target_refresh;
+    xr.display_rate_tracking = config->display_rate_tracking;
+    xr_target_refresh_enabled = config->target_refresh;
     if (xr_target_refresh_enabled)
         XRLOG("world refresh targeting enabled: two refreshes per game frame, 1 ms producer deadline from XR wake\n");
     xr.copy_wait_ns = (uint64_t)config->diagnostics.copy_wait_ms * 1000000;

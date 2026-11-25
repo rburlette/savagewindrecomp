@@ -101,7 +101,7 @@ static bool vr_eyes_configure(void) {
         return false;
     }
     // Rows in the window present's order; SAVAGEWIND_PC_VR_EYE_IMAGES_FLIP=0/1 overrides it for the headset check.
-    const int flip = pc_vr_config()->play.eye_images_flip;
+    const int flip = pc_vr_config()->diagnostics.eye_images_flip;
     vr_eyes.flip = flip >= 0 ? flip == 1 : renderer_origin_lower_left();
     // The final image holds linear values: the game's lens pass writes it to the display through an sRGB view.
     // Blitting into an sRGB image encodes them, which also keeps dark tones' precision in 8 bits.

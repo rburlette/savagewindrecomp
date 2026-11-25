@@ -1,4 +1,4 @@
-// PC VR, switched on by SAVAGEWIND_PC_VR=1 before the process starts: the switch and launch settings shared by the
+// PC VR, switched on by vr = 1 in savagewind.ini: the switch and launch settings shared by the
 // launcher, the game hooks and the renderer, the startup into the game's Labo VR mode, and the 2D panels' distances
 // (runtime/pc_vr.c). Every setting, and its default: the configuration (runtime/pc_vr_config.h). The other parts: the
 // XR owner (runtime/xr/), head look and native eye views (runtime/hle/pc_vr_*), the renderer's eye images and panels

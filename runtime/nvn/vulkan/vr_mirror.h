@@ -47,7 +47,7 @@ bool vr_mirror_takes(const TexBackend *presented, const TexBackend *final_image)
 // half goes. True: the caller ends its render pass and calls vr_mirror_copy.
 bool vr_mirror_due(const TexBackend *presented, const TexBackend *final_image, VrLetterbox *box);
 // Whether the window gets a picture at this present (the count plus one of the frame being recorded or presented):
-// always, but with SAVAGEWIND_PC_VR_NO_DESKTOP_IMAGE=1 (an experiment), when only the unattended endpoint's present is
+// always with vr_desktop_picture = 1; with 0 (the play setting, D130) only the unattended endpoint's present is
 // drawn, since the run's end is the window's own shot. For device.c's frame_begin and vr_mirror_due.
 bool vr_mirror_window_drawn(uint64_t present);
 // For device.c's present in a frame that does not draw to the window (undrawn by the experiment above, minimised or

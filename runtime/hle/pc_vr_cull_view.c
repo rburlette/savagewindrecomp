@@ -215,7 +215,7 @@ uint64_t rt_pc_vr_cull_grass_matrix(uint64_t layer_record, unsigned projection, 
 
 float rt_pc_vr_model_depth(uint64_t volume, uint64_t sphere, float depth) {
     const PcVrConfig *config = pc_vr_config();
-    const float factor = (float)config->play.model_distance;
+    const float factor = (float)config->settings.model_distance;
     if (!config->enabled || factor == 0 || !LD8(volume + VOLUME_PERSPECTIVE)) return depth;
     float offset_x, midpoint[3], centre[3];
     memcpy(&offset_x, (const void *)(uintptr_t)(volume + VOLUME_OFFSET_X), sizeof offset_x);

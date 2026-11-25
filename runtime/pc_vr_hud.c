@@ -338,7 +338,7 @@ static _Atomic bool ui_parallax_zeroed;
 bool pc_vr_ui_centred(void) { return atomic_load_explicit(&ui_parallax_zeroed, memory_order_relaxed); }
 
 uint32_t rt_ui_parallax(uint32_t amount_bits) {
-    const bool zeroed = pc_vr_enabled() && !pc_vr_config()->play.ui_parallax;
+    const bool zeroed = pc_vr_enabled() && !pc_vr_config()->diagnostics.ui_parallax;
     atomic_store_explicit(&ui_parallax_zeroed, zeroed, memory_order_relaxed);
     static unsigned logged;
     if (logged < 4) {
