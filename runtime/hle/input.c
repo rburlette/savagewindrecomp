@@ -10,6 +10,9 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "../hle.h"
 #include "../platform.h"
@@ -19,6 +22,13 @@
 #include "../nvn/renderer.h"
 #include "../settings.h"
 #include "../input_bind.h"
+#include "../pc_vr.h"
+#include "../pc_vr_frame_trace.h"
+#include "host_input_control.h"
+#include "input_min_hold.h"
+#include "input_stick.h"
+#include "quicksave_control.h"
+#include "../automation_state.h"
 #include "../framepace.h"
 #include "../motion.h"
 #include "../pc_gyro_scene.h"
@@ -93,6 +103,8 @@ static uint8_t mouse_down[8];  // SDL_BUTTON_LEFT .. X2 (keyboard bindings BIND_
 static SDL_Gamepad *pad;
 static _Atomic int64_t sampling;
 static _Atomic bool win_focused = true;  // main thread writes; guest input polls read
+// The controller's own focus test: the window's, or always in PC VR (pc_vr.h). Keyboard and mouse use win_focused.
+static bool pad_focused(void) { return win_focused || pc_vr_controller_without_focus(); }
 
 // Host keys / buttons held by a test script (SAVAGEWIND_HOST_INPUT, input_frame): they go through the bindings
 static uint8_t test_keys[SDL_SCANCODE_COUNT];
@@ -207,7 +219,7 @@ static void dead_zone(_Atomic int32_t *x, _Atomic int32_t *y, int32_t rx, int32_
 
 // Controller buttons (and the triggers as buttons) -> Switch buttons through g_bind_pad; the sticks stay the sticks.
 static void recompute_pad(void) {
-    if (!win_focused && !host_test) {
+    if (!pad_focused() && !host_test) {
         pad_buttons = 0;
         host_buttons = 0;
         recompute_motion();
@@ -216,7 +228,7 @@ static void recompute_pad(void) {
         return;
     }
     uint32_t host = test_pad;
-    if (pad && !host_test) {
+    if (!host_test && pad) {
         for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
             if (SDL_GetGamepadButton(pad, (SDL_GamepadButton)i)) host |= 1u << i;
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) host |= 1u << PADB_LTRIGGER;
@@ -572,7 +584,7 @@ void input_mouse_update(SDL_Window *w) {
         gyro_keys = !gyro_keys;
         recompute_keyboard();
     }
-    vibration_update(pad, win_focused && !host_test);
+    vibration_update(pad, pad_focused() && !host_test);
     static bool cur;
     pc_cursor_window(w);
     if (w) sheikah_cursor_use(w);  // (the pointer the F1 menu and a free mouse show: Savage Wind's, not the system's)
@@ -623,7 +635,7 @@ static bool test_event(const SDL_Event *e) {
 // SAVAGEWIND_BIND_TEST; SAVAGEWIND_NO_USER_INPUT=0 lets it through again).
 bool input_user_blocked(const SDL_Event *e) {
     if (test_event(e)) return false;  // synthetic events are also usable in unattended tests
-    if (!win_focused) switch (e->type) {
+    if (!pad_focused()) switch (e->type) {
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
     case SDL_EVENT_GAMEPAD_SENSOR_UPDATE: case SDL_EVENT_SENSOR_UPDATE:
         return true;  // before menu shortcuts, name entry and binding capture get the event
@@ -857,13 +869,13 @@ void input_handle_event(const SDL_Event *e) {
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:  // (the controller whose sensors the motion takes: not always the one in use)
-        if (win_focused && !host_test && e->gsensor.which == motion_sensor_pad()) motion_sensor_event(e);
+        if (pad_focused() && !host_test && e->gsensor.which == motion_sensor_pad()) motion_sensor_event(e);
         break;
     case SDL_EVENT_SENSOR_UPDATE:  // (a PC handheld's own sensors)
         if (win_focused && !host_test) motion_device_sensor_event(e);
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
-        if (win_focused && pad && !host_test && (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+        if (pad_focused() && pad && !host_test && (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
                                   (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 16000))) {
             last_device = DEVICE_PAD;
             // (a button pressed on another controller: it becomes the one read. Not its sticks: a pad seen twice, by
@@ -880,7 +892,7 @@ void input_handle_event(const SDL_Event *e) {
         break;
     }
     // Sensor / axis events may arrive faster than the window loop's 16 ms idle timeout.
-    vibration_update(pad, win_focused && !host_test);
+    vibration_update(pad, pad_focused() && !host_test);
 }
 
 // Scripted input for testing: SAVAGEWIND_INPUT="frame:BUTTON:frames,..." (BUTTON = A,B,X,Y,L,R,ZL,ZR,PLUS,
@@ -1154,7 +1166,7 @@ static bool ui_menu_active(void) {
 
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
 uint64_t input_buttons_now(void) {
-    bool muted = (!win_focused && !host_test) || menu_input_captured();
+    bool muted = (!pad_focused() && !host_test) || menu_input_captured();  // (keys are released on focus loss)
     uint64_t raw = muted ? 0 : key_buttons | pad_buttons;
     if (!muted && !ui_menu_active() && !pc_cursor_active())
         raw = act_gameplay_buttons(raw, game_key, host_buttons);
@@ -1235,7 +1247,7 @@ static void fill_state(Cpu *c) {
         g_watch_hi = c->x[1] - 8 - 0x98 + hi;
         LOG("[input] watching controller object %llx\n", (unsigned long long)(c->x[1] - 8));
     }
-    bool menu = (!win_focused && !host_test) || menu_input_captured();  // host controls belong to the focused game window
+    bool menu = (!pad_focused() && !host_test) || menu_input_captured();  // host controls belong to the focused game window (in PC VR, the controller's always)
 
     // Customized actions use host bindings during play. Factory-default actions and all queries in menus, with
     // the window unfocused or the overlay up, use the Switch layer, so no binding can lock the player out.
@@ -1278,7 +1290,7 @@ static void fill_state(Cpu *c) {
     int32_t rx = clamp_axis((menu ? 0 : key_rx + prx + mx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pry + my) + script_ry);
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
-    if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
+    if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < (int64_t)INPUT_STICK_DEADZONE * INPUT_STICK_DEADZONE) {
         uint64_t d = key_buttons | pad_buttons | script_buttons;
         int dx = (int)((d >> BTN_RIGHT) & 1) - (int)((d >> BTN_LEFT) & 1);
         int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);

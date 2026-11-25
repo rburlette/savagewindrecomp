@@ -1,6 +1,13 @@
 // Output resolution (runtime/nvn/output_scale.c), shared by the Metal and Vulkan backends.
 #pragma once
 #include <stdbool.h>
+#include <math.h>
+
+// Desktop ultrawide HUD layout. Native stereo uses nonuniform raster scales for eye pixels while its
+// projection/HUD transforms own the placement; unequal scales there must not add desktop UI centering.
+static inline bool output_ui_needs_centering(float scale_x, float scale_y, bool native_stereo) {
+    return !native_stereo && fabsf(scale_x - scale_y) > 0.01f * scale_y;
+}
 
 typedef struct {
     double sx, sy;             // render-target scale (relative to the game's 1920x1080 sizes)

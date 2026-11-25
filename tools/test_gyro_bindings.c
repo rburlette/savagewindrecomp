@@ -9,6 +9,7 @@
 #include "../runtime/hle/input.c"
 uint64_t quick_drop_action_filter_buttons(uint64_t b) { return b; }
 #include "test_pointer_disabled.h"
+#include "test_input_vr.h"
 bool settings_steam_deck(void) { return false; }
 Settings g_settings;
 static int pitch,roll,yaw;static bool center,captured,paused,apparatus;

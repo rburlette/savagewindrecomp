@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Differential checks for the actual fragment-preparation reuse functions."""
+import argparse
 import os
 from pathlib import Path
 import subprocess
@@ -29,6 +30,7 @@ FIXTURE = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
+#include "pc_vr_config.h"
 #define MAX_BIND 96
 #define GMEM_BUFFER_INDEX 20
 #define GMEM2_BUFFER_INDEX 21
@@ -46,7 +48,7 @@ typedef struct {uint32_t set, binding; VkDescriptorType type;} VkBindingInfo;
 typedef struct {
     VkBindingInfo binds[MAX_BIND]; int nbinds;
     uint8_t bind_order[2][MAX_BIND], nstage[2], nlate[2];
-    bool reuse_stage[2]; uint32_t reuse_mask[2];
+    bool reuse_stage[2]; uint32_t reuse_mask[2]; bool vr_field_cloud;
     uint8_t set_idx[2][MAX_BIND]; uint8_t set_n[2];
     bool has_rscale[2], has_tint[2];
 } Prog;
@@ -63,6 +65,7 @@ static struct {
     float tex_sc[2][64][2];
     uint32_t tex_wh[2][64][2];
 } drw;
+static PcVrRuneAim vr_draw_rune_aim;
 #define LOG(...) ((void)0)
 static _Atomic int stage_cpu_options=-1;
 #define CPU_OPTS_REUSE 3
@@ -106,7 +109,7 @@ static void rec_UpdateDescriptorSets(uint32_t n, const VkWriteDescriptorSet *w) 
         }
     }
 }
-static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t x,uint32_t y,uint32_t z) {
+static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t x,uint32_t y,uint32_t z,bool vr_field_cloud) {
     (void)si; calls++; uint64_t a=k>=3 ? st.ubuf[stage][k-3].addr : k==1 ? st.program->stages[stage].code_addr : 0; return (VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)(100+stage), (uint64_t)(k*256+x+y+z+a), 256};
 }
 static VkDescriptorBufferInfo gmem_info(void) {calls++; return (VkDescriptorBufferInfo){(VkBuffer)51,256,512};}
@@ -163,6 +166,13 @@ int main(void) {
     call(&p,&si,images,row,tint,da,&na);int before=calls;
     call(&p,&si,images,row,tint,db,&nb);
     assert(na==nb && !memcmp(da,db,na*4));assert(cached ? calls==before : calls>before);
+    // Both eye-specific rune modes must prepare fresh constants for otherwise identical draws.
+    for (int mode=PC_VR_RUNE_AIM_ON; mode<=PC_VR_RUNE_AIM_FLIP; mode++) {
+        vr_draw_rune_aim=(PcVrRuneAim)mode;
+        before=calls;call(&p,&si,images,row,tint,db,&nb);assert(calls>before);
+    }
+    vr_draw_rune_aim=PC_VR_RUNE_AIM_OFF;
+    before=calls;call(&p,&si,images,row,tint,db,&nb);assert(cached ? calls==before : calls>before);
     Prog p2=p;NvnProgram program2=program;st.program=&program2;
     before=calls;call(&p2,&si,images,row,tint,db,&nb);
     assert(cached ? calls==before : calls>before);
@@ -212,6 +222,11 @@ int main(void) {
 '''
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--trap-undefined',action='store_true',
+                        help='Trap undefined behavior on toolchains without sanitizer runtime libraries.')
+    args=parser.parse_args()
+    sanitizers=['-fsanitize=undefined','-fsanitize-trap=undefined'] if args.trap_undefined else ['-fsanitize=address,undefined']
     root=Path(__file__).resolve().parent.parent
     source=(root/'runtime/nvn/vulkan/exec.c').read_text()
     c='\n'.join([FIXTURE,function(source,'prog_index_sets'),function(source,'stage_reuse_plan'),function(source,'stage_cpu_opts_init'),function(source,'stage_cpu_opts'),
@@ -219,8 +234,8 @@ def main():
                   source[source.index('typedef struct {\n    VkWriteDescriptorSet w[MAX_BIND];'):source.index('// STAGE_REUSE_TEST_BEGIN')].replace('stage_set(', 'stage_set_prepare('),
                   source[source.index('// STAGE_REUSE_TEST_BEGIN'):source.index('// STAGE_REUSE_TEST_END')].replace('stage_set(', 'stage_set_prepare(').replace('stage_set_reuse(', 'stage_set('),MAIN])
     with tempfile.TemporaryDirectory(prefix='swr-reuse-') as d:
-        path=Path(d)/'test.c';path.write_text(c);exe=Path(d)/'test'
-        subprocess.run([os.environ.get('CC','clang'),'-O1','-g','-fsanitize=address,undefined',str(path),'-o',str(exe)],check=True)
+        path=Path(d)/'test.c';path.write_text(c);exe=Path(d)/('test.exe' if os.name=='nt' else 'test')
+        subprocess.run([os.environ.get('CC','clang'),'-O1','-g',*sanitizers,'-I',str(root/'runtime'),str(path),'-o',str(exe)],check=True)
         for off in (False,True):
             env=dict(os.environ);env.pop('SAVAGEWIND_VK_NO_SET_CACHE',None)
             if off:env['SAVAGEWIND_VK_NO_SET_CACHE']='1'

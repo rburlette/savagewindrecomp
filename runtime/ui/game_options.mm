@@ -52,6 +52,7 @@ bool rtr_supported(void);  // (nvn/vulkan/raytrace.h)
 #include "../xess_fetch.h"
 #include "../pc_cursor.h"
 #include "../window_size.h"
+#include "../pc_vr.h"
 void guest_call(Cpu *, uint64_t);
 Cpu *kernel_current_cpu(void);
 void rt_request_reboot(int kind);           // runtime/main.c (1: start the game again)
@@ -2846,6 +2847,7 @@ void title_ach_button(uint64_t menu) {
 extern "C" int rt_opt_title_tick(uint64_t menu) {
     if (g_title_pressed) wr32(g_title_pressed + 0x44, TITLE_ACH_BUTTON), g_title_pressed = 0;
     title_ach_button(menu);
+    pc_vr_startup_tick();  // (PC VR: the original VR request at title readiness, runtime/pc_vr.c)
     quit_poll();
     title_hide_dlc(menu);
     if (rd32(menu + g_site.title_options_state) != MENU_OPTIONS_ACTIVE) {  // (the Options button isn't active: next opening, first page)

@@ -14,6 +14,8 @@
 #include "record.h"
 #include "shaders.h"
 #include "../../settings.h"
+#include "../../pc_vr.h"
+#include "vr_dlaa.h"
 #include "../astc.h"
 #include "../../perfcount.h"
 #include "../glyphs.h"
@@ -196,7 +198,10 @@ static bool format_is_float(VkFormat f) {  // (uncompressed: these can hold NaN 
 //             vertical scale on both axes. At its guest size it held one map texel per 1080p pixel, so at 4K the map
 //             was the 1080p picture stretched 2x. Also the HUD minimap's capture (288x288: its 192x192 pane at 1.5x,
 //             drawn from the map tiles and put through the round mask onto the HUD), for the same reason
-static float g_rs[4][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}};
+//   RS_EYE    Labo VR's per-eye targets (800x900, and their same-shaped fractions), only with an explicit
+//             SAVAGEWIND_PC_VR_EYE_SCALE (in the headset's view shape, eye_scale_on): the headset copies these
+//             pixels, so their count sets its sharpness
+static float g_rs[6][2] = {{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}};
 static uint32_t g_shadow_size;
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs[RS_OUT][0]; *sy = g_rs[RS_OUT][1]; }
 void renderer_set_scale(float sx, float sy) { g_rs[RS_OUT][0] = sx; g_rs[RS_OUT][1] = sy; }
@@ -246,6 +251,8 @@ bool vk_shadow_direct(void) {
 // The cascades t are made bigger than the game's (Shadow resolution above Console); at Console the copy's readers keep it
 bool vk_shadow_scaled(const NvnTexture *t) { return t && g_shadow_size > t->width; }
 
+#include "vr_textures_eye_scale.inc"  // PC VR's eye targets' scale
+
 static uint8_t tex_scale_group(const NvnTexture *t) {
     static int on = -1;
     if (on < 0) on = getenv("SAVAGEWIND_NO_SCALE") == NULL;
@@ -258,6 +265,12 @@ static uint8_t tex_scale_group(const NvnTexture *t) {
     if (t->target == 1 && t->width == 2250 && t->height == 1080) return RS_MAP;  // (and its depth target, if any)
     if (t->target == 1 && t->width == 288 && t->height == 288 && t->format == 0x3d) return RS_MAP;  // (the minimap's)
     float a = (float)t->width / (float)t->height;
+    if (a >= 0.87f && a <= 0.91f && eye_scale_on()) {
+        static unsigned logged;
+        if (logged++ < 24) LOG("[pc-vr-eye-scale] eye target %ux%u flags %#x format %#x layers %u levels %u\n",
+                               t->width, t->height, t->flags, t->format, t->depth, t->levels);
+        return RS_EYE;
+    }
     if (a < 1.74f || a > 1.81f) return RS_NONE;
     if (t->flags & 1) return RS_OUT;  // NVN_TEXTURE_FLAGS_DISPLAY: the images the game presents
     for (int k = 0; k < 4; k++)       // the final image's 1920x1080 and its halves (rounded either way)
@@ -2551,8 +2564,20 @@ VkImageView vk_dummy_view(int textype) {
     b->format = VK_FORMAT_R8G8B8A8_UNORM;
     b->levels = 1;
     b->layers = cube ? 6 : 1;
-    views[textype] = vk_image_view(b, vt, b->format, 0, 1, 0, cube ? 6 : 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
-    return views[textype];
+    dummy_views[textype] = vk_image_view(b, vt, b->format, 0, 1, 0, cube ? 6 : 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    return dummy_views[textype];
+}
+
+// The 2D dummy read as opaque black (exec.c: a popup's screen capture on the PC VR HUD panel).
+VkImageView vk_black_view(void) {
+    static VkImageView view;
+    if (view) return view;
+    vk_dummy_view(TEXTYPE_2D);
+    const VkComponentMapping black = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
+                                      VK_COMPONENT_SWIZZLE_ONE};
+    view = vk_image_view(&dummies[TEXTYPE_2D], VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 0, 1, 0, 1, black,
+                         VK_IMAGE_ASPECT_COLOR_BIT);
+    return view;
 }
 
 // ================================================================== samplers

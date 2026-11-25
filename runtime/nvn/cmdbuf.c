@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../gamelib.h"
+#include "../hle/pc_vr_render_trace.h"
+#include "../pc_vr.h"
+#include "../pc_vr_hud.h"
 #include "live_list.h"
 #include "ksync.h"
 #include "nvn.h"
@@ -402,9 +406,26 @@ static Snap snap(Cpu *c) {
     return s;
 }
 static CmdRec *record(Cpu *c, uint32_t op, uint32_t extra, Snap *s) {
+    const uint64_t certificate = nvn_direct_integer_draw(op) && pc_vr_render_trace_enabled()
+        ? pc_vr_render_trace_record(s->x[0]) : 0;
     CmdRec *r = rec(c, cb_of(s->x[0]), op, extra);
     memcpy(r->x, s->x + 1, sizeof r->x);
     memcpy(r->f, s->f, sizeof r->f);
+    // This ID belongs to this command's original recording scope. Child lists
+    // keep their own IDs when called, including zero and historical IDs.
+    nvn_set_render_certificate(r, certificate);
+    // D088: the game UI screen being drawn on this thread, if any, and the marker its pane belongs to (runtime/pc_vr_hud.c).
+    if (nvn_direct_integer_draw(op)) {
+        const uint32_t screen = pc_vr_screen_drawing();
+        // (and what the draw is to the eye-image producer, when the game is finishing a render layer)
+        _Static_assert(PC_VR_LAYER_DRAW_BITS < 1u << 12 && PC_VR_PANE_BOX < 16, "the screen tag's fields (nvn.h)");
+        nvn_set_screen_tag(r, screen | (screen ? (uint32_t)pc_vr_pane_role(screen) << 16 : 0) |
+                                  pc_vr_layer_draw_recording() << 20);
+        uint32_t marker = screen ? pc_vr_marker_drawing(screen) : 0;
+        // [pc-vr-audit] SAVAGEWIND_LOG_PANES: a draw without a marker link carries its pane's number instead.
+        if (!marker && screen && pc_vr_pane_log_on()) marker = PC_VR_PANE_LOG_TAG | pc_vr_pane_log_drawing(screen);
+        nvn_set_marker_tag(r, marker);
+    }
     return r;
 }
 // record with a copy of `len` bytes from the guest pointer in argument `arg`
@@ -645,6 +666,7 @@ NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; }
 // ---- draws (all integer arguments fit in x1..x7)
 NVN(nvnCommandBufferDrawArrays) { Snap s = snap(c); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
 NVN(nvnCommandBufferDrawArraysInstanced) { Snap s = snap(c); record(c, CMD_DRAW_ARRAYS, 0, &s); }
+
 // Debug: SAVAGEWIND_TRACE_COUNT=<n> logs the guest call chain of indexed draws with n indices.
 static void trace_draw(Cpu *c, uint64_t count) {
     static long want = -2;

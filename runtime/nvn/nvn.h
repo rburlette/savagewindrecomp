@@ -1,8 +1,10 @@
 // NVN implemented on the host. Guest NVN objects hold a pointer to a host object at offset 0;
 // builders and small state objects store their fields directly in guest memory.
 #pragma once
+#include <string.h>
 #include "../hle.h"
 #include "tegra.h"
+#include "present_crop.h"
 
 #define NVN(name) HLE_FUNC(#name, hle_##name)
 
@@ -126,7 +128,7 @@ void cmdbuf_pool_gone(uint64_t lo, uint64_t hi);  // a memory pool is finalized:
 typedef struct {
     uint32_t op, size;  // size includes the header, multiple of 8
     uint64_t x[7];      // x1..x7 of the call
-    float f[4];         // s0..s3 of the call
+    float f[4];         // s0..s3 of the call; integer draws: f[2..3] the PC VR render certificate
     uint8_t extra[];
 } CmdRec;
 
@@ -150,12 +152,14 @@ enum {
     CMD_COUNT
 };
 
+#include "pc_vr_command_tags.inc"  // PC VR's tags on recorded draws: certificate, screen, pane role, layer draw
+
 
 
 // renderer backend (runtime/nvn/metal.m)
 void backend_init(void);
 void backend_execute(uint64_t handle);            // run a recorded command list
-void backend_present(NvnTexture *tex);            // show a texture in the window
+void backend_present(const NvnPresent *present);   // show a captured texture/crop in the window
 void backend_texture_destroyed(NvnTexture *tex);
 void backend_pool_written(uint64_t addr, uint64_t size);
 void backend_debug_copies_at(uint64_t addr);  // (debugging) log the recent texture-to-buffer copies that wrote addr

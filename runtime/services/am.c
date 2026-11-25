@@ -5,6 +5,8 @@
 #include "../hle.h"
 #include "../ipc.h"
 #include "../language.h"
+#include "../pc_vr.h"
+#include "labo_motion_state.h"
 
 #define AM_NO_MESSAGE MAKE_RESULT(128, 3)
 #define AM_NO_DATA MAKE_RESULT(128, 2)
@@ -15,11 +17,19 @@ static uint32_t msg_queue[16];
 static int msg_count;
 
 static bool preselected_popped;
+#include "pc_vr_labo_motion.inc"  // PC VR's Labo motion profile, read by the sample adapter
+
 RT_ON_RESET(am_reset) {  // (reboot: the message queue starts over with FocusStateChanged)
     msg_event = NULL;
     msg_event_r = msg_event_w = 0;
     msg_count = 0;
     preselected_popped = false;
+    pthread_mutex_lock(&labo_motion_lock);
+    labo_motion_vr_active = false;
+    labo_motion_profile_known = false;
+    labo_motion_profile_enabled = false;
+    labo_motion_transitions_logged = 0;
+    pthread_mutex_unlock(&labo_motion_lock);
 }
 
 static void am_init_once(void) {
@@ -78,11 +88,21 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
         }
         kunlock();
         break;
-    case 5: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetOperationMode: docked
-    case 6: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetPerformanceMode: boost
+    case 5: OUT(uint8_t, 0) = labo_motion_enabled() ? 0 : 1; resp_size(resp, 1); break;   // GetOperationMode
+    case 6: OUT(uint32_t, 0) = labo_motion_enabled() ? 0 : 1; resp_size(resp, 4); break;  // GetPerformanceMode
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    case 50:  // IsVrMode
+        if (!pc_vr_enabled() && !labo_motion_enabled()) { UNHANDLED("ICommonStateGetter"); break; }
+        OUT(uint32_t, 0) = labo_motion_active() ? 1 : 0;
+        resp_size(resp, 4);
+        break;
+    case 53:  // BeginVrMode
+    case 54:  // EndVrMode
+        if (!pc_vr_enabled() && !labo_motion_enabled()) { UNHANDLED("ICommonStateGetter"); break; }
+        labo_motion_set_active(req->cmd == 53);
+        break;
     case 60: {  // GetDefaultDisplayResolution
         int w = getenv("SAVAGEWIND_DISPLAY_W") ? atoi(getenv("SAVAGEWIND_DISPLAY_W")) : 1920;
         LOG("[am] GetDefaultDisplayResolution -> %dx1080\n", w);

@@ -16,6 +16,9 @@
 // ---- what shaders.c needs from the rest of the runtime
 VkG g_vk;
 void rt_fatal_trace(void) { abort(); }
+// VK_CHECK calls this on device loss. A synthetic test cannot recover or report
+// the full runtime diagnostics, so a lost device must fail the process.
+void vk_device_fault_report(void) { fprintf(stderr, "Vulkan device lost during synthetic pipeline test\n"); abort(); }
 ShaderInfo *old_maxwell_translate(const uint8_t *c, size_t m, int s, const ShaderKey *k) { (void)c, (void)m, (void)s, (void)k; return NULL; }
 void old_maxwell_free(ShaderInfo *s) { (void)s; }
 uint64_t old_maxwell_gmem_base, old_maxwell_gmem_size;
@@ -48,7 +51,11 @@ static void init_device(void) {
                                                  .pfnUserCallback = on_message};
         PFN_vkCreateDebugUtilsMessengerEXT f = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
         VkDebugUtilsMessengerEXT m;
-        if (f) f(g_vk.inst, &mi, NULL, &m);
+        if (!f || f(g_vk.inst, &mi, NULL, &m) != VK_SUCCESS) {
+            fprintf(stderr, "validation layer enabled but debug messenger unavailable\n");
+            exit(1);
+        }
+        fprintf(stderr, "validation layer enabled\n");
     }
     uint32_t n = 8;
     VkPhysicalDevice pd[8];
@@ -250,5 +257,5 @@ int main(int argc, char **argv) {
     }
     printf("%ld graphics pairs, %ld compute programs, %ld skipped, %ld failures, %ld validation messages\n", n_pairs, n_cs,
            n_skip, n_fail, g_messages);
-    return n_fail != 0;
+    return n_fail != 0 || g_messages != 0;
 }

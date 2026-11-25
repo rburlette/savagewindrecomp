@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -12,6 +12,7 @@
 #include "../runtime/hle/input.c"
 uint64_t quick_drop_action_filter_buttons(uint64_t b) { return b; }
 #include "test_pointer_disabled.h"
+#include "test_input_vr.h"
 int bind_pad_family(int type, int vendor, int product, const char *name, bool first) { (void)type, (void)vendor, (void)product, (void)name, (void)first; return 0; }
 
 GameSites g_site;
@@ -189,6 +190,26 @@ int main(void) {
     focus(true);
     controls(joy, true);
     sample(held, true);
+
+    // In VR the headset keeps the physical controller when the desktop window loses focus.
+    test_vr_enabled = true;
+    SDL_Event selector_click = {.type = SDL_EVENT_MOUSE_BUTTON_DOWN};
+    selector_click.button.button = SDL_BUTTON_LEFT;
+    input_replace_mouse(true);
+    input_handle_event(&selector_click);
+    assert(input_replace_clicks() == 1 && !mouse_down[SDL_BUTTON_LEFT]);
+    input_replace_mouse(false);
+    selector_click.type = SDL_EVENT_MOUSE_BUTTON_UP;
+    input_handle_event(&selector_click);
+    assert(!input_replace_clicks() && !mouse_down[SDL_BUTTON_LEFT]);
+    focus(false);
+    sample(held, true);
+    controls(joy, false);
+    sample(0, false);
+    controls(joy, true);
+    sample(held, true);
+    focus(true);
+    test_vr_enabled = false;
 
     // Losing focus must release cached input even if no further controller event arrives.
     focus(false);

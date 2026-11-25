@@ -11,6 +11,7 @@
 #include <string.h>
 #include <shellapi.h>
 #include <timeapi.h>
+#include <tlhelp32.h>
 #include <io.h>
 
 #include "../gamelib.h"
@@ -38,6 +39,12 @@ static uint64_t sparse_heap_base, sparse_heap_size;
 static atomic_uint_fast64_t sparse_heap_pages[SPARSE_HEAP_BITMAP_WORDS];
 static bool sparse_heap_enabled;
 static bool sparse_heap_configured;
+
+// hle/labo_guest_memory.h caches pages it found accessible for one generation. Anything that can take access away
+// from guest pages bumps it before (entries cached so far expire) and after (entries cached meanwhile expire).
+static volatile LONG64 g_access_generation = 1;
+uint64_t plat_guest_access_generation(void) { return (uint64_t)InterlockedCompareExchange64(&g_access_generation, 0, 0); }
+static void access_may_shrink(void) { InterlockedIncrement64(&g_access_generation); }
 
 static void sparse_heap_note_commit(uint64_t addr, uint64_t size) {
     if (!size || addr >= sparse_heap_base + sparse_heap_size ||
@@ -118,11 +125,14 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
             extern uint64_t rt_watch_after_write(uint64_t addr, uint64_t value);
             uint64_t moved = rt_watch_after_write(t_written, v);
             DWORD o;
+            access_may_shrink();
             if (moved && moved != close) VirtualProtect((void *)(uintptr_t)moved, PLAT_PAGE, PAGE_NOACCESS, &o);
             t_written = 0;
         }
         DWORD old;
+        access_may_shrink();
         VirtualProtect((void *)(uintptr_t)close, PLAT_PAGE, PAGE_NOACCESS, &old);
+        access_may_shrink();
         t_reclose_page = 0;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -182,12 +192,14 @@ int plat_any_written(uint64_t addr, uint64_t size) {
 
 // Decommit everything: the range stays reserved, and pages come back zeroed when committed again (lazily).
 bool plat_reset_guest(uint64_t lo, uint64_t hi) {
-    bool ok = VirtualFree((void *)(uintptr_t)lo, hi - lo, MEM_DECOMMIT) != 0;
+    access_may_shrink();
+    const bool ok = VirtualFree((void *)(uintptr_t)lo, hi - lo, MEM_DECOMMIT) != 0;
     if (ok) {
         atomic_fetch_add_explicit(&guest_commit_gen, 1, memory_order_relaxed);
         if (lo < sparse_heap_base + sparse_heap_size && hi > sparse_heap_base)
             sparse_heap_clear_pages();
     }
+    access_may_shrink();
     return ok;
 }
 
@@ -263,7 +275,10 @@ void plat_decommit(uint64_t addr, uint64_t size) {
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     DWORD p = prot == PLAT_PROT_NONE ? PAGE_NOACCESS : prot == PLAT_PROT_READ ? PAGE_READONLY : PAGE_READWRITE, old;
     if (addr >= g_lo && addr < g_hi) plat_commit(addr, size);
-    return VirtualProtect((void *)(uintptr_t)addr, size, p, &old) ? 0 : -1;
+    access_may_shrink();
+    const int r = VirtualProtect((void *)(uintptr_t)addr, size, p, &old) ? 0 : -1;
+    access_may_shrink();
+    return r;
 }
 
 // ---- time
@@ -1012,7 +1027,8 @@ void plat_accessibility_shortcuts(bool allow) {
 }
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
-void plat_terminate(void) {
+void plat_terminate_status(int status) {
     plat_accessibility_shortcuts(true);  // (the atexit handlers after this one don't run)
-    TerminateProcess(GetCurrentProcess(), 0);
+    TerminateProcess(GetCurrentProcess(), (UINT)status);
 }
+void plat_terminate(void) { plat_terminate_status(0); }

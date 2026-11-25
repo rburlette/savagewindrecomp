@@ -1,6 +1,7 @@
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -9,6 +10,7 @@
 #include "gamelib.h"
 #include "hle.h"
 #include "kernel.h"
+#include "pc_vr.h"
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
 static FnTable tables[MAX_MODULES];  // one per module of the game code (runtime/gamelib.h)
@@ -38,9 +40,19 @@ __attribute__((section(".hle$a"), used)) static const HleImpl __start_hle_impls[
 __attribute__((section(".hle$z"), used)) static const HleImpl __stop_hle_impls[1];
 #endif
 
+// PC VR answers the game's motion imports (runtime/hle/pc_vr_motion_contract.c); ordinary imports, and every import
+// outside PC VR, retain their original resolution.
+HostFn pc_vr_motion_contract_lookup(const char *name);
+
 HostFn hle_lookup_impl(const char *name) {
     const char *skip = getenv("SAVAGEWIND_HLE_SKIP");  // debugging: disable HLE for names containing this
     if (skip && strstr(name, skip)) return NULL;
+    HostFn vr_lifecycle = pc_vr_lifecycle_lookup(name);
+    if (vr_lifecycle) return vr_lifecycle;
+    if (pc_vr_enabled()) {
+        HostFn motion_contract = pc_vr_motion_contract_lookup(name);
+        if (motion_contract) return motion_contract;
+    }
     const HleImpl *start = __start_hle_impls, *stop = __stop_hle_impls;
     __asm__("" : "+r"(start), "+r"(stop));  // separate objects: keep the compiler from reasoning about them
     for (const HleImpl *p = start; p < stop; p++)

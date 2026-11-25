@@ -660,8 +660,8 @@ static bool vr_hud_fade(Prog *program) {
 static void vr_world_hud_scissor(void) {
     if (!vr_world_hud.active || !dc.sc.extent.width || !dc.sc.extent.height) return;
     int pixels[4];  // left, top, right, bottom, in the pass's device pixels
-    vr_hud_move_scissor(&vr_world_hud.move, st.viewport[0], st.scissor[0], st.rt.color[0]->height, vp_sx, vp_sy, vp_ox,
-                        vp_oy, pass_w, pass_h, pixels);
+    vr_hud_move_scissor(&vr_world_hud.move, st.viewport[0], st.scissor[0], st.rt.color[0]->height, drw.vp_sx,
+                        drw.vp_sy, drw.vp_ox, drw.vp_oy, ps.w, ps.h, pixels);
     VkRect2D rect = {{pixels[0], pixels[1]}, {(uint32_t)(pixels[2] - pixels[0]), (uint32_t)(pixels[3] - pixels[1])}};
     if (!memcmp(&dc.sc, &rect, sizeof rect)) return;
     rec_CmdSetScissor(vk_cmd(), 0, 1, &rect);

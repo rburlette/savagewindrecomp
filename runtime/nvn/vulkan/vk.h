@@ -114,8 +114,8 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout);
 // ---- textures (textures.c)
 // Render-target scale groups (textures.c tex_scale_group): none, the 3D scene's (internal resolution), the final
 // image's (the window's resolution), shadow maps (Video > Shadow resolution), the map's and the minimap's terrain
-// captures (the window's height, without the HUD handling RS_OUT passes get)
-enum { RS_NONE = 0, RS_SCENE = 1, RS_OUT = 2, RS_SHADOW = 3, RS_MAP = 4 };
+// captures (the window's height, without the HUD handling RS_OUT passes get), Labo VR's eye targets (PC VR eye scale)
+enum { RS_NONE = 0, RS_SCENE = 1, RS_OUT = 2, RS_SHADOW = 3, RS_MAP = 4, RS_EYE = 5 };
 
 // A texture's claim on the write watch (textures.c, SAVAGEWIND_VK_CPU_OPTS bit 32): token 0: none
 typedef struct TexWW {
@@ -228,6 +228,7 @@ VkFormat vk_frame_format(void);     // the format the frame is being drawn into 
 bool vk_frame_hdr(void);            // ... and it is an RGBA16F HDR game image
 void vk_texture_drop_format_list(NvnTexture *t);        // (textures.c) a feedback loop target: no format list
 VkImageView vk_dummy_view(int textype);
+VkImageView vk_black_view(void);
 void vk_block_flush(VkCommandBuffer cb, TexBackend *b);  // (outside a pass) b->block's texels into b's blocks
 VkSampler vk_sampler(NvnSamplerDesc *d, bool aniso_ok, float bias);  // (aniso_ok: Video > Anisotropic filtering may
                                                                      //  apply; bias: added to the LOD bias)

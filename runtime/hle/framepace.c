@@ -43,6 +43,7 @@
 //                                  all four stick-gated sites: fsub (+0x181c / +0x1824) and their fadd mirrors;
 //                                  default: scale all four by the frame ratio (experimental, confirmed in game)
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +57,14 @@
 #include "../ui_layout.h"
 #include "../gamelib.h"
 #include "../window_size.h"
+#include "../pc_vr.h"
+#include "../pc_vr_frame_trace.h"
+#include "../pc_vr_pace.h"
+#include "../automation_state.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 extern volatile int g_movie_playing;  // runtime/hle/movie.c: video decoders running
 extern volatile int g_movie_fps;      // runtime/hle/movie.c: the playing movie's frame rate
@@ -238,6 +247,8 @@ int framepace_shop_panes(float *xy, int max) {
     if (shop && cursor) n = shop_walk(VF(uint64_t, cursor, 0x18), 0, xy, n, max, &budget);
     return n;
 }
+
+uint32_t framepace_pause_state(void) { return *(uint32_t *)(uintptr_t)PAUSE_STATE; }  // (PC VR logs)
 bool framepace_paused(void) { return in_menu(); }
 
 // F5 (#994): 30 fps until F5 again, over the frame rate setting, for the physics puzzles that misbehave at high frame
@@ -316,7 +327,13 @@ uint64_t framepace_period_ns(void) {
 }
 
 // The frame loop's vsync wait: the present keeps the pace instead (1: skipped; 0: the game's own wait).
-int rt_frame_wait(void) { return framepace_on(); }
+int rt_frame_wait(void) {
+    // The title update ends when Continue loads gameplay. This existing guest
+    // frame hook keeps checking the already-requested original transition and
+    // its wall-clock deadline without invoking guest code on another thread.
+    pc_vr_startup_poll();
+    return framepace_on();
+}
 
 // ------------------------------------------------------------------ presents
 // The controllers (sead::ControllerBase::updateDerivativeParams_, 1.8.2 0x7000d9d8a0) count how long each button has
@@ -728,6 +745,8 @@ void rt_vfr_update(uint64_t vfr) {
     } else {
         if (s > 0.25) s = 0.25;  // (a load or a pause in a debugger: not owed)
         double period = framepace_period_ns() / 1e9;
+        const uint64_t paced_period_ns = pc_vr_pace_game_period_ns();  // (PC VR at the headset pace: pc_vr_pace.h)
+        if (paced_period_ns) period = paced_period_ns / 1e9;
         int target = framepace_target();
         if (target != last_target) smooth = period, last_step = 0;  // (a new pace: start from it)
         last_target = target;
