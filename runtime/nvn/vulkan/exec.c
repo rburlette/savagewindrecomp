@@ -29,6 +29,7 @@
 #include "bloom_scale.h"
 #include "exec_copy.h"
 #include "vram.h"
+#include "empty_draw.h"
 #include "fsr3.h"
 #include "fsr_api.h"
 #include "mvec.h"
@@ -56,7 +57,7 @@ static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wai
 static uint64_t draws_total;  // (every draw since the start, never reset: vk_draw_total)
 uint64_t vk_draw_total(void) { return draws_total; }  // (device.c boot_held: how much the game draws a frame)
 static uint64_t stat_gw_waits, stat_gw_holds;  // draws / dispatches that waited for a storing shader; lists held (gw_check)
-static uint64_t stat_uub, stat_uub_same, stat_gcopy_hit, stat_gcopy_miss, stat_gcopy_bytes;  // UpdateUniformBuffer; guest_copy cache
+static uint64_t stat_uub, stat_uub_same, stat_gcopy_hit, stat_gcopy_miss, stat_gcopy_bytes, stat_gcopy_epoch_reject;  // UpdateUniformBuffer; guest_copy cache
 static uint64_t stat_ubo_direct, stat_chain_barriers;  // constant buffers bound in place (ubo_direct)
 static void ubo_check_done(bool report);
 static void vdyn_check(uint64_t seq);
@@ -955,7 +956,7 @@ static VkDescriptorSet vk_alloc_set_one(VkDescriptorSetLayout layout, int count,
 // 64 MB host-visible chunks (device-local when the GPU exposes resizable BAR); a chunk is reused once every
 // submission that allocated from it has completed.
 #define CHUNK_SIZE (64ull << 20)
-typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
+typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq, epoch; } Chunk;
 static Chunk *chunks;
 static int nchunks, active = -1;
 
@@ -998,6 +999,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
         if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
     if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
     active = pick;
+    chunks[pick].epoch++;  // invalidate cached spans from an earlier use of this chunk
     chunks[pick].used = size;
     chunks[pick].seq = pending;
     stat_upload_bytes += size;
@@ -1067,7 +1069,7 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 #define GCOPY_SETS 2048
 #define GCOPY_WAYS 4
 #define UUB_MAX 64
-typedef struct { uint64_t addr, size, gen, serial, mask; int chunk; VkSpan span; } GcopyEntry;
+typedef struct { uint64_t addr, size, gen, serial, mask, epoch; int chunk; VkSpan span; } GcopyEntry;
 static GcopyEntry gcopy[GCOPY_SETS][GCOPY_WAYS];
 static uint8_t gcopy_rr[GCOPY_SETS];
 static uint64_t gcopy_gen = 1;
@@ -1175,12 +1177,13 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
         if (e->addr == addr && e->size == size) {
             bool stale = false;
             for (uint64_t m = e->mask; m && !stale; m &= m - 1) stale = uubt[__builtin_ctzll(m)].serial > e->serial;
-            if (!stale) {
+            if (!stale && e->epoch == chunks[e->chunk].epoch) {
                 uint64_t pending = vk_pending_seq();
                 if (chunks[e->chunk].seq < pending) chunks[e->chunk].seq = pending;
                 stat_gcopy_hit++;
                 return e->span;
             }
+            if (!stale) stat_gcopy_epoch_reject++;  // (its chunk was reused since: a stale span)
             victim = w;  // reuse the stale entry directly
             break;
         }
@@ -1195,7 +1198,7 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     uint64_t mask = 0;
     for (int i = 0; i < nuub; i++)
         if (addr < uubt[i].hi && uubt[i].lo < addr + size) mask |= 1ull << i;
-    ways[victim] = (GcopyEntry){addr, size, gen, uub_serial, mask, active, s};
+    ways[victim] = (GcopyEntry){addr, size, gen, uub_serial, mask, chunks[active].epoch, active, s};
     return s;
 }
 
@@ -1365,9 +1368,9 @@ const char *renderer_stats(void) {
                  (unsigned long long)stat_sets, (unsigned long long)stat_sets_reused, (unsigned long long)stat_feedback_loops,
                  (unsigned long long)stat_feedback_barriers, (unsigned long long)stat_gw_waits, (unsigned long long)stat_gw_holds);
         n = strlen(stats_text);
-        snprintf(stats_text + n, sizeof stats_text - n, ", uub %llu (%llu same), gcopy %llu hit %llu miss (%.1f MB)",
+        snprintf(stats_text + n, sizeof stats_text - n, ", uub %llu (%llu same), gcopy %llu hit %llu miss %llu epoch-reject (%.1f MB)",
                  (unsigned long long)stat_uub, (unsigned long long)stat_uub_same, (unsigned long long)stat_gcopy_hit,
-                 (unsigned long long)stat_gcopy_miss, stat_gcopy_bytes / 1048576.0);
+                 (unsigned long long)stat_gcopy_miss, (unsigned long long)stat_gcopy_epoch_reject, stat_gcopy_bytes / 1048576.0);
         n = strlen(stats_text);
         if (stat_ubo_direct) snprintf(stats_text + n, sizeof stats_text - n, ", cbuf in place %llu", (unsigned long long)stat_ubo_direct);
         n = strlen(stats_text);
@@ -1381,7 +1384,8 @@ const char *renderer_stats(void) {
         n = strlen(stats_text);
         if (stat_clear_folds) snprintf(stats_text + n, sizeof stats_text - n, ", clears folded %llu", (unsigned long long)stat_clear_folds);
         stat_clear_folds = 0;
-        stat_uub = stat_uub_same = stat_gcopy_hit = stat_gcopy_miss = stat_gcopy_bytes = stat_ubo_direct = stat_chain_barriers = 0;
+        stat_uub = stat_uub_same = stat_gcopy_hit = stat_gcopy_miss = stat_gcopy_epoch_reject = stat_gcopy_bytes = 0;
+        stat_ubo_direct = stat_chain_barriers = 0;
         ubo_check_done(true);
         stat_gw_waits = stat_gw_holds = 0;
         stat_sets = stat_sets_reused = 0;
@@ -7481,6 +7485,7 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
     uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
     VkImageView view = VK_NULL_HANDLE;
     VkSampler smp = VK_NULL_HANDLE;
+    const NvnSamplerDesc *sampler_desc = NULL;
     VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL;
     uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
     // (vk_sampler's Video > Anisotropic filtering: not for textures with one mip level - the render targets BOTW reads
@@ -7546,8 +7551,11 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
         }
     }
     float bias = material && stage == 1 && ps.mvec >= 0 && rt_jitter_on() ? scene_mip_bias : 0;
-    if (h && st.spool && tsc < (uint32_t)st.spool->count)
-        smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc], aniso_ok, bias);
+    if (h && st.spool && tsc < (uint32_t)st.spool->count) {
+        NvnSamplerDesc *desc = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+        sampler_desc = desc;
+        smp = vk_sampler(desc, aniso_ok, bias);
+    }
     if (menu_tex && h && st.spool && tsc < (uint32_t)st.spool->count) {
         // Sharper menus: the game's own sampler, as some of these textures tile, but filtering between the mip levels
         // the enlarged image has and the game doesn't know of
@@ -7558,6 +7566,8 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
     else if (glyph_sheet) smp = vk_glyph_sampler();
     if (!view) view = vk_dummy_view(st_->type), layout = VK_IMAGE_LAYOUT_GENERAL;
     if (!smp) smp = vk_default_sampler(true);
+    if (stage == 5)  // (compute: an R32 view sampled with comparison ALWAYS gets a legal depth view, always_shadow.h)
+        view = vk_always_shadow_view(view, st_->shadow, sampler_desc);
     *out = (VkDescriptorImageInfo){smp, view, layout};
 }
 
@@ -8883,6 +8893,48 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 }
 
 // ================================================================== draws
+// Empty draws (empty_draw.h). A draw whose pass has no attachment format at all (no colour, depth or stencil) can
+// only have an effect through shader stores or queries. empty_draw_prepare collects facts about such a draw before it
+// is recorded, and vk_empty_draw_no_effect omits the one measured case (a BC4 volume draw) from the GPU, keeping the
+// command's bookkeeping. The facts of the draw being recorded, per thread.
+static _Thread_local VkEmptyDrawFacts empty_draw_facts;
+
+// Collects the facts for the draw about to be recorded. False: it is not an empty draw (nothing kept).
+static bool empty_draw_prepare(Prog *program, bool query_active) {
+    bool empty = pass_depth == VK_FORMAT_UNDEFINED && pass_stencil == VK_FORMAT_UNDEFINED;
+    for (unsigned i = 0; i < pass_ncolor; ++i) {
+        if (pass_color[i] != VK_FORMAT_UNDEFINED) empty = false;
+    }
+    if (!empty) return false;
+    memset(&empty_draw_facts, 0, sizeof empty_draw_facts);
+    VkEmptyDrawFacts *facts = &empty_draw_facts;
+    facts->vertex = vk_translate_id(program->vi);
+    facts->fragment = vk_translate_id(program->fi);
+    facts->stage_mask = st.program->stage_mask;
+    facts->storage_flags = program->vi->uses_gmem | program->vi->writes_gmem << 1 |
+        program->fi->uses_gmem << 2 | program->fi->writes_gmem << 3;
+    const ShaderInfo *shaders[2] = {program->vi, program->fi};
+    for (unsigned stage = 0; stage < 2; ++stage)
+        for (int i = 0; i < shaders[stage]->ntex; ++i)
+            if (shaders[stage]->tex[i].is_image || shaders[stage]->tex[i].bindless)
+                ++facts->uncertain_textures;
+    facts->query_counting = oq_counting;
+    facts->query_active = query_active;
+    facts->colors = pass_ncolor < 8 ? pass_ncolor : 8;
+    facts->depth = pass_depth;
+    facts->stencil = pass_stencil;
+    for (unsigned i = 0; i < facts->colors; ++i) {
+        facts->color[i] = pass_color[i];
+        const NvnTexture *texture = st.rt.color[i];
+        if (texture)
+            memcpy(facts->target[i],
+                   (const uint32_t[]){texture->format, texture->target, texture->width, texture->height, texture->depth,
+                                      texture->samples},
+                   sizeof facts->target[i]);
+    }
+    return true;
+}
+
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 
 // (debugging) SAVAGEWIND_DEBUG_PICK=<x>,<y>[;<x>,<y>...] (up to 4 points, first-target pixels): in a debug frame each
@@ -10348,7 +10400,7 @@ have_pipe:
         max_index = first + count;
         if (!native) {
             uint32_t *e = expand_indices(mode, count, NULL, 0, first, &icount);
-            ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
+            ib = vk_stage_indices(e, (size_t)icount * sizeof *e);
             free(e);
         }
     } else {
@@ -10369,7 +10421,7 @@ have_pipe:
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 if (profd) prof_index_copy++;
-                ib = vk_transient_copy(src, (uint64_t)count * isz + 4, 4);
+                ib = vk_stage_indices(src, (size_t)count * isz);
                 if (isz == 2) max_index = scan_max_u16(src, count, st.prim_restart, (uint16_t)restart, max_index);
                 else max_index = scan_max_u32(src, count, st.prim_restart, restart, max_index);
             }
@@ -10385,7 +10437,7 @@ have_pipe:
             if (profd) prof_index_copy++;
             uint32_t *e = expand_indices(mode, count, src, (int)itype, 0, &icount);
             for (uint32_t i = 0; i < icount; i++) if (e[i] > max_index) max_index = e[i];
-            ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
+            ib = vk_stage_indices(e, (size_t)icount * sizeof *e);
             free(e);
         }
         if (!scan_src) {
@@ -10477,9 +10529,20 @@ have_pipe:
             oq = (int)i;
         }
     }
-    if (use_index ? icount : count) hdr_record_draw(pr);
-    if (!use_index) rec_CmdDraw(cb, count, inst, first, base_inst);
-    else rec_CmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    const bool empty_draw = empty_draw_prepare(pr, oq >= 0);
+    const bool omit_empty = empty_draw && vk_empty_draw_no_effect(&empty_draw_facts);
+    if (omit_empty) {
+        static bool reported;
+        if (!reported) {
+            reported = true;
+            LOG("[vk-empty-draw] omitted measured BC4 volume GPU draw; command bookkeeping retained\n");
+        }
+    }
+    if (!omit_empty) {
+        if (use_index ? icount : count) hdr_record_draw(pr);  // (upstream's HDR: an omitted draw writes nothing to record)
+        if (!use_index) rec_CmdDraw(cb, count, inst, first, base_inst);
+        else rec_CmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    }
     if (oq >= 0) rec_CmdEndQuery(cb, oq_pool, (uint32_t)oq);
     stat_draws++;
     draws_total++;

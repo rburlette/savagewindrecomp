@@ -2526,11 +2526,12 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
 }
 
 // 1x1 black textures for unbound slots, per type
+static TexBackend dummies[10];
+static VkImageView dummy_views[10];
+
 VkImageView vk_dummy_view(int textype) {
-    static TexBackend dummies[10];
-    static VkImageView views[10];
     if (textype < 0 || textype >= 10) textype = TEXTYPE_2D;
-    if (views[textype]) return views[textype];
+    if (dummy_views[textype]) return dummy_views[textype];
     TexBackend *b = &dummies[textype];
     VkImageViewType vt = view_type_for(textype);
     bool cube = vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
@@ -2555,6 +2556,18 @@ VkImageView vk_dummy_view(int textype) {
 }
 
 // ================================================================== samplers
+#include "always_shadow.h"
+
+VkImageView vk_always_shadow_view(VkImageView view, bool shader_shadow, const NvnSamplerDesc *sampler) {
+    if (!shader_shadow || !sampler || !sampler->compare_mode || sampler->compare_func != 8) return view;
+    for (unsigned i = 0; i < VIEW_TAB; ++i) {
+        const ViewEnt *entry = &view_tab[i];
+        if (entry->b && entry->view == view)
+            return vk_always_shadow_backing(view, shader_shadow, sampler, entry->b, entry->k1, entry->k2);
+    }
+    return view;
+}
+
 static VkCompareOp compare_op(uint32_t f) {
     switch (f) {
     case 1: return VK_COMPARE_OP_NEVER;

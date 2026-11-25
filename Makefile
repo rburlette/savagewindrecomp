@@ -205,6 +205,13 @@ SW_SOURCE := $(or $(shell git log -1 --format='commit %h, tree %t' 2>/dev/null),
 $(shell mkdir -p $(B) && [ "$$(cat $(B)/source_id 2>/dev/null)" = '$(SW_SOURCE)' ] || echo '$(SW_SOURCE)' > $(B)/source_id)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
+# Compiler depfiles track actual, transitive headers for runtime sources. Objects
+# made before depfiles were introduced need one rebuild to establish that record.
+# windres's Windows resource object does not use the C/C++ compiler.
+RT_DEP_OBJS := $(filter-out $(B)/rt/platform/windows_rc.o,$(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ))
+RT_DEPFILES := $(RT_DEP_OBJS:.o=.d)
+RT_MISSING_DEPS := $(filter-out $(patsubst %.d,%.o,$(wildcard $(RT_DEPFILES))),$(RT_DEP_OBJS))
+RT_DEPFLAGS = -MMD -MP -MF $(@:.o=.d).tmp -MT $@
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -isystem third_party -isystem third_party/stb $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -isystem third_party -Ithird_party/stb $(DEPINC)
 
@@ -274,6 +281,10 @@ $(B)/rt/nvn/vulkan/xess.o: third_party/xess/xess.h third_party/xess/xess_vk.h
 
 all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (GEN_SRC is a space when there is no generated/)
 
+-include $(wildcard $(RT_DEPFILES))
+.PHONY: force-rt-deps
+$(RT_MISSING_DEPS): force-rt-deps
+
 $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h  # (cpu.h includes them)
 	@mkdir -p $(dir $@)
 	@$(CC) $(GENFLAGS) -c $< -o $@
@@ -304,7 +315,8 @@ $(B)/rt/pinyin.o: runtime/pinyin_data.inc  # (the hanzi readings, tools/gen_piny
 
 $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -c $< -o $@
+	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 # SMAA (third_party/smaa, MIT): the reference shader as a C string for runtime/nvn/smaa_data.c (both backends build
 # their passes from it); the non-ASCII bytes in its comments become '?', and its CRLF line ends plain LF (a CR left in
@@ -315,13 +327,15 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
 
-$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(OSFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(OSFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
-$(B)/rt/%.o: runtime/%.m $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.m
 	@mkdir -p $(dir $@)
-	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -fobjc-arc -c $< -o $@
+	$(CC) $(RTFLAGS) $(RUNTIME_OPTFLAGS) -fobjc-arc $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
 # place gets running copies killed by macOS (code signature of the changed pages). The temp file keeps the real name
@@ -338,9 +352,10 @@ $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	echo $(GAMELIB_ID) > $@.id
 
 $(B)/rt/ui/i18n.o: $(wildcard runtime/ui/i18n/*.inc) runtime/ui/i18n.h
-$(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
+$(B)/rt/ui/%.o: runtime/ui/%.mm
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(UIFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(RUNTIME_OPTFLAGS) $(UIFLAGS) $(RT_DEPFLAGS) -c $< -o $@
+	@mv -f $(@:.o=.d).tmp $(@:.o=.d)
 
 $(B)/imgui/%.o: $(IMGUI)/%.cpp
 	@mkdir -p $(dir $@)

@@ -9,6 +9,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <vulkan/vulkan.h>
 #if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
@@ -99,6 +100,13 @@ void vk_dyn_forget(void);    // exec.c: graphics pipeline / dynamic state of the
 typedef struct { VkBuffer buf; uint64_t off; void *ptr; } VkSpan;
 VkSpan vk_transient(uint64_t size, uint64_t align);
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align);
+// Keep the index buffer's four trailing bytes in the upload allocation. The source can end at its last index.
+static inline VkSpan vk_stage_indices(const void *indices, size_t index_bytes) {
+    VkSpan upload = vk_transient(index_bytes + 4, 4);
+    if (index_bytes) memcpy(upload.ptr, indices, index_bytes);
+    memset((uint8_t *)upload.ptr + index_bytes, 0, 4);
+    return upload;
+}
 VkSpan vk_readback(uint64_t size);  // host-cached GPU -> CPU staging (read right after the copy completes)
 void vk_readback_sync(void);         // ... before reading it (non-coherent host-cached memory: invalidated)
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout);
@@ -226,6 +234,7 @@ VkSampler vk_sampler(NvnSamplerDesc *d, bool aniso_ok, float bias);  // (aniso_o
 VkSampler vk_default_sampler(bool linear);
 VkSampler vk_text_sampler(void);
 VkSampler vk_glyph_sampler(void);  // (the button glyph sheet drawn larger: textures.c upload_glyph_sheet)
+VkImageView vk_always_shadow_view(VkImageView view, bool shader_shadow, const NvnSamplerDesc *sampler);
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);
 // Destruction once every submission that may use the object has completed.
 void vk_defer_image(VkImage img, VmaAllocation mem);
