@@ -12145,7 +12145,8 @@ static TexBackend *dlss_scene(VkCommandBuffer cb, TexBackend *color, uint32_t ow
         if (md && !strcmp(md, "off")) jx = jy = 0;
         else if (md && strlen(md) == 2) jx *= md[0] == 'n' ? -1 : 1, jy *= md[1] == 'n' ? -1 : 1;
     }
-    bool ok = vk_dlss_apply(cb, color, db, mv, bias, o, (unsigned)upscale_quality_now(), jx, jy, sx, sy, reset);
+    bool ok = vk_dlss_apply(cb, VK_DLSS_SLOT_SCENE, color, db, mv, bias, o, (unsigned)upscale_quality_now(), jx, jy,
+                            sx, sy, reset);
     // (the next frames' jitter sequence: 8 x the upscale's area, NVIDIA's recommended length)
     float area = (float)ow * (float)oh / ((float)w * (float)h);
     rt_jitter_set_phases((uint32_t)ceilf(8.0f * (area > 1 ? area : 1)));

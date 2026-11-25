@@ -367,12 +367,12 @@ bool vk_dlss_init(void) {
     return true;
 }
 
-static void release_feature(void);
+static void release_feature(unsigned slot);
 
 void vk_dlss_shutdown(void) {
     if (!g_initialized) return;
     vk_dlssg_release();
-    release_feature();
+    for (unsigned slot = 0; slot < VK_DLSS_SLOTS; slot++) release_feature(slot);
     unsigned left = 0;
     if (g_ngx_up && N.shutdown) N.shutdown(g_vk.dev, &left);
     g_ngx_up = g_fg_available = g_available = false;
@@ -396,21 +396,28 @@ static NgxResourceVK image_resource(TexBackend *b, VkFormat f, bool rw) {
 }
 
 // ================================================================== DLSS Super Resolution (Video > Upscaler)
-static NgxParam *g_params;
-static NgxHandle *g_feature;
-static unsigned g_in_w, g_in_h, g_out_w, g_out_h, g_quality;
-static VkFormat g_color_format, g_output_format;
-static float g_mv_sx, g_mv_sy;
-static bool g_mv_scale_set;
+// One NGX feature per slot (dlss.h VK_DLSS_SLOT_*), each with its own history, made and used only by the recorder
+// thread (dlss_run); failed: a job of this slot failed, known to the queue thread a frame late, as FSR 3's.
+typedef struct {
+    NgxParam *params;
+    NgxHandle *feature;
+    unsigned in_w, in_h, out_w, out_h, quality;
+    VkFormat color_format, output_format;
+    float mv_sx, mv_sy;
+    bool mv_scale_set;
+    _Atomic int failed;
+} DlssFeature;
+static DlssFeature g_features[VK_DLSS_SLOTS];
 
-static void release_feature(void) {
-    if (g_feature) N.release(g_feature);
-    if (g_params) N.destroy_params(g_params);
-    g_feature = NULL, g_params = NULL;
-    g_in_w = g_in_h = g_out_w = g_out_h = g_quality = 0;
-    g_color_format = g_output_format = VK_FORMAT_UNDEFINED;
-    g_mv_sx = g_mv_sy = 0.0f;
-    g_mv_scale_set = false;
+static void release_feature(unsigned slot) {
+    DlssFeature *f = &g_features[slot];
+    if (f->feature) N.release(f->feature);
+    if (f->params) N.destroy_params(f->params);
+    f->feature = NULL, f->params = NULL;
+    f->in_w = f->in_h = f->out_w = f->out_h = f->quality = 0;
+    f->color_format = f->output_format = VK_FORMAT_UNDEFINED;
+    f->mv_sx = f->mv_sy = 0.0f;
+    f->mv_scale_set = false;
 }
 
 bool vk_dlss_available(void) { return g_available; }
@@ -448,24 +455,25 @@ static void p_dlss_preset(NgxParam *p) {
 // (vk_image_view), NGX's calls in the recorder's turn.
 typedef struct {
     VkCommandBuffer cb;
+    unsigned slot;
     NgxResourceVK color, depth, motion, bias, out;
     bool has_bias;
     unsigned quality;
     float jitter_x, jitter_y, mv_scale_x, mv_scale_y;
     bool reset;
 } DlssJob;
-static _Atomic int g_failed;  // (a job failed: known to the queue thread a frame late, as FSR 3's)
 
-// The recorder thread (or the queue thread, with the recorder off): NGX's feature made again when the sizes, the
-// formats or the mode changed, and the frame evaluated
+// The recorder thread (or the queue thread, with the recorder off): the slot's NGX feature made again when the sizes,
+// the formats or the mode changed, and the frame evaluated
 static void dlss_run(void *arg) {
     const DlssJob *j = arg;
+    DlssFeature *f = &g_features[j->slot];
     unsigned cw = j->color.r.img.width, ch = j->color.r.img.height, ow = j->out.r.img.width, oh = j->out.r.img.height;
     VkFormat cf = j->color.r.img.format, of = j->out.r.img.format;
-    if (!g_available) { atomic_store(&g_failed, 1); return; }
-    if (!g_feature || g_in_w != cw || g_in_h != ch || g_out_w != ow || g_out_h != oh || g_quality != j->quality ||
-        g_color_format != cf || g_output_format != of) {
-        release_feature();
+    if (!g_available) { atomic_store(&f->failed, 1); return; }
+    if (!f->feature || f->in_w != cw || f->in_h != ch || f->out_w != ow || f->out_h != oh || f->quality != j->quality ||
+        f->color_format != cf || f->output_format != of) {
+        release_feature(j->slot);
         static const int q[] = {NGX_PERF_ULTRAQUALITY, NGX_PERF_MAXQUALITY, NGX_PERF_BALANCED, NGX_PERF_MAXPERF,
                                 NGX_PERF_ULTRAPERF};  // (UPQ_*: Ultra Performance's 3.0 is DLSS's own)
         static bool uq_rejected, dlaa_rejected;
@@ -480,8 +488,8 @@ static void dlss_run(void *arg) {
         bool created = false;
         for (int i = 0; i < nm && !created; i++) {
             int mode = modes[i];
-            if (!ok(N.alloc_params(&g_params), "allocate parameters")) { atomic_store(&g_failed, 1); return; }
-            NgxParam *p = g_params;
+            if (!ok(N.alloc_params(&f->params), "allocate parameters")) { atomic_store(&f->failed, 1); return; }
+            NgxParam *p = f->params;
             p_setu(p, "CreationNodeMask", 1);
             p_setu(p, "VisibilityNodeMask", 1);
             p_setu(p, "Width", cw);
@@ -492,7 +500,7 @@ static void dlss_run(void *arg) {
             p_seti(p, "DLSS.Feature.Create.Flags", NGX_DLSS_IS_HDR | NGX_DLSS_MV_LOWRES);
             p_seti(p, "DLSS.Enable.Output.Subrects", 0);
             p_dlss_preset(p);
-            NgxResult r = N.create(j->cb, NGX_FEATURE_SUPERSAMPLING, p, &g_feature);
+            NgxResult r = N.create(j->cb, NGX_FEATURE_SUPERSAMPLING, p, &f->feature);
             if (NGX_OK(r)) {
                 created = true;
                 if (i) LOG("[dlss] NGX mode %d rejected; using fallback NGX mode %d\n", modes[0], mode);
@@ -501,25 +509,25 @@ static void dlss_run(void *arg) {
             } else {
                 if (mode == NGX_PERF_ULTRAQUALITY) uq_rejected = true;
                 if (mode == NGX_PERF_DLAA) dlaa_rejected = true;
-                LOG("[dlss] NGX mode %d rejected: %s (%#x)\n", mode, result_name(r), r);
-                release_feature();
+                LOG("[dlss] slot %u: NGX mode %d rejected: %s (%#x)\n", j->slot, mode, result_name(r), r);
+                release_feature(j->slot);
             }
         }
         if (!created) {
             g_available = false;
-            atomic_store(&g_failed, 1);
+            atomic_store(&f->failed, 1);
             return;
         }
-        g_in_w = cw; g_in_h = ch; g_out_w = ow; g_out_h = oh;
-        g_quality = j->quality; g_color_format = cf; g_output_format = of;
-        p_setf(g_params, "Sharpness", 0.0f);
-        p_setu(g_params, "DLSS.Render.Subrect.Dimensions.Width", cw);
-        p_setu(g_params, "DLSS.Render.Subrect.Dimensions.Height", ch);
-        p_setf(g_params, "DLSS.Pre.Exposure", 1.0f);
-        p_setf(g_params, "DLSS.Exposure.Scale", 1.0f);
+        f->in_w = cw; f->in_h = ch; f->out_w = ow; f->out_h = oh;
+        f->quality = j->quality; f->color_format = cf; f->output_format = of;
+        p_setf(f->params, "Sharpness", 0.0f);
+        p_setu(f->params, "DLSS.Render.Subrect.Dimensions.Width", cw);
+        p_setu(f->params, "DLSS.Render.Subrect.Dimensions.Height", ch);
+        p_setf(f->params, "DLSS.Pre.Exposure", 1.0f);
+        p_setf(f->params, "DLSS.Exposure.Scale", 1.0f);
     }
     NgxResourceVK in_color = j->color, in_depth = j->depth, in_motion = j->motion, in_bias = j->bias, out = j->out;
-    NgxParam *p = g_params;
+    NgxParam *p = f->params;
     p_setp(p, "Color", &in_color);
     p_setp(p, "Output", &out);
     p_setp(p, "Depth", &in_depth);
@@ -531,14 +539,14 @@ static void dlss_run(void *arg) {
     p_seti(p, "Reset", j->reset ? 1 : 0);
     float sx = j->mv_scale_x == 0.0f ? 1.0f : j->mv_scale_x;  // (NGX takes them in render pixels)
     float sy = j->mv_scale_y == 0.0f ? 1.0f : j->mv_scale_y;
-    if (!g_mv_scale_set || sx != g_mv_sx || sy != g_mv_sy) {
+    if (!f->mv_scale_set || sx != f->mv_sx || sy != f->mv_sy) {
         p_setf(p, "MV.Scale.X", sx);
         p_setf(p, "MV.Scale.Y", sy);
-        g_mv_sx = sx; g_mv_sy = sy; g_mv_scale_set = true;
+        f->mv_sx = sx; f->mv_sy = sy; f->mv_scale_set = true;
     }
-    if (!ok(N.evaluate(j->cb, g_feature, p, NULL), "evaluate")) {
-        release_feature();
-        atomic_store(&g_failed, 1);
+    if (!ok(N.evaluate(j->cb, f->feature, p, NULL), "evaluate")) {
+        release_feature(j->slot);
+        atomic_store(&f->failed, 1);
     }
 }
 
@@ -547,18 +555,19 @@ static void dlss_run(void *arg) {
 // thread, where it limits the frame rate, the whole recorder backlog each frame (RTX 3060, 1080p Savage: DLSS 3-6 fps
 // under FSR 3). Whether it worked is known a frame late: a failure leaves this frame's output undefined and the
 // caller falls back from the next one.
-bool vk_dlss_apply(VkCommandBuffer cb, TexBackend *color, TexBackend *depth, TexBackend *motion, TexBackend *bias,
-                   TexBackend *output, unsigned quality, float jitter_x, float jitter_y, float mv_scale_x,
-                   float mv_scale_y, bool reset) {
-    if (!g_available || atomic_exchange(&g_failed, 0) || !cb || !color || !depth || !motion || !output ||
-        !color->image || !depth->image || !motion->image || !output->image ||
+bool vk_dlss_apply(VkCommandBuffer cb, unsigned slot, TexBackend *color, TexBackend *depth, TexBackend *motion,
+                   TexBackend *bias, TexBackend *output, unsigned quality, float jitter_x, float jitter_y,
+                   float mv_scale_x, float mv_scale_y, bool reset) {
+    if (!g_available || slot >= VK_DLSS_SLOTS || atomic_exchange(&g_features[slot].failed, 0) || !cb || !color ||
+        !depth || !motion || !output || !color->image || !depth->image || !motion->image || !output->image ||
         color->width == 0 || color->height == 0 || output->width == 0 || output->height == 0)
         return false;
-    static DlssJob jobs[8];  // (the recorder is never 8 frames behind: a submission a frame waits for it)
+    // (the recorder is never 8 frames behind: a submission a frame waits for it; two eyes a frame in PC VR)
+    static DlssJob jobs[16];
     static unsigned nj;
-    DlssJob *j = &jobs[nj++ & 7];
+    DlssJob *j = &jobs[nj++ & 15];
     bool has_bias = bias && bias->image && bias->width == color->width && bias->height == color->height;
-    *j = (DlssJob){cb, image_resource(color, color->format, false), image_resource(depth, depth->format, false),
+    *j = (DlssJob){cb, slot, image_resource(color, color->format, false), image_resource(depth, depth->format, false),
                    image_resource(motion, motion->format, false),
                    has_bias ? image_resource(bias, bias->format, false) : (NgxResourceVK){0},
                    image_resource(output, output->format, true), has_bias,
@@ -845,10 +854,10 @@ void vk_dlss_required_device_extensions(const char ***names, unsigned *count) {
 bool vk_dlss_init(void) { return false; }
 void vk_dlss_shutdown(void) {}
 bool vk_dlss_available(void) { return false; }
-bool vk_dlss_apply(VkCommandBuffer cb, TexBackend *color, TexBackend *depth, TexBackend *motion, TexBackend *bias,
-                   TexBackend *output, unsigned quality, float jitter_x, float jitter_y, float mv_scale_x,
-                   float mv_scale_y, bool reset) {
-    (void)cb, (void)color, (void)depth, (void)motion, (void)bias, (void)output, (void)quality, (void)jitter_x, (void)jitter_y;
+bool vk_dlss_apply(VkCommandBuffer cb, unsigned slot, TexBackend *color, TexBackend *depth, TexBackend *motion,
+                   TexBackend *bias, TexBackend *output, unsigned quality, float jitter_x, float jitter_y,
+                   float mv_scale_x, float mv_scale_y, bool reset) {
+    (void)cb, (void)slot, (void)color, (void)depth, (void)motion, (void)bias, (void)output, (void)quality, (void)jitter_x, (void)jitter_y;
     (void)mv_scale_x, (void)mv_scale_y, (void)reset;
     return false;
 }

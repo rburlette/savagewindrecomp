@@ -18,6 +18,9 @@ void vk_dlss_shutdown(void);
 
 // NVIDIA DLSS Super Resolution (Video > Upscaler)
 bool vk_dlss_available(void);
+// Each slot is an NGX feature of its own, with its own history: the flat game's scene, and in PC VR each eye's
+// (vr_dlaa.c), whose images come one after the other in a frame.
+enum { VK_DLSS_SLOT_SCENE, VK_DLSS_SLOT_LEFT_EYE, VK_DLSS_SLOT_RIGHT_EYE, VK_DLSS_SLOTS };
 // color at the render size; depth and motion at its size too (MVLowRes): motion RG times mv_scale_x / mv_scale_y is
 // each pixel's offset to where it was in the previous frame, in render pixels (exec.c cam_motion's uv differences:
 // the motion's size; mvec.c's NDC differences: -w / 2, h / 2; zero, with reset, for none). jitter_x / jitter_y: the
@@ -25,9 +28,9 @@ bool vk_dlss_available(void);
 // of the pixels that should lean on this frame's colour rather than the history (DLSS's Bias Current Color mask:
 // FSR 3's reactive mask, the blended effects - fog, mist, particles - which otherwise trail behind). false: not run
 // (the caller falls back).
-bool vk_dlss_apply(VkCommandBuffer cb, TexBackend *color, TexBackend *depth, TexBackend *motion, TexBackend *bias,
-                   TexBackend *output, unsigned quality, float jitter_x, float jitter_y, float mv_scale_x,
-                   float mv_scale_y, bool reset);
+bool vk_dlss_apply(VkCommandBuffer cb, unsigned slot, TexBackend *color, TexBackend *depth, TexBackend *motion,
+                   TexBackend *bias, TexBackend *output, unsigned quality, float jitter_x, float jitter_y,
+                   float mv_scale_x, float mv_scale_y, bool reset);
 
 // NVIDIA DLSS Frame Generation (Video > Frame generation: NVIDIA DLSS; NGX's own, 2x-4x): exec.c vk_fg_generate's
 // inputs, the ones AMD FSR 3 takes (framegen.h FgFrame).
