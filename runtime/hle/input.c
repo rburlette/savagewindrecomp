@@ -724,7 +724,10 @@ static void pad_open(SDL_JoystickID id) {
     else motion_pads(pad, pads, npads);
 }
 
+#include "pc_vr_input_keys.inc"  // PC VR's live keys: world scale, panel distances, the grade, the DLAA modes
+
 void input_handle_event(const SDL_Event *e) {
+    if (world_scale_event(e) || panel_distance_event(e) || grade_toggle_event(e) || dlaa_mode_event(e)) return;
     if ((e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP) &&
         (e->button.button == SDL_BUTTON_LEFT || e->button.button == SDL_BUTTON_RIGHT)) {
         unsigned bit = e->button.button == SDL_BUTTON_LEFT ? 1u : 2u;
