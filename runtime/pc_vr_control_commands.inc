@@ -147,7 +147,7 @@ static void cmd_eyeshot(int argc, char **argv, ControlReply *reply) {
 }
 
 // (probe) `dlaa <mode>`: PC VR's DLAA mode from the next present, as the '9' key steps them (runtime/nvn/vulkan/
-// vr_dlaa.h: 0 none, 1 DLAA, 2 DLSS), with SAVAGEWIND_PC_VR_DLAA=1.
+// vr_dlaa.h: 0 none, 1 DLAA, 2 DLSS), unless vr_antialiasing = off.
 static void cmd_dlaa(int argc, char **argv, ControlReply *reply) {
 #ifndef SAVAGEWIND_WITH_OPENXR
     (void)argc, (void)argv;
@@ -160,7 +160,7 @@ static void cmd_dlaa(int argc, char **argv, ControlReply *reply) {
     }
     const int mode = atoi(argv[1]);
     if (!vr_dlaa_request_mode(mode)) {
-        control_fail(reply, "dlaa: not switched on for this run (SAVAGEWIND_PC_VR_DLAA=1), DLSS does not run here, or no such mode");
+        control_fail(reply, "dlaa: off for this run (vr_antialiasing = off), DLSS does not run here, or no such mode");
         return;
     }
     control_field_int(reply, "requested", mode);

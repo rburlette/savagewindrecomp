@@ -160,7 +160,7 @@ void rt_fatal_trace(void) { abort(); }
 // The diagnostic SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING in the process's configuration (pc_vr_config.h); head look itself
 // is PC VR's play configuration (mock_pc_vr here).
 static void set_timing_optin(const char *value) {
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING", value, NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING", value, NULL});
 }
 
 // A usable published pose (every flag head look asks for set), told apart by its frame id, in the current LOCAL

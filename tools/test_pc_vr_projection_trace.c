@@ -110,7 +110,7 @@ void hle_override(uint64_t address, HostFn fn, const char *name) {
 // The projection trace armed as the play configuration arms it (pc_vr_projection_trace_init), at this world scale (the
 // configuration's parser keeps it finite and above 0).
 static void fixture_init_at(double units_per_meter) {
-    process_configuration.play.native_view_units_per_meter = units_per_meter;
+    process_configuration.settings.native_view_units_per_meter = units_per_meter;
     pc_vr_projection_trace_init();
 }
 static void fixture_init(void) { fixture_init_at(1.0); }
@@ -1455,7 +1455,7 @@ static void test_display_pair(void) {
 // all of it, continuously, at the configured world scale (14.53 game units per metre, or the setting's), and an alias
 // given another value switches nothing off.
 static void test_play_configuration(void) {
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});  // (the configuration's own scale)
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});  // (the configuration's own scale)
     pc_vr_projection_trace_reset();
     mock_pc_vr = false; pc_vr_projection_trace_init();
     CHECK(!atomic_load(&projection_enabled) && !atomic_load(&render_collecting));
@@ -1463,22 +1463,22 @@ static void test_play_configuration(void) {
     pc_vr_projection_trace_init();
     CHECK(atomic_load(&projection_enabled) && pc_vr_render_trace_enabled() && atomic_load(&render_collecting));
     CHECK(projection_view_scale == 14.53 && pc_vr_world_scale_active());
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1",
-        "SAVAGEWIND_PC_VR_NATIVE_VIEW_UNITS_PER_METER", "20", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1",
+        "vr_game_units_per_meter", "20", NULL});
     pc_vr_projection_trace_init();
     CHECK(projection_view_scale == 20 && atomic_load(&render_collecting));
     CHECK(pc_vr_world_scale(1.25) == 25 && pc_vr_world_scale(0) == 20);  // (the live scale's launch value)
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_PROJECTION_TRACE", "0",
-        "SAVAGEWIND_PC_VR_NATIVE_RENDER_TRACE", "0", "SAVAGEWIND_PC_VR_EYE_IMAGES", "0", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});  // (back to the default scale; nothing switches the
+                                                                   // traces off)
     pc_vr_projection_trace_init();
     CHECK(atomic_load(&projection_enabled) && pc_vr_render_trace_enabled() && atomic_load(&render_collecting));
     CHECK(projection_view_scale == 14.53);
     pc_vr_projection_trace_reset();
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
 }
 
 int main(void) {
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
     test_init();
 #ifdef _WIN32
     test_writers_alone();

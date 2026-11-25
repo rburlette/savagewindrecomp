@@ -99,7 +99,7 @@ static void reboot(void) {
 
 int main(int argc, char **argv) {
     if (!(argc > 1 && !strcmp(argv[1], "--log"))) (void)!freopen("NUL", "w", stderr);
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
     void *heap = VirtualAlloc((void *)(uintptr_t)HEAP_BASE, FIXTURE_HEAP_BYTES, MEM_RESERVE | MEM_COMMIT,
                               PAGE_READWRITE);
     if (heap != (void *)(uintptr_t)HEAP_BASE) {

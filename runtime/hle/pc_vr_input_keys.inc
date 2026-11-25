@@ -47,7 +47,7 @@ static bool grade_toggle_event(const SDL_Event *e) {
     return true;
 }
 
-// PC VR's DLAA modes, live, to compare in the headset with SAVAGEWIND_PC_VR_DLAA=1: '9' steps none (the game's FXAA),
+// PC VR's DLAA modes, live, to compare in the headset unless vr_antialiasing = off: '9' steps none (the game's FXAA),
 // DLAA, DLSS (runtime/nvn/vulkan/vr_dlaa.h). A host key while PC VR runs, never a guest button.
 static bool dlaa_mode_event(const SDL_Event *e) {
     if ((e->type != SDL_EVENT_KEY_DOWN && e->type != SDL_EVENT_KEY_UP) || !pc_vr_enabled() ||

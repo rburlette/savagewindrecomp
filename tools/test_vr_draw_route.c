@@ -163,7 +163,7 @@ static bool vr_is_hud_draw_before(void) {
 }
 
 static int vr_hud_backdrop_fate_before(Prog *program_used) {
-    const int keep = configuration->play.hud_backdrop;
+    const int keep = configuration->diagnostics.hud_backdrop;
     const int fate = vr_draw_role == PC_VR_PANE_BOX ? 1 : vr_draw_role == PC_VR_PANE_WORLD_PICTURE ? 2 :
         vr_draw_role == PC_VR_PANE_EDGE_MASK ? 3 : 0;
     if (keep || !fate) return 0;
@@ -241,7 +241,7 @@ static bool vr_is_hud_draw(void) {
 
 static VrBackdropFate vr_hud_backdrop_fate(Prog *program_used) {
     const VrBackdropFate fate = vr_backdrop_fate_of_role(vr_draw_role);
-    if (configuration->play.hud_backdrop || !fate) return VR_BACKDROP_NONE;
+    if (configuration->diagnostics.hud_backdrop || !fate) return VR_BACKDROP_NONE;
     for (int i = 0; i < program_used->fi->ntex; i++)
         if (vr_backdrop_source(shader_texture_object(1, &program_used->fi->tex[i]))) return fate;
     return VR_BACKDROP_NONE;
@@ -437,10 +437,10 @@ static bool called(const Outcome *result, unsigned code) {
 }
 
 int main(void) {
-    test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL}, &backdrop_default);
-    test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_HUD_BACKDROP", "1", NULL},
+    test_pc_vr_parse((const char *const[]){"vr", "1", NULL}, &backdrop_default);
+    test_pc_vr_parse((const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_HUD_BACKDROP", "1", NULL},
                      &backdrop_drawn);
-    CHECK(!backdrop_default.play.hud_backdrop && backdrop_drawn.play.hud_backdrop);
+    CHECK(!backdrop_default.diagnostics.hud_backdrop && backdrop_drawn.diagnostics.hud_backdrop);
     // ---- Named cases, through the hub as exec.c has it.
     // The hearts, in play: the flat HUD's screen, no marker, an ordinary pane, no placement, not a backdrop: the
     // HUD's image as drawn.

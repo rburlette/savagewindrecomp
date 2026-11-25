@@ -365,7 +365,7 @@ static bool world_hud_patch_now(uint64_t address, uint64_t size, float *bound, u
 
 static bool world_hud_draw_now(void) {
     const PcVrConfig *config = &configuration;
-    if (!config->play.world_hud || !st.rt.color[0]) return false;
+    if (!config->diagnostics.world_hud || !st.rt.color[0]) return false;
     if (vr_draw_marker == PC_VR_MARKER_FLAT) return false;
     if (!vr_draw_marker && vr_draw_role != PC_VR_PANE_RETICLE) return false;
     const Range pane_constants = st.ubuf[0][0], offset_constants = st.ubuf[0][10];
@@ -413,8 +413,8 @@ static bool world_hud_draw_now(void) {
     const double tan_per_pixel = VR_SCREEN_WIDTH / (2 * VR_SCREEN_HALF_W);  // (on the HUD panel)
     const double focus = pc_vr_camera_focus_distance();
     VrHudMarkerPlacement placed;
-    vr_hud_marker_move(&seen, marker, viewport, labo_offset, tan_per_pixel, focus, config->play.world_hud_upright,
-                       config->play.world_hud_test_turn, &vr_world_hud.move, &placed);
+    vr_hud_marker_move(&seen, marker, viewport, labo_offset, tan_per_pixel, focus, config->diagnostics.world_hud_upright,
+                       config->diagnostics.world_hud_test_turn, &vr_world_hud.move, &placed);
     ++vr_world_hud.draws;
     ++vr_world_hud.frame_draws;
     if (vr_world_hud.logged < 16 || !(vr_world_hud.draws % 8192)) ++vr_world_hud.logged;
@@ -719,8 +719,8 @@ static void random_draw(void) {
     keep_image_up = random_chance(0.3);
     // Use the affine diagnostics for the differential test. The default world's card is checked by its geometry below.
     test_turn = random_chance(0.8) ? 0.25 : random_between(-3.1, 3.1);
-    configuration.play.world_hud_upright = keep_image_up;
-    configuration.play.world_hud_test_turn = test_turn;
+    configuration.diagnostics.world_hud_upright = keep_image_up;
+    configuration.diagnostics.world_hud_test_turn = test_turn;
     // (what the draw is)
     st.ubuf[0][0].addr = random_chance(0.99) ? (uint64_t)(uintptr_t)pane_constants_block : 0;
     vr_draw_role = PC_VR_PANE_NONE;
@@ -944,7 +944,7 @@ static void check_reticle_placement(void) {
     focus_distance = 2;
     world_hud_off = keep_image_up = 0;
     test_turn = 0;
-    test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL}, &configuration);
+    test_pc_vr_parse((const char *const[]){"vr", "1", NULL}, &configuration);
     memset(&old_hud, 0, sizeof old_hud);
     memset(&vr_world_hud, 0, sizeof vr_world_hud);
     for (unsigned eye = 0; eye < 2; ++eye) {
@@ -1029,7 +1029,7 @@ int main(void) {
     world_hud_off = 0;
     keep_image_up = 0;
     test_turn = 0;
-    test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL}, &configuration);  // (the play default)
+    test_pc_vr_parse((const char *const[]){"vr", "1", NULL}, &configuration);  // (the play default)
     const double left_tangent = tan(flat_fov[0]), right_tangent = tan(flat_fov[1]);
     const double tan_per_pixel = VR_SCREEN_WIDTH / (2 * VR_SCREEN_HALF_W);
     for (unsigned linked_by_pane = 0; linked_by_pane < 2; ++linked_by_pane) {
@@ -1243,14 +1243,14 @@ int main(void) {
         const struct { const char *value; bool off; } switches[] = {
             {NULL, false}, {"0", true}, {"1", false}, {"00", false}, {"0 ", false}, {"", false}};
         for (unsigned i = 0; i < sizeof switches / sizeof switches[0]; ++i) {
-            test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1",
+            test_pc_vr_parse((const char *const[]){"vr", "1",
                                                    "SAVAGEWIND_PC_VR_WORLD_HUD", switches[i].value, NULL}, &configuration);
             memset(&vr_world_hud, 0, sizeof vr_world_hud);
             const bool placed = world_hud_draw_now();
-            CHECK(configuration.play.world_hud == !switches[i].off && placed == !switches[i].off);
+            CHECK(configuration.diagnostics.world_hud == !switches[i].off && placed == !switches[i].off);
             CHECK(vr_world_hud.draws == !switches[i].off && vr_world_hud.unmatched == 0 && vr_world_hud.behind == 0);
         }
-        test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL}, &configuration);
+        test_pc_vr_parse((const char *const[]){"vr", "1", NULL}, &configuration);
         // SAVAGEWIND_PC_VR_WORLD_HUD_ROLL: unset, the marker turns with the world's up as the eye sees it (a head
         // rolled 0.3 rad: the marker's roll in the image is 0.3 rad, 17.19 degrees); "0": upright in the image; another
         // number: that many degrees clockwise more (with the head level, the roll is that number); not a number, or
@@ -1266,16 +1266,16 @@ int main(void) {
             {"", true, 0, 0, 0.3 * 180 / 3.14159265358979323846},
         };
         for (unsigned i = 0; i < sizeof rolls / sizeof rolls[0]; ++i) {
-            test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1",
+            test_pc_vr_parse((const char *const[]){"vr", "1",
                                                    "SAVAGEWIND_PC_VR_WORLD_HUD_ROLL", rolls[i].value, NULL}, &configuration);
             set_eyes(no_turn, calibration_origin, rolls[i].rolled_head ? rolled : no_turn, 0.064, flat_fov, 10, 1);
             memset(&vr_world_hud, 0, sizeof vr_world_hud);
             CHECK(world_hud_draw_now());
-            CHECK(configuration.play.world_hud_upright == rolls[i].keep &&
-                  fabs(configuration.play.world_hud_test_turn - rolls[i].turn_degrees * 3.14159265358979323846 / 180) < 1e-12);
+            CHECK(configuration.diagnostics.world_hud_upright == rolls[i].keep &&
+                  fabs(configuration.diagnostics.world_hud_test_turn - rolls[i].turn_degrees * 3.14159265358979323846 / 180) < 1e-12);
             CHECK(fabs(new_log.values[15] - rolls[i].roll_degrees) < 0.01);
         }
-        test_pc_vr_parse((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL}, &configuration);
+        test_pc_vr_parse((const char *const[]){"vr", "1", NULL}, &configuration);
         set_eyes(no_turn, calibration_origin, no_turn, 0.064, flat_fov, 10, 1);
         keep_image_up = 0;
         test_turn = 0;
@@ -1365,10 +1365,10 @@ int main(void) {
             if (vr_draw_role == PC_VR_PANE_RETICLE && !keep_image_up) {
                 // The card changes the reticle's shape, but uses the original linked or aim point in each eye.
                 const VrWorldHud diagnostic = vr_world_hud;
-                configuration.play.world_hud_test_turn = 0;
+                configuration.diagnostics.world_hud_test_turn = 0;
                 CHECK(world_hud_draw_now() && vr_world_hud.move.card && old_log.eye == new_log.eye &&
                       !strcmp(old_log.how, new_log.how) && !memcmp(&old_log.values[9], &new_log.values[9], 4 * sizeof(double)));
-                configuration.play.world_hud_test_turn = test_turn;
+                configuration.diagnostics.world_hud_test_turn = test_turn;
                 vr_world_hud = diagnostic;
                 ++default_reticles;
             }

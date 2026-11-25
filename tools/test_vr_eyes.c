@@ -280,7 +280,7 @@ static unsigned random_below(unsigned bound) {
 
 int main(int argc, char **argv) {
     if (!(argc > 1 && !strcmp(argv[1], "--log")) && !freopen("NUL", "w", stderr)) return 2;
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
 
     // An accepted offer: the slot goes to the XR owner with the offer and stays busy until its release callback.
     fresh_producer();

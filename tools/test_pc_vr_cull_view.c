@@ -220,7 +220,7 @@ static void test_patches(void) {
     const uint64_t fovy_address = (uint64_t)(uintptr_t)&pair[0], aspect_address = (uint64_t)(uintptr_t)&pair[1];
 
     // The game's own matrix and field of view until a view is published.
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
     CHECK(rt_pc_vr_cull_matrix(base) == base + 8 && !guest_allocations);
     rt_pc_vr_cull_fov(base, fovy_address, aspect_address);
     CHECK(pair[0] == 1.5f && pair[1] == 0.8889f);
@@ -311,7 +311,7 @@ static void test_grass(void) {
     const Cpu before = cpu;
 
     // Before a view is published: the record's own three, no game call.
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
     pc_vr_cull_view_reset();
     const unsigned allocations = guest_allocations;
     memcpy(record, &left_eye, 2);
@@ -442,8 +442,8 @@ static void test_model_detail(void) {
     static const struct { const char *setting; float factor; } settings[] = {
         {NULL, 0.8f}, {"1", 1.0f}, {"0.6", 0.6f}, {"0", 0.0f}, {"3", 0.8f}};  // (3: out of range, the default)
     for (unsigned chosen = 0; chosen < sizeof settings / sizeof settings[0]; ++chosen) {
-        test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1",
-            settings[chosen].setting ? "SAVAGEWIND_PC_VR_MODEL_DISTANCE" : NULL, settings[chosen].setting, NULL});
+        test_pc_vr_configure((const char *const[]){"vr", "1",
+            settings[chosen].setting ? "vr_model_distance" : NULL, settings[chosen].setting, NULL});
         const float factor = settings[chosen].factor;
         pc_vr_cull_view_reset();
         rendered_views_available = false;
@@ -490,7 +490,7 @@ static void test_model_detail(void) {
         }
     }
     // A game reset: the game's own depth until the next view.
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
     pc_vr_cull_view_reset();
     rendered_views_available = false;
     const float sphere[4] = {0, 0, 0, 1};
@@ -509,7 +509,7 @@ static void test_canted_model_views(void) {
     eyes[1].target[1] += 0.2f;
     _Alignas(float) uint8_t volumes[2][MODEL_VOLUME_STRIDE];
     const float sphere[4] = {12, 21, 32, 1};  // exactly five units from the midpoint
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", "SAVAGEWIND_PC_VR_MODEL_DISTANCE", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", "vr_model_distance", "1", NULL});
     for (unsigned side = 0; side < 2; ++side)
         eye_volume(volumes[side], &eyes[side], &eye_frames[side], side ? 0.12f : -0.12f);
     capture_model_views(volumes, centre);

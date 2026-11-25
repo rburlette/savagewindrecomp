@@ -105,7 +105,7 @@ static void reset_case(void) {
 
 int main(void) {
     (void)labo_guest_copy; // declared by the real guard header; mocked in this fixture
-    test_pc_vr_configure((const char *const[]){"SAVAGEWIND_PC_VR", "1", NULL});
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
     assert(pc_vr_enabled());
 
     reset_case();
