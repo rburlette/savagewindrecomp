@@ -72,6 +72,8 @@ extern volatile int g_movie_fps;      // runtime/hle/movie.c: the playing movie'
 #define VF(T, base, off) (*(T *)(uintptr_t)((base) + (off)))
 #define PAUSE_STATE g_site.pause_state  // (u32: 0 playing, 2 in the pause menu or the map)
 
+#include "pc_vr_automation_state.inc"  // the automation's observations of the game (automation_state.h)
+
 static int env_int(const char *name, int def) {
     const char *e = getenv(name);
     return e && *e ? atoi(e) : def;
@@ -700,6 +702,7 @@ static uint64_t shown_frames;
 uint64_t framepace_shown_frame(void) { return __atomic_load_n(&shown_frames, __ATOMIC_RELAXED); }
 
 void rt_vfr_update(uint64_t vfr) {
+    automation_sample();
     __atomic_fetch_add(&game_frames, 1, __ATOMIC_RELAXED);
     gamelib_sync();
     {
@@ -712,6 +715,7 @@ void rt_vfr_update(uint64_t vfr) {
     if (nvn_timeline()) LOG("[tl] %.3f %x vfr\n", plat_now_ns() / 1e6, kernel_current_thread_handle());
     extern uint64_t g_fs_vfr;  // (SAVAGEWIND_FRAME_LOG=2, nvn/objects.c)
     g_fs_vfr = plat_now_ns();
+    pc_vr_frame_trace_update();  // (PC VR: the late-frame trace's stall sampler learns this thread)
     extern void freecam_frame(void);  // (hle/freecam.c)
     freecam_frame();
     clock_probe(vfr);

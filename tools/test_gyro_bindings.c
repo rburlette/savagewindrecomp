@@ -48,6 +48,7 @@ bool framepace_in_event(void){return false;}
 bool control_enabled(void){return false;}
 bool control_fly_toggle(void){abort();}
 void control_fly_wheel(float n){(void)n;abort();}
+void pc_vr_frame_trace_user_mark(void) {}  // (PC VR: the fly button's press also marks the late-frame trace)
 // (the free camera, hle/freecam.c: off here)
 bool freecam_active(void) { return false; }
 void freecam_toggle(void) { abort(); }

@@ -116,7 +116,7 @@ static VkQueryPool prof_qp;
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
 static uint64_t cum_xwait;  // (profiling) the part of cum_wait spent inside backend_execute
 static __thread bool in_execute;  // (this thread is in backend_execute)
-static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
+static uint32_t prof_end_line[16384];  // passes ended, by the exec.c line that ended them (0: submit / present)
 uint64_t prof_views_created;  // textures.c vk_image_view cache misses
 uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
@@ -1436,7 +1436,7 @@ const char *renderer_stats(void) {
                  prof_heap_range_check_ns / 1e6);
         n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, " | pass ends:");
-        for (int l = 0; l < 4096; l++)
+        for (int l = 0; l < 16384; l++)
             if (prof_end_line[l] > 20) { n = strlen(stats_text); snprintf(stats_text + n, sizeof stats_text - n, " %d:%u", l, prof_end_line[l]); }
         memset(prof_end_line, 0, sizeof prof_end_line);
         RecStats rs;  // (record.c: the recorder thread's work and every wait on it, this interval)
@@ -2155,7 +2155,7 @@ void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
 static void vk_end_pass_at(int line) {
     if (!ps.open) return;
-    if (prof && line < 4096) prof_end_line[line]++;
+    if (prof && line < 16384) prof_end_line[line]++;
     if (prof_enabled() && line < 4096) {  // (the profiler) passes ended, by the line that ended them
         static ProfSite end_site[4096];
         if (!end_site[line].id) {
@@ -9598,6 +9598,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (g_debug_frame && getenv("SAVAGEWIND_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
     }
+    if (vr_effect_trace_active()) vr_effect_trace_gather(pr, r);  // (development: SAVAGEWIND_PC_VR_EFFECT_TRACE)
     // Video > Advanced: Bloom off: the bloom's draws (bloom_scale.h) clear their images instead, so the glow added over
     // the scene is black; Depth of field off: the distance blur's draw (fs f7731492223eb16a, blended over the distant
     // pixels) is skipped.
@@ -9832,6 +9833,8 @@ static void draw_(CmdRec *r, bool indexed) {
     scene_post(pr, r);
     if (pr->hdr && vk_hdr_game_enabled()) pr = pr->hdr;  // (the game's tonemap draw: the extended-curve variant, HDR only)
     fg_draw(pr, r);
+    if (vr_dlaa_checking())  // ((development) the eye camera DLAA takes, against what the eye's draws read)
+        vr_dlaa_check_block(vr_draw_certificate, (const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size);
     snap_reason = "draw-depthwrite";
     if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
     snap_reason = "draw-colorwrite";
@@ -13204,6 +13207,8 @@ static void exec_list(uint64_t handle, int depth) {
             if (ENV_ONCE("SAVAGEWIND_LOG_CLEARS") && index < st.rt.ncolor && st.rt.color[index])
                 LOG("[cclear] frame %llu idx %d %ux%u f%#x mask %#x\n", (unsigned long long)renderer_present_count(), index,
                     st.rt.color[index]->width, st.rt.color[index]->height, st.rt.color[index]->format, (uint32_t)r->x[2]);
+            if (vr_effect_trace_active() && index < st.rt.ncolor)
+                vr_effect_trace_event(VR_EFFECT_TRACE_CLEAR_COLOR, NULL, st.rt.color[index]);
             if (index < st.rt.ncolor && st.rt.color[index]) clear(index, (int)r->x[5], x, (uint32_t)r->x[2], false, 0, false, 0, 0);
             break;
         }
@@ -13212,6 +13217,7 @@ static void exec_list(uint64_t handle, int depth) {
             const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct = x;
             NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
             if (!t) break;
+            if (vr_effect_trace_active()) vr_effect_trace_event(VR_EFFECT_TRACE_CLEAR_COLOR, NULL, t);
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             RtState saved = st.rt;
             int32_t sc[4];
@@ -13234,12 +13240,16 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_CLEAR_DEPTH_STENCIL:
             snap_reason = "clear-depth"; snapshots_invalidate(NULL);
+            if (vr_effect_trace_active()) vr_effect_trace_event(VR_EFFECT_TRACE_CLEAR_DEPTH, NULL, st.rt.depth);
             if (st.rt.depth) {
                 bool has_stencil = renderer_format_has_stencil(st.rt.depth->format);
                 clear(-1, 0, NULL, 0, r->x[0] != 0, r->f[0], has_stencil && r->x[2] != 0, (uint32_t)r->x[1], (uint32_t)r->x[2]);
             }
             break;
-        case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
+        case CMD_DISPATCH:
+            if (vr_effect_trace_active()) vr_effect_trace_event(VR_EFFECT_TRACE_DISPATCH, NULL, NULL);
+            dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]);
+            break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
@@ -13318,8 +13328,15 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_RESET_COUNTER:
             if (r->x[0] == 1) { oq_counting = true; oq_nrun = 0; }  // SAMPLES_PASSED
             break;
-        case CMD_COPY_TEXTURE_TO_TEXTURE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], r->x[6]); break; }
-        case CMD_DOWNSAMPLE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], 1); break; }
+        case CMD_COPY_TEXTURE_TO_TEXTURE:
+        case CMD_DOWNSAMPLE: {
+            const TexRefRec *refs = x;  // (the source and the destination)
+            if (vr_effect_trace_active())
+                vr_effect_trace_event(VR_EFFECT_TRACE_COPY, (NvnTexture *)(uintptr_t)refs[0].tex,
+                                      (NvnTexture *)(uintptr_t)refs[1].tex);
+            copy_texture(&refs[0], &refs[1], r->op == CMD_DOWNSAMPLE ? 1 : r->x[6]);
+            break;
+        }
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
         case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:

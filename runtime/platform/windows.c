@@ -115,6 +115,8 @@ static bool g_report_crashes;
 // open page, the trap flag brings us back here to close the page again, so no access slips through.
 static __thread uint64_t t_reclose_page, t_written;
 
+#include "pc_vr_data_watch_windows.inc"  // PC VR's data-watch audit: CPU data breakpoints
+
 static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && t_reclose_page) {
@@ -134,6 +136,29 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
         VirtualProtect((void *)(uintptr_t)close, PLAT_PAGE, PAGE_NOACCESS, &old);
         access_may_shrink();
         t_reclose_page = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && atomic_load(&g_data_watch_armed) &&
+        (ep->ContextRecord->Dr6 & 0xf)) {  // [pc-vr-audit] a data breakpoint (after the access)
+        extern void rt_data_watch_hit(unsigned slot, uint64_t pc, const uint64_t regs[4]);
+        const CONTEXT *x = ep->ContextRecord;
+        const uint64_t regs[4] = {x->Rax, x->Rcx, x->Rdx, x->R8};  // (a host memcpy's destination, source and count)
+        const DWORD64 s = x->Dr6;
+        // (probe) A hit of a word no longer watched is not reported: this thread kept an earlier set's registers,
+        // because it was in this handler when the set changed and the handler's return put the saved ones back.
+        const unsigned slot = s & 1 ? 0 : s & 2 ? 1 : s & 4 ? 2 : 3;
+        const DWORD64 hit_address = slot == 0 ? x->Dr0 : slot == 1 ? x->Dr1 : slot == 2 ? x->Dr2 : x->Dr3;
+        if (hit_address == g_data_watch_addr[slot]) rt_data_watch_hit(slot, x->Rip, regs);
+        // ... and every hit leaves the thread with the current set.
+        DWORD64 dr7 = 0;
+        for (unsigned i = 0; i < 4; i++)
+            if (g_data_watch_addr[i]) dr7 |= (1ull << (2 * i)) | (0xbull << (16 + 4 * i));
+        ep->ContextRecord->Dr0 = g_data_watch_addr[0];
+        ep->ContextRecord->Dr1 = g_data_watch_addr[1];
+        ep->ContextRecord->Dr2 = g_data_watch_addr[2];
+        ep->ContextRecord->Dr3 = g_data_watch_addr[3];
+        ep->ContextRecord->Dr7 = dr7;
+        ep->ContextRecord->Dr6 = 0;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;

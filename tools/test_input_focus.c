@@ -71,6 +71,7 @@ void motion_script(float p, float r, float ps, float ys) { (void)p; (void)r; (vo
 bool control_enabled(void) { return false; }
 bool control_fly_toggle(void) { unexpected_helper(); }
 void control_fly_wheel(float notches) { (void)notches; unexpected_helper(); }
+void pc_vr_frame_trace_user_mark(void) {}  // (PC VR: the fly button's press also marks the late-frame trace)
 // (the free camera, hle/freecam.c: off here)
 bool freecam_active(void) { return false; }
 void freecam_toggle(void) { abort(); }
@@ -161,7 +162,28 @@ static void controls(SDL_Joystick *joy, bool held) {
     pump();
 }
 
+static void test_quicksave_key_bindings(void) {
+    SDL_Scancode keys[QUICKSAVE_B + 1];
+    g_bind_key[BIND_PLUS] = SDL_SCANCODE_TAB;
+    g_bind_key[BIND_R] = SDL_SCANCODE_R;
+    g_bind_key[BIND_LS_UP] = SDL_SCANCODE_W;
+    g_bind_key[BIND_B] = SDL_SCANCODE_LSHIFT;
+    g_bind_key2[BIND_A] = SDL_SCANCODE_RETURN;
+    assert(quicksave_resolve_keys(keys) && keys[QUICKSAVE_A] == SDL_SCANCODE_RETURN);
+    g_bind_key[BIND_A] = SDL_SCANCODE_E;
+    assert(quicksave_resolve_keys(keys) && keys[QUICKSAVE_A] == SDL_SCANCODE_E);
+    g_bind_key2[BIND_X] = SDL_SCANCODE_E;
+    assert(quicksave_resolve_keys(keys) && keys[QUICKSAVE_A] == SDL_SCANCODE_RETURN);
+    g_bind_key2[BIND_A] = SDL_SCANCODE_F5;
+    assert(!quicksave_resolve_keys(keys));
+    g_bind_key2[BIND_A] = BIND_MOUSE + SDL_BUTTON_LEFT;
+    assert(!quicksave_resolve_keys(keys));
+    memset(g_bind_key, 0, sizeof g_bind_key);
+    memset(g_bind_key2, 0, sizeof g_bind_key2);
+}
+
 int main(void) {
+    test_quicksave_key_bindings();
     // Force SDL to deliver background events: the runtime must enforce its own focus policy.
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     assert(SDL_Init(SDL_INIT_GAMEPAD));

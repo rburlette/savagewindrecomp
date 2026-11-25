@@ -474,6 +474,8 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
     return true;
 }
 
+#include "pc_vr_control_commands.inc"  // PC VR's control endpoint commands and the data-watch audit
+
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
     uint64_t po = 0, lo = 0;
     const char *ps = host_sym(pc, &po), *ls = host_sym(lr, &lo);

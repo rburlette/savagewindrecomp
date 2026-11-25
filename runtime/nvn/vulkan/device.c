@@ -3978,6 +3978,9 @@ int ui_run(void) {
         // waited for that until the next restart
         uint64_t t0 = SDL_GetTicks();
         while (SDL_GetTicks() - t0 < 16 && SDL_WaitEventTimeout(&e, 16)) {
+            // Opt-in test key holds must expire/cancel even when the host menu consumes this event.
+            extern void input_min_hold_maintenance(void);
+            input_min_hold_maintenance();
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
                 xr_runtime_shutdown(); // Still outside C/C++ atexit destruction.
@@ -4019,4 +4022,5 @@ void backend_present(const NvnPresent *present) {
     present_locked(present);
     vk_vr_present(present->game_present_id);
     gpu_unlock();
+    pc_vr_frame_trace_present_end(present->game_present_id);
 }

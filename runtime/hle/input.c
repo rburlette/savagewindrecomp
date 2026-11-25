@@ -105,9 +105,13 @@ static _Atomic int64_t sampling;
 static _Atomic bool win_focused = true;  // main thread writes; guest input polls read
 // The controller's own focus test: the window's, or always in PC VR (pc_vr.h). Keyboard and mouse use win_focused.
 static bool pad_focused(void) { return win_focused || pc_vr_controller_without_focus(); }
+#include "pc_vr_input_hold.inc"  // test tooling: the minimum key hold, key diagnostics, the automation's state
 
 // Host keys / buttons held by a test script (SAVAGEWIND_HOST_INPUT, input_frame): they go through the bindings
 static uint8_t test_keys[SDL_SCANCODE_COUNT];
+static uint8_t test_event_keys[SDL_SCANCODE_COUNT];  // synthetic SDL edges, distinct from physical keys
+static uint8_t quicksave_keys[SDL_SCANCODE_COUNT];   // a separate synthetic device, never co-releases player keys
+#define QUICKSAVE_DEVICE 0x7E58u
 static _Atomic uint32_t test_pad;
 static _Atomic int32_t test_lx, test_ly;  // (a resting stick's drift: "lstick" in SAVAGEWIND_HOST_INPUT)
 static _Atomic bool host_test;  // (then a real controller is left out: the player's own pad must not spoil the test)
@@ -115,6 +119,27 @@ static _Atomic int last_device;  // DEVICE_*: what the player used last
 static _Atomic bool tilt_held;  // the tilt binding: the mouse tilts the controller instead of turning the camera
 bool input_tilt_active(void) { return tilt_held; }
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
+
+static bool quicksave_enabled(void) {
+    static _Atomic int on = -1;
+    int value = atomic_load(&on);
+    if (value < 0) {
+        const char *setting = getenv("SAVAGEWIND_QUICKSAVE");
+        value = setting && !strcmp(setting, "1");
+        atomic_store(&on, value);
+    }
+    return value != 0;
+}
+
+// UI-thread cancellation clears only this macro's contribution. Physical held keys are retained.
+static void quicksave_cancel_ui(void) {
+    atomic_store(&quicksave_request, 2);
+    atomic_store(&quicksave_active, false);
+    keyboard_lock();
+    memset(quicksave_keys, 0, sizeof quicksave_keys);
+    recompute_keyboard();
+    keyboard_unlock();
+}
 
 static bool profiler_key_available(void) {
     for (int i = 0; i < BIND_KEY_COUNT; i++)
@@ -127,7 +152,8 @@ static bool pc_gyro_enabled(void) { return g_settings.pc_gyro && pc_gyro_keyboar
 
 static int held_key(int sc) {
     if (sc > BIND_MOUSE && sc <= BIND_MOUSE_LAST) return mouse_down[sc - BIND_MOUSE];
-    return sc > 0 && sc < SDL_SCANCODE_COUNT && (keys_down[sc] || test_keys[sc]);
+    return sc > 0 && sc < SDL_SCANCODE_COUNT &&
+           (keys_down[sc] || test_keys[sc] || test_event_keys[sc] || quicksave_keys[sc]);
 }
 
 static int menu_key(int sc) {
@@ -288,6 +314,8 @@ static void recompute_pad(void) {
                     (fly_host2 >= 0 && fly_host2 < PADB_HOST_COUNT && (host >> fly_host2 & 1));
     if (fly_down && !fly_was_down && control_enabled() && !menu_input_captured() && !bind_capture_active(NULL, NULL, NULL))
         control_fly_toggle();
+    if (fly_down && !fly_was_down) pc_vr_frame_trace_user_mark();  // (PC VR: the same press marks the late-frame trace)
+    if (fly_down && !fly_was_down) pc_vr_eye_shot_request();  // (PC VR: the same press saves the eye images)
     fly_was_down = fly_down;
     if (!pad || host_test) pad_lx = test_lx, pad_ly = test_ly, pad_rx = pad_ry = 0;
     else {
@@ -303,10 +331,20 @@ static void recompute_pad(void) {
 void input_reset(void) {
     consumed_buttons = 0;
     escape_buttons = 0;
+    keyboard_lock();
     pc_bow_wanted = false;
     memset(keys_down, 0, sizeof keys_down);
+    memset(test_event_keys, 0, sizeof test_event_keys);
+    memset(quicksave_keys, 0, sizeof quicksave_keys);
+    if (atomic_load(&quicksave_active)) {
+        atomic_store(&quicksave_active, false);
+        atomic_store(&quicksave_request, 2);
+    }
+    memset(minimum_hold_keys, 0, sizeof minimum_hold_keys);
+    atomic_store(&diagnostic_held_scancode, 0);
     memset(mouse_down, 0, sizeof mouse_down);
     recompute_keyboard();
+    keyboard_unlock();
 }
 
 // ---- mouse camera
@@ -574,6 +612,16 @@ bool input_window_focused(void) {
     return win_focused;
 }
 static void pads_motion_refresh(void);
+
+void input_min_hold_maintenance(void) {
+    static bool was_captured;
+    if (!configured_minimum_hold_ms()) return;
+    bool captured = menu_input_captured();
+    if (captured && !was_captured) input_reset();
+    was_captured = captured;
+    min_hold_expire();
+}
+
 void input_mouse_update(SDL_Window *w) {
     static int motion_source = -1;  // (Controls > Motion source changed: which controller's sensors again)
     if (g_settings.motion_source != motion_source) motion_source = g_settings.motion_source, pads_motion_refresh();
@@ -585,11 +633,18 @@ void input_mouse_update(SDL_Window *w) {
         recompute_keyboard();
     }
     vibration_update(pad, pad_focused() && !host_test);
+    pc_vr_eye_shot_key_poll();  // (PC VR: Right Ctrl saves the eye images, whichever window has the focus)
     static bool cur;
+    input_min_hold_maintenance();
+    if (atomic_load(&quicksave_active) &&
+        SDL_GetTicksNS() >= atomic_load(&quicksave_deadline_ns)) quicksave_cancel_ui();
+    if (atomic_exchange(&pad_handoff_pending, false)) recompute_pad();  // SDL gamepad polling stays on the UI thread
+    bool captured = menu_input_captured();
     pc_cursor_window(w);
     if (w) sheikah_cursor_use(w);  // (the pointer the F1 menu and a free mouse show: Savage Wind's, not the system's)
-    bool want = w && win_focused && g_settings.mouse_camera && !pc_cursor_active() && !menu_input_captured() && !menu_cursor_free() &&
-                !getenv("SAVAGEWIND_INPUT") && !getenv("SAVAGEWIND_HOST_INPUT");
+    bool want = w && win_focused && g_settings.mouse_camera && !pc_cursor_active() && !captured && !menu_cursor_free() &&
+                !getenv("SAVAGEWIND_INPUT") &&
+                (!getenv("SAVAGEWIND_HOST_INPUT") || atomic_load(&host_input_finished));
     // Absolute map input needs its coordinates but already draws the game's own pointer.
     // Visibility changes independently of relative mode: opening the map keeps relative mode off.
     bool hide = want || (w && win_focused && !menu_input_captured() && !menu_cursor_free() && pc_cursor_hide_system());
@@ -602,6 +657,7 @@ void input_mouse_update(SDL_Window *w) {
     SDL_SetWindowRelativeMouseMode(w, want);
     mouse_held = want;
     if (!want) {
+        keyboard_lock();
         memset(mouse_down, 0, sizeof mouse_down);
         // A held side button can be what opened the quick selector. Keep it held until its real release.
         if (pc_cursor_active()) {
@@ -610,6 +666,7 @@ void input_mouse_update(SDL_Window *w) {
             mouse_down[SDL_BUTTON_X2] = (buttons & SDL_BUTTON_X2MASK) != 0;
         }
         recompute_keyboard();
+        keyboard_unlock();
     }
     LOG("[input] mouse %s\n", want ? "held in the window (camera)" : "free");
 }
@@ -630,6 +687,11 @@ static bool test_event(const SDL_Event *e) {
     }
 }
 
+static bool quicksave_event(const SDL_Event *e) {
+    return (e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_KEY_UP) &&
+           e->key.which == QUICKSAVE_DEVICE;
+}
+
 // Scripted test runs ignore the user's own input (a key or stick touched while a test drives the player spoils it):
 // SAVAGEWIND_NO_USER_INPUT=1, on by default whenever SAVAGEWIND_INPUT is set (or SAVAGEWIND_HOST_INPUT /
 // SAVAGEWIND_BIND_TEST; SAVAGEWIND_NO_USER_INPUT=0 lets it through again).
@@ -648,14 +710,17 @@ bool input_user_blocked(const SDL_Event *e) {
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
     if (!on) return false;
+    if (atomic_load(&host_input_finished) && !getenv("SAVAGEWIND_INPUT") && !getenv("SAVAGEWIND_BIND_TEST"))
+        return false;
+    if (test_event(e) || quicksave_event(e)) return false;
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: case SDL_EVENT_TEXT_INPUT: case SDL_EVENT_TEXT_EDITING:
     case SDL_EVENT_MOUSE_MOTION: case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
     case SDL_EVENT_MOUSE_WHEEL:
-    case SDL_EVENT_GAMEPAD_ADDED: case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-    case SDL_EVENT_GAMEPAD_BUTTON_UP: case SDL_EVENT_GAMEPAD_SENSOR_UPDATE: case SDL_EVENT_SENSOR_UPDATE: case SDL_EVENT_JOYSTICK_ADDED:
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP: case SDL_EVENT_GAMEPAD_SENSOR_UPDATE: case SDL_EVENT_SENSOR_UPDATE:
     case SDL_EVENT_JOYSTICK_AXIS_MOTION: case SDL_EVENT_JOYSTICK_BUTTON_DOWN: case SDL_EVENT_JOYSTICK_BUTTON_UP:
-        return true;
+        return true;  // (a controller that connects meanwhile is still opened: once the script ends it is the user's)
     default:
         return false;
     }
@@ -727,6 +792,7 @@ static void pad_open(SDL_JoystickID id) {
 #include "pc_vr_input_keys.inc"  // PC VR's live keys: world scale, panel distances, the grade, the DLAA modes
 
 void input_handle_event(const SDL_Event *e) {
+    input_min_hold_maintenance();
     if (world_scale_event(e) || panel_distance_event(e) || grade_toggle_event(e) || dlaa_mode_event(e)) return;
     if ((e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP) &&
         (e->button.button == SDL_BUTTON_LEFT || e->button.button == SDL_BUTTON_RIGHT)) {
@@ -766,8 +832,27 @@ void input_handle_event(const SDL_Event *e) {
         for (int i = 0; i < n; i++) pad_open(ids[i]);
         SDL_free(ids);
     }
+    if (quicksave_enabled() && !quicksave_event(e) && !test_event(e)) {
+        if ((e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_KEY_UP) &&
+            e->key.scancode == SDL_SCANCODE_F5) {
+            if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {
+                if (atomic_load(&quicksave_active) || atomic_load(&quicksave_request) != 0)
+                    quicksave_cancel_ui();
+                else atomic_store(&quicksave_request, 1);
+            }
+            return;  // F5 is the opt-in host shortcut, not a guest key
+        }
+        bool cancel = e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_KEY_UP ||
+                      e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP ||
+                      e->type == SDL_EVENT_MOUSE_WHEEL || e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+                      e->type == SDL_EVENT_GAMEPAD_BUTTON_UP || e->type == SDL_EVENT_WINDOW_FOCUS_LOST;
+        if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 12000) cancel = true;
+        if (cancel && (atomic_load(&quicksave_active) || atomic_load(&quicksave_request) == 1))
+            quicksave_cancel_ui();
+    }
     switch (e->type) {
-    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
+    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
+        bool effective_down = false;
         {   // Home: the free camera (hle/freecam.c; F7 is fly mode's default); while it is on, keys move it, not Link
             extern bool freecam_active(void);
             extern void freecam_toggle(void), freecam_key(int scancode, bool down);
@@ -805,14 +890,65 @@ void input_handle_event(const SDL_Event *e) {
             ((g_bind_key[BIND_FLY] && e->key.scancode == g_bind_key[BIND_FLY]) ||
              (g_bind_key2[BIND_FLY] && e->key.scancode == g_bind_key2[BIND_FLY])) &&
             control_enabled() && !menu_input_captured()) control_fly_toggle();  // (fly mode, test builds)
-        if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
+        keyboard_lock();
+        if (e->key.scancode < SDL_SCANCODE_COUNT) {
+            int scancode = e->key.scancode;
+            if (quicksave_event(e)) {
+                quicksave_keys[scancode] = e->type == SDL_EVENT_KEY_DOWN && atomic_load(&quicksave_active);
+                effective_down = quicksave_keys[scancode];
+            } else if (test_event(e)) {
+                // A synthetic release must never release a co-held physical key (or vice versa).
+                test_event_keys[scancode] = e->type == SDL_EVENT_KEY_DOWN && !atomic_load(&host_input_finished);
+                effective_down = test_event_keys[scancode];
+            } else {
+                bool candidate = configured_minimum_hold_ms() && scancode > 0 && !min_hold_reserved(e->key.scancode) &&
+                    (key_binding_slots(e->key.scancode) || minimum_hold_keys[scancode].physical ||
+                     minimum_hold_keys[scancode].effective);
+                bool captured = candidate && menu_input_captured();
+                bool eligible = candidate && win_focused && !captured &&
+                    !getenv("SAVAGEWIND_INPUT") &&
+                    (!getenv("SAVAGEWIND_HOST_INPUT") || atomic_load(&host_input_finished)) &&
+                    !getenv("SAVAGEWIND_BIND_TEST");
+                if (eligible) {
+                    InputMinHoldKey *key = &minimum_hold_keys[scancode];
+                    if (e->type == SDL_EVENT_KEY_DOWN)
+                        input_min_hold_down(key, SDL_GetTicksNS(), (uint64_t)configured_minimum_hold_ms() * 1000000,
+                                            e->key.repeat);
+                    else input_min_hold_up(key, SDL_GetTicksNS());
+                    keys_down[scancode] = key->effective;
+                } else if (candidate && (!win_focused || captured)) {
+                    input_min_hold_cancel(&minimum_hold_keys[scancode]);
+                    keys_down[scancode] = 0;
+                } else keys_down[scancode] = e->type == SDL_EVENT_KEY_DOWN;
+                effective_down = keys_down[scancode];
+            }
+        }
         // (not the OS's own shortcuts: Print Screen, or a key with the Windows / Command key held, e.g. Win+Shift+S for a
         // screenshot, must not turn a controller's button prompts into keycaps)
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode != SDL_SCANCODE_PRINTSCREEN &&
             e->key.scancode != SDL_SCANCODE_LGUI && e->key.scancode != SDL_SCANCODE_RGUI &&
             !(e->key.mod & SDL_KMOD_GUI)) last_device = DEVICE_KEYBOARD;
         recompute_keyboard();
+        keyboard_unlock();
+        if (diagnostics_enabled()) {
+            uint64_t slots = key_binding_slots(e->key.scancode);
+            if (slots) {
+                if (e->type == SDL_EVENT_KEY_DOWN) atomic_store(&diagnostic_held_scancode, e->key.scancode);
+                unsigned index = atomic_fetch_add(&diagnostic_events, 1);
+                if (index < 48)
+                    LOG("[input-diag] edge=%s sc=%u repeat=%u slots=%#llx ns=%llu frame=%llu player_samples=%llu buttons=%#llx ly=%d menu=%d\n",
+                        e->type == SDL_EVENT_KEY_DOWN ? "down" : "up", (unsigned)e->key.scancode,
+                        (unsigned)e->key.repeat, (unsigned long long)slots,
+                        (unsigned long long)SDL_GetTicksNS(), (unsigned long long)atomic_load(&diagnostic_frame),
+                        (unsigned long long)atomic_load(&diagnostic_player_samples),
+                        (unsigned long long)atomic_load(&key_buttons), atomic_load(&key_ly), menu_input_captured());
+                if (e->type == SDL_EVENT_KEY_UP && !effective_down &&
+                    atomic_load(&diagnostic_held_scancode) == e->key.scancode)
+                    atomic_store(&diagnostic_held_scancode, 0);
+            }
+        }
         break;
+    }
     case SDL_EVENT_MOUSE_WHEEL:
         if (control_enabled() && !menu_input_captured()) control_fly_wheel(e->wheel.y);  // (fly mode speed, test builds)
         if (tilt_held && !menu_input_captured() && !framepace_menu_ui() && !framepace_title_ui())
@@ -842,8 +978,10 @@ void input_handle_event(const SDL_Event *e) {
             (e->type == SDL_EVENT_MOUSE_BUTTON_UP && mouse_down[e->button.button]) ||
             (pc_cursor_active() && e->button.button != SDL_BUTTON_LEFT && e->button.button != SDL_BUTTON_RIGHT))) {
             if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN) last_device = DEVICE_KEYBOARD;
+            keyboard_lock();
             mouse_down[e->button.button] = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
             recompute_keyboard();
+            keyboard_unlock();
         }
         break;
     case SDL_EVENT_WINDOW_FOCUS_LOST: case SDL_EVENT_WINDOW_FOCUS_GAINED:
@@ -918,18 +1056,25 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 //   "frame:mclick:left|middle|right|x1|x2:frames" does the same with a mouse button (with "mouse:" the mouse counts
 //   as held in the window, as the camera's).
 // "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
+// SAVAGEWIND_HOST_INPUT_UNTIL=<presented frame 1..100000>: end this script before that frame's actions,
+// release its synthetic holds and return keyboard, pad and mouse control to the player.
+// It requires HOST_INPUT without INPUT, BIND_TEST or SCRIPT_CLOCK. Without them behavior is unchanged.
 // SAVAGEWIND_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
 //   "wait" lets it time out); "frame:reset:pad|key" resets to the defaults.
-static void push_key(SDL_Scancode sc, SDL_Keymod mod, bool down) {
+static bool push_key(SDL_Scancode sc, SDL_Keymod mod, bool down) {
     SDL_Event e;
     memset(&e, 0, sizeof e);
     e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
     e.key.which = TEST_DEVICE, e.key.scancode = sc, e.key.mod = mod, e.key.down = down;
     e.key.key = SDL_GetKeyFromScancode(sc, mod, false);
-    SDL_PushEvent(&e);
+    return SDL_PushEvent(&e);
 }
+
+#include "pc_vr_quicksave.inc"  // the quicksave macro (SAVAGEWIND_QUICKSAVE)
 char g_window_shot_request[256];  // the presenter saves the next frame (game + menus) here, then clears it
+static uint16_t held_sdl_keys[SDL_SCANCODE_COUNT];  // test_push events successfully queued, render thread only
+static uint16_t held_sdl_pad[SDL_GAMEPAD_BUTTON_COUNT];
 static void test_push(uint64_t frame, unsigned long start, unsigned long len, const char *dev, const char *arg) {
     SDL_Event e;
     memset(&e, 0, sizeof e);
@@ -938,7 +1083,15 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
         return;
     }
     if (!strcmp(dev, "sdlkey")) {
-        if (frame == start || frame == start + len) push_key(SDL_GetScancodeFromName(arg), SDL_KMOD_NONE, frame == start);
+        SDL_Scancode sc = SDL_GetScancodeFromName(arg);
+        if (frame == start || frame == start + len) {
+            bool down = frame == start;
+            if (push_key(sc, SDL_KMOD_NONE, down) && sc > 0 && sc < SDL_SCANCODE_COUNT &&
+                atomic_load(&host_input_controlled)) {
+                if (down && held_sdl_keys[sc] < UINT16_MAX) held_sdl_keys[sc]++;
+                if (!down && held_sdl_keys[sc]) held_sdl_keys[sc]--;
+            }
+        }
         return;
     }
     if (!strcmp(dev, "mclick")) {  // left / middle / right / x1 / x2
@@ -956,7 +1109,10 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
         if (b < 0 || b >= SDL_GAMEPAD_BUTTON_COUNT || (frame != start && frame != start + len)) return;
         e.type = frame == start ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
         e.gbutton.which = TEST_DEVICE, e.gbutton.button = (Uint8)b, e.gbutton.down = frame == start;
-        SDL_PushEvent(&e);
+        if (SDL_PushEvent(&e) && atomic_load(&host_input_controlled)) {
+            if (frame == start && held_sdl_pad[b] < UINT16_MAX) held_sdl_pad[b]++;
+            if (frame != start && held_sdl_pad[b]) held_sdl_pad[b]--;
+        }
         return;
     }
     if (frame != start) return;
@@ -985,15 +1141,68 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
     }
 }
 
+static bool keep_non_test_event(void *userdata, SDL_Event *e) {
+    (void)userdata;
+    return !test_event(e);
+}
+
+static void host_input_stop(bool send_releases) {
+    if (atomic_exchange(&host_input_finished, true)) return;
+    if (send_releases) {
+        for (int scancode = 1; scancode < SDL_SCANCODE_COUNT; scancode++)
+            for (uint16_t count = held_sdl_keys[scancode]; count; count--)
+                if (!push_key((SDL_Scancode)scancode, SDL_KMOD_NONE, false))
+                    LOG("[startup] synthetic key release queue failed\n");
+        for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; button++)
+            for (uint16_t count = held_sdl_pad[button]; count; count--) {
+                SDL_Event e = {0};
+                e.type = SDL_EVENT_GAMEPAD_BUTTON_UP;
+                e.gbutton.which = TEST_DEVICE, e.gbutton.button = (Uint8)button, e.gbutton.down = false;
+                if (!SDL_PushEvent(&e)) LOG("[startup] synthetic pad release queue failed\n");
+            }
+    } else SDL_FilterEvents(keep_non_test_event, NULL);  // reboot: discard queued script edges, retain physical events
+    memset(held_sdl_keys, 0, sizeof held_sdl_keys);
+    memset(held_sdl_pad, 0, sizeof held_sdl_pad);
+    atomic_store(&host_test, false);
+    keyboard_lock();
+    memset(test_keys, 0, sizeof test_keys);
+    memset(test_event_keys, 0, sizeof test_event_keys);
+    recompute_keyboard();
+    keyboard_unlock();
+    atomic_store(&test_pad, 0);
+    atomic_store(&test_lx, 0);
+    atomic_store(&test_ly, 0);
+    pad_buttons = 0;
+    pad_lx = pad_ly = pad_rx = pad_ry = 0;
+    atomic_store(&pad_handoff_pending, true);  // next UI loop samples the real controller again
+}
+
 static void host_test_frame(uint64_t frame) {
     static const char *hspec, *bspec;
+    static uint64_t until_frame;
     static int init;
     if (!init) {
         init = 1;
-        hspec = getenv("SAVAGEWIND_HOST_INPUT");
-        bspec = getenv("SAVAGEWIND_BIND_TEST");
-        host_test = hspec;
+        hspec = getenv("SAVAGEWIND_HOST_INPUT"), bspec = getenv("SAVAGEWIND_BIND_TEST");
+        const char *until = getenv("SAVAGEWIND_HOST_INPUT_UNTIL");
+        if (until) {
+            atomic_store(&host_input_controlled, true);
+            if (!host_input_control_compatible(hspec, getenv("SAVAGEWIND_INPUT"), bspec,
+                                               getenv("SAVAGEWIND_SCRIPT_CLOCK")) ||
+                !host_input_parse_until(until, &until_frame)) {
+                LOG("[startup] invalid or conflicting host input control; host script disabled\n");
+                atomic_store(&host_input_finished, true);
+                hspec = NULL;
+            }
+        }
+        atomic_store(&host_test, hspec != NULL);
         test_mouse = hspec && strstr(hspec, ":mouse:");
+    }
+    if (atomic_load(&host_input_finished)) return;
+    if (until_frame && frame >= until_frame) {
+        host_input_stop(true);
+        LOG("[startup] host input ended at frame %llu; player input restored\n", (unsigned long long)frame);
+        return;
     }
     char buf[2048];
     static uint64_t mouse_done;  // ("mouse:" moved it for the frames up to this one)
@@ -1027,10 +1236,12 @@ static void host_test_frame(uint64_t frame) {
             else { int h = bind_pad_from_name(name); if (h >= 0) padm |= 1u << h; }
         }
         bool kch = memcmp(keys, test_keys, sizeof keys) != 0, pch = padm != test_pad || sx != test_lx || sy != test_ly;
+        keyboard_lock();
         memcpy(test_keys, keys, sizeof keys);
         test_pad = padm;
         test_lx = sx, test_ly = sy;
         if (kch) recompute_keyboard();
+        keyboard_unlock();
         if (pch) recompute_pad();
         if (frame > mouse_done) mouse_done = frame;
     }
@@ -1074,7 +1285,13 @@ static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B skip a skippable movie)
 RT_ON_RESET(input_reboot_reset) {
     consumed_buttons = 0;
-    g_pad_obj = 0; g_inject_plus = 0;
+    g_pad_obj = 0;
+    g_inject_plus = 0;
+    if (atomic_load(&host_input_controlled) && !atomic_load(&host_input_finished))
+        host_input_stop(false);  // the reboot drains SDL events; do not replay a half-finished startup script
+    if (atomic_load(&quicksave_active)) quicksave_stop("reboot cancelled shortcut");
+    atomic_store(&quicksave_request, 0);
+    if (configured_minimum_hold_ms()) input_reset();
 }  // (reboot: the controller object was guest memory)
 
 // Gameplay > Start at Continue: past the start screen by itself, into the latest save. A is pressed now and then while
@@ -1103,6 +1320,10 @@ static uint64_t auto_continue_buttons(uint64_t player) {
 void input_frame(uint64_t frame) {
     extern uint64_t renderer_present_count(void);
     control_input_frame(renderer_present_count());
+    if (diagnostics_enabled()) {
+        extern uint64_t renderer_present_count(void);
+        atomic_store(&diagnostic_frame, renderer_present_count());
+    }
     if (g_pad_obj && getenv("SAVAGEWIND_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", (unsigned long long)(g_pad_obj - 0x98),
@@ -1119,6 +1340,7 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    quicksave_frame();
     const char *spec = getenv("SAVAGEWIND_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
@@ -1241,6 +1463,7 @@ static void fill_state(Cpu *c) {
     static int nlog;
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, (unsigned long long)c->x[30]); }
     if (id != 0) return;  // docked: only player 1 (FullKey); Handheld stays disconnected
+    if (diagnostics_enabled()) atomic_fetch_add(&diagnostic_player_samples, 1);
     extern uint64_t g_watch_lo, g_watch_hi;
     if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
     if (id == 0 && !g_watch_lo && getenv("SAVAGEWIND_WATCH_PAD")) {
@@ -1324,6 +1547,28 @@ static void fill_state(Cpu *c) {
     *(int32_t *)(s + 24) = rx;
     *(int32_t *)(s + 28) = ry;
     *(uint32_t *)(s + 32) = 1;  // IsConnected
+    // Diagnose the reported movement during PC VR without changing any input.
+    // One actual Npad output per second, 120 records. No guest payload.
+    if (pc_vr_enabled() && diagnostics_enabled()) {
+        static _Atomic uint64_t next_state_ns;
+        static _Atomic unsigned state_logs;
+        const unsigned limit = 120;
+        uint64_t now = SDL_GetTicksNS(), due = atomic_load(&next_state_ns);
+        if (now >= due && atomic_compare_exchange_strong(&next_state_ns, &due, now + 1000000000ull) &&
+            atomic_fetch_add(&state_logs, 1) < limit)
+            LOG("[input-diag] pc-vr ns=%llu output_l=%d/%d output_r=%d/%d key_l=%d/%d pad_l=%d/%d mouse_r=%d/%d buttons=%#llx menu=%d scripted=%d\n",
+                (unsigned long long)now, lx, ly, rx, ry, (int)key_lx, (int)key_ly,
+                (int)pad_lx, (int)pad_ly, mx, my, (unsigned long long)b, menu,
+                getenv("SAVAGEWIND_INPUT") != NULL || getenv("SAVAGEWIND_HOST_INPUT") != NULL);
+    }
+    if (diagnostics_enabled() && atomic_load(&diagnostic_held_scancode)) {
+        unsigned index = atomic_fetch_add(&diagnostic_samples, 1);
+        if (index < 64)
+            LOG("[input-diag] sample sc=%d ns=%llu frame=%llu player_samples=%llu buttons=%#llx ly=%d menu=%d\n",
+                atomic_load(&diagnostic_held_scancode), (unsigned long long)SDL_GetTicksNS(),
+                (unsigned long long)atomic_load(&diagnostic_frame),
+                (unsigned long long)atomic_load(&diagnostic_player_samples), (unsigned long long)b, ly, menu);
+    }
 }
 
 HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", hid_state_fullkey) { fill_state(c); }

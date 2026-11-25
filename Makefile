@@ -296,6 +296,13 @@ endif
 RTFLAGS += -DSAVAGEWIND_WITH_OPENXR=1 $(OPENXR_CFLAGS)
 LDFLAGS += $(OPENXR_LIBS)
 endif
+# PROFILE_PDB=1 (Windows): CodeView debug information and a PDB beside the executable, for profilers that read PDB
+# rather than DWARF (Nsight Systems, Windows Performance Analyzer). Its own build folder (B=...): the objects differ.
+ifeq ($(PROFILE_PDB),1)
+RTFLAGS += -gcodeview
+CXXFLAGS += -gcodeview
+LDFLAGS += -Wl,--pdb=$(B)/savagewind.pdb
+endif
 
 all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (GEN_SRC is a space when there is no generated/)
 
@@ -325,6 +332,8 @@ $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntim
 
 # The profiler's Windows sampler guards its stack walks with SEH (__try).
 $(B)/rt/prof_sampler.o: RTFLAGS += -fms-extensions
+# PC VR: the stall sampler guards its stack walks the same way.
+$(B)/rt/pc_vr_stall_sampler.o: RTFLAGS += -fms-extensions
 # Windows guarded memory scans use SEH.
 $(B)/rt/memscan_os.o: RTFLAGS += -fms-extensions
 
