@@ -27,6 +27,7 @@ bool fsr4_available(void) { return false; }
 bool vk_dlss_available(void) { return false; }
 bool vk_dlssg_available(void) { return false; }  // (output_scale.c: upstream's DLSS frame generation)
 int vk_dlssg_max_mult(void) { return 2; }
+bool vk_hdr_output(void) { return false; }  // (output_scale.c: upstream's frame generation with HDR)
 bool xess_available(void) { return false; }
 bool xess_usable(void) { return false; }
 float winsize_refresh_rate(void) { return 0; }
