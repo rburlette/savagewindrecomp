@@ -53,7 +53,6 @@ extern "C" {
 #define PC_VR_DLSS_EYE_SCALE_MAX 5.0
 #define PC_VR_SHOT_PRESENTS 8
 
-typedef enum { PC_VR_RUNE_AIM_OFF, PC_VR_RUNE_AIM_ON, PC_VR_RUNE_AIM_FLIP } PcVrRuneAim;
 // vr_antialiasing: off (the eye images as the game makes them, its FXAA), or NVIDIA's DLAA or DLSS on each eye as the
 // mode a run starts in (runtime/nvn/vulkan/vr_dlaa.h; the '9' key cycles none, DLAA and DLSS)
 typedef enum {
@@ -103,14 +102,12 @@ typedef struct {
                                   // is given)
     } settings;
     // Not settings of their own: the head pose reaches the game every display frame with the pace (or, without it, by
-    // SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING=1), and pace 2 with it targets alternate refreshes (D128) unless
-    // SAVAGEWIND_PC_VR_TARGET_REFRESH=0.
+    // SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING=1), and pace 2 with it targets alternate refreshes (D128).
     bool display_rate_tracking;
     bool target_refresh;
     // The diagnostics, launch options SAVAGEWIND_PC_VR_<name>, all off by default.
     struct {
         bool perf;                // PERF, any value: the XR owner's timing windows
-        bool offer_trace;         // OFFER_TRACE=1
         uint64_t shot_presents[PC_VR_SHOT_PRESENTS];  // SHOT=<present>[,...]
         unsigned shot_count;
         bool quick_menu_shots;    // QUICK_MENU_SHOTS=1
@@ -118,19 +115,6 @@ typedef struct {
         uint64_t bench_head_start;  // its game present, 1..100000; 0: off, or not a present in that range
         bool log_panes;           // SAVAGEWIND_LOG_PANES: a number above 0
         bool log_screens;         // SAVAGEWIND_LOG_SCREENS: a number above 0
-        bool no_headset_mask;     // NO_HEADSET_MASK=1: Labo's mask draws cover the whole image, the depth mask nothing
-                                  // (D114 A/B runs)
-        unsigned copy_wait_ms;    // COPY_WAIT_MS=1..100: the XR owner's first wait for its copy of an eye pair, in
-                                  // milliseconds (100: as before the bound); 0: its own 3 ms
-        int eye_images_flip;      // EYE_IMAGES_FLIP=0 or 1: the eye images' row order; -1: the window present's
-        unsigned eye_width, eye_height;  // EYE_SIZE=WxH: the exact eye render and submission size; 0: none
-        bool eye_size_malformed;  // EYE_SIZE given but not as pc_vr_parse_eye_size takes it: startup stops
-        bool ui_parallax;         // UI_PARALLAX=1: the game's own UI screen parallax kept
-        bool hud_backdrop;        // HUD_BACKDROP=1: the HUD's backdrops drawn as the game draws them
-        bool world_hud;           // WORLD_HUD: the world-tied HUD, on unless exactly 0
-        bool world_hud_upright;   // WORLD_HUD_ROLL=0: markers upright in the image, not turned with the world's up
-        double world_hud_test_turn;  // WORLD_HUD_ROLL=<degrees>: that much more clockwise, here in radians; 0: none
-        PcVrRuneAim rune_aim;     // RUNE_AIM: 0 off, flip, otherwise on
     } diagnostics;
     unsigned settings_ignored;  // a bit per setting whose value was not taken
 } PcVrConfig;

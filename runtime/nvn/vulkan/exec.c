@@ -8174,7 +8174,7 @@ static __attribute__((noinline)) VkDescriptorSet stage_set_reuse_on(Prog *p, VkD
     atomic_fetch_add_explicit(&stage_reuse_calls, 1, memory_order_relaxed);
     if (!opts || off || stage != 1 || set != 1 || !p->reuse_stage[1] || si->uses_gmem || si->writes_gmem ||
         si->ntex < 0 || si->ntex > 64 || !pre_ii || !rscale_row0 || !tint || !st.program ||
-        drw.sdw_fix.s > 1 || drw.up_fix.sx > 0 || drw.fxaa_off || vr_draw_rune_aim != PC_VR_RUNE_AIM_OFF)
+        drw.sdw_fix.s > 1 || drw.up_fix.sx > 0 || drw.fxaa_off || vr_draw_rune_test)
         // Rune aim supplies a fragment constant from this eye's pose, which the material key doesn't track.
         return stage_set(p, layout, set, stage, si, rscale_row0, tint, gx, gy, gz, pre_ii, dyn, ndyn);
     atomic_fetch_add_explicit(&stage_reuse_eligible, 1, memory_order_relaxed);
@@ -9183,7 +9183,7 @@ static void draw(CmdRec *r, bool indexed) {
     vr_draw_screen = nvn_screen_tag(r);  // (D088: the UI screen that recorded it, and its pane's marker)
     vr_draw_role = (PcVrPaneRole)nvn_pane_role(r);
     vr_draw_certificate = nvn_render_certificate(r);
-    vr_draw_rune_aim = (nvn_layer_draw(r) & PC_VR_LAYER_DRAW_RUNE_TEST) ? pc_vr_config()->diagnostics.rune_aim : PC_VR_RUNE_AIM_OFF;
+    vr_draw_rune_test = (nvn_layer_draw(r) & PC_VR_LAYER_DRAW_RUNE_TEST) != 0;
     vr_draw_marker = nvn_marker_tag(r);
     vr_draw_pane = 0;
     if (vr_draw_marker & PC_VR_PANE_LOG_TAG) {  // [pc-vr-audit] SAVAGEWIND_LOG_PANES: the pane's number, no marker
@@ -11739,7 +11739,7 @@ static void scene_post(Prog *pr, CmdRec *r) {
             // one depth target, and the other eye's scene comes after this placement)
             PcVrRenderCertificate certificate;
             const bool eye_known = vr_draw_certificate &&
-                pc_vr_render_trace_resolve(vr_draw_certificate, &certificate) && certificate.native_index < 2;
+                pc_vr_render_trace_resolve(vr_draw_certificate, &certificate);
             TexBackend *depth = eye_known && vr_scene_depth.last_eye == (int)certificate.native_index ?
                 (TexBackend *)vr_scene_depth.depth[certificate.native_index] : NULL;
             TexBackend *o = eye_known ? vr_dlaa_eye(cb, in, depth, &certificate, ow, oh) : NULL;

@@ -88,7 +88,8 @@ static inline bool pc_vr_native_view_matrix_matches(const PcVrHeadLookCamera *ca
 // Controller orbit/movement remains authoritative. Optical per-eye rotations
 // are retained even when canted. Original look radius and up length are kept.
 //
-// Freshness and root-traversal identity belong to the caller. This helper
+// Freshness, root-traversal identity and the snapshot's flags (that it has
+// native views: head look's frame pose, D116) belong to the caller. This helper
 // requires the reference to be the snapshot's own calibration but does not
 // read a clock or establish render/resource/culling provenance. Failure
 // leaves out intact.
@@ -99,11 +100,7 @@ static inline bool pc_vr_native_view_build_pair(const PcVrHeadLookCamera *center
         !(game_units_per_meter > 0) || !reference->generation || !snapshot->generation ||
         reference->generation != snapshot->calibration.epoch ||
         memcmp(reference->orientation_xyzw, snapshot->calibration.heading_xyzw, sizeof reference->orientation_xyzw) ||
-        memcmp(reference->origin_xyz, snapshot->calibration.origin_xyz, sizeof reference->origin_xyz) ||
-        !snapshot->frame_id ||
-        !snapshot->published_monotonic_ns || !snapshot->active ||
-        !snapshot->orientation_valid || !snapshot->orientation_tracked ||
-        !snapshot->views_valid || !snapshot->native_views_valid) return false;
+        memcmp(reference->origin_xyz, snapshot->calibration.origin_xyz, sizeof reference->origin_xyz)) return false;
     double right[3], up[3], back[3];
     if (!pc_vr_head_look_basis(center, right, up, back)) return false;
     double original_forward[3], original_up[3];

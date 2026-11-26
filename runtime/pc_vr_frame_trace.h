@@ -1,8 +1,7 @@
 // PC VR experiment (headset pace): where a late game frame's time went. The XR owner knows which images came late: one
 // that follows an image shown for three display frames or more missed its own display frame. This keeps each game
 // frame's stage times, by its present, and writes the late frame's and the three before it when the XR owner names
-// one. With the timing windows only (SAVAGEWIND_PC_VR_PERF). The frames of the bursts are xr/xr_burst_trace.h's; these
-// are the scattered single late frames.
+// one. With the timing windows only (SAVAGEWIND_PC_VR_PERF).
 //
 // A frame's stages, on two threads. The game's: the frame starts (the pace's grid point, or at once when late), its
 // update begins, it waits on a sync (the GPU's work of the frame before), hands its last command list and then its
@@ -116,11 +115,6 @@ void pc_vr_frame_trace_present_end(uint64_t present_id);
 void pc_vr_frame_trace_late(uint64_t present_id, unsigned shown, unsigned unfinished, bool copy_carried, uint64_t spare_ns);
 // The thread that runs the game's update, as it begins one (hle/framepace.c rt_vfr_update): the stall sampler's.
 void pc_vr_frame_trace_update(void);
-// The user's mark, "I saw a hitch just now": a press of the controller's Capture / Share / Mute button (hle/input.c;
-// the game never uses it, and upstream gives it to fly mode in control-endpoint runs only). Written with the present
-// it came after, so that what was seen can be laid beside the trace; a person's press comes about half a second after
-// what they saw.
-void pc_vr_frame_trace_user_mark(void);
 
 // ---- The stall sampler (runtime/pc_vr_stall_sampler.c, Windows only): while a frame stalls (no stage of it moving,
 // outside a sync wait), what the thread of the game's update and the presenting thread are in, read every couple of

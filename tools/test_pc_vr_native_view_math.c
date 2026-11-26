@@ -227,14 +227,8 @@ static void test_rejection(void) {
     REJECT(++bad_snapshot.calibration.epoch);
     REJECT(bad_snapshot.calibration.heading_xyzw[1] = 0.01f);
     REJECT(bad_reference.origin_xyz[1] += 0.01f);
-    REJECT(bad_snapshot.frame_id = 0);
-    REJECT(bad_snapshot.published_monotonic_ns = 0);
-    REJECT(bad_snapshot.active = false);
-    REJECT(bad_snapshot.orientation_valid = false);
-    REJECT(bad_snapshot.orientation_tracked = false);
-    REJECT(bad_snapshot.views_valid = false);
-    REJECT(bad_snapshot.native_views_valid = false);
-    // (D116: OpenXR's orientations, FOVs, eye positions and eye order are used as given, not checked)
+    // (D116: OpenXR's orientations, FOVs, eye positions and eye order are used as given, not checked; its flags are
+    // head look's to check)
     REJECT(bad_center.target[2] = 0);
     REJECT(bad_center.up[1] = 0; bad_center.up[2] = 1);
     REJECT(bad_center.position[0] = INFINITY);

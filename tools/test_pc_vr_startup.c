@@ -74,7 +74,6 @@ void pc_vr_motion_contract_timestamp_reset(void) { ++timestamp_reset_count; }
 bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) { *width = *height = 0; return false; }
 bool control_place_line(char *line, size_t size) { (void)line; (void)size; abort(); }
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) { (void)out; abort(); }
-void pc_vr_frame_trace_user_mark(void) { abort(); }
 uint64_t plat_now_ns(void) { return now_ns; }
 void guest_call(Cpu *c, uint64_t address) {
     assert(call_count < sizeof calls / sizeof calls[0]);

@@ -54,10 +54,6 @@ bool vr_dlaa_enabled(void);
 // run here.
 void vr_dlaa_next_mode(void);
 
-// (probe) The control endpoint's `dlaa <mode>` (any thread): that mode (VrDlaaMode) from the next present, as the key
-// would reach it. false: the switch is off, DLSS does not run here, or no such mode.
-bool vr_dlaa_request_mode(int mode);
-
 // At each present (exec.c vk_vr_present): the first decides the mode to start in, later ones apply a requested mode.
 void vr_dlaa_present(void);
 

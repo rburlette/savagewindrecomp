@@ -105,7 +105,7 @@ typedef struct {
 //  - frame_draws: markers placed since the last present; reset at each game present (exec.c vk_vr_present) and at a
 //    game reset (vk_exec_reset); the "shot frame" log line of an eye capture reads it (exec.c vr_capture_eyes).
 //  - draws, exact (linked by pane), unmatched (no report and no fresh aim), behind (behind the UI camera or the eye):
-//    for the process, never reset; what the placements did, counted (the fixture compares them with the code before).
+//    for the process, never reset; what the placements did, counted (the fixture reads them).
 typedef struct {
     bool active;
     VrHudMove move;
@@ -461,14 +461,14 @@ static inline void vr_hud_project_card(const VrHudMarkerView *seen, const float 
 // crosshair's pieces, one shape, are all sized about its centre. Its size, as an object's, falls with its distance:
 // the panel's at Link's distance (focus, metres; 1 when not positive), within VR_WORLD_HUD_SIZE_MIN (the reticle:
 // VR_AIM_SIZE_MIN) to VR_WORLD_HUD_SIZE_MAX of that, so a far marker stays readable. Project a card through the eye
-// camera. The diagnostic overrides retain the old flat placement: keep_image_up leaves it upright and test_turn
-// adds a clockwise image turn to the direction of gravity. Writes the move, and placed for the log.
+// camera (a marker at the eyes' midpoint, where no card can be projected, is placed flat, turned with the world's
+// up). Writes the move, and placed for the log.
 static inline void vr_hud_marker_move(const VrHudMarkerView *seen, const PcVrHudPoint *marker, const float *viewport,
-                                      double labo_offset, double tan_per_pixel, double focus, bool keep_image_up,
-                                      double test_turn, VrHudMove *move, VrHudMarkerPlacement *placed) {
+                                      double labo_offset, double tan_per_pixel, double focus, VrHudMove *move,
+                                      VrHudMarkerPlacement *placed) {
     const double left = seen->fov_tangents[0], right = seen->fov_tangents[1];
     const double up = seen->fov_tangents[2], down = seen->fov_tangents[3];
-    const double *from_eye = seen->from_eye, *view = seen->view, *image = seen->image;
+    const double *view = seen->view, *image = seen->image;
     const double point_x = viewport[0] + (marker->layout[0] / 640.0 + labo_offset + 1) * 0.5 * viewport[2];
     const double point_y = viewport[1] + (1 - marker->layout[1] / 360.0) * 0.5 * viewport[3];
     const double scale_x = tan_per_pixel * viewport[2] / (right - left);
@@ -477,36 +477,28 @@ static inline void vr_hud_marker_move(const VrHudMarkerView *seen, const PcVrHud
     placed->anchor[1] = point_y;
     placed->eye_at[0] = viewport[0] + image[0] * viewport[2];
     placed->eye_at[1] = viewport[1] + image[1] * viewport[3];
-    const bool project_card = !keep_image_up && test_turn == 0;
-    const double *sizing_point = project_card ? seen->from_midpoint : from_eye;
-    const double away = sqrt(sizing_point[0] * sizing_point[0] + sizing_point[1] * sizing_point[1] +
-                             sizing_point[2] * sizing_point[2]);
+    const double *from_midpoint = seen->from_midpoint;
+    const double away = sqrt(from_midpoint[0] * from_midpoint[0] + from_midpoint[1] * from_midpoint[1] +
+                             from_midpoint[2] * from_midpoint[2]);
     const double least = marker->frame ? VR_WORLD_HUD_SIZE_MIN : VR_AIM_SIZE_MIN;  // (frame 0: crosshair)
     const double grow = fmin(VR_WORLD_HUD_SIZE_MAX, fmax(least, (focus > 0 ? focus : 1) / away));
-    if (project_card && away > 1e-9) {
+    if (away > 1e-9) {
         vr_hud_project_card(seen, viewport, labo_offset, away, tan_per_pixel * grow * away, move, placed);
         return;
     }
     double *image_up = placed->image_up;
     image_up[0] = 0;
     image_up[1] = -1;
-    if (!keep_image_up) {
-        const double local_up[3] = {0, 1, 0};
-        double view_up[3];
-        vr_rotate(seen->to_eye, local_up, view_up);
-        const double tan_step_x = (-view_up[0] * view[2] + view[0] * view_up[2]) / (view[2] * view[2]);
-        const double tan_step_y = (-view_up[1] * view[2] + view[1] * view_up[2]) / (view[2] * view[2]);
-        const double step_x = tan_step_x * viewport[2] / (right - left), step_y = -tan_step_y * viewport[3] / (up - down);
-        const double length = sqrt(step_x * step_x + step_y * step_y);
-        if (length > 1e-9) {
-            image_up[0] = step_x / length;
-            image_up[1] = step_y / length;
-        }
-        if (test_turn != 0) {  // (clockwise in the image, whose y runs down)
-            const double turned_x = image_up[0] * cos(test_turn) - image_up[1] * sin(test_turn);
-            image_up[1] = image_up[0] * sin(test_turn) + image_up[1] * cos(test_turn);
-            image_up[0] = turned_x;
-        }
+    const double local_up[3] = {0, 1, 0};
+    double view_up[3];
+    vr_rotate(seen->to_eye, local_up, view_up);
+    const double tan_step_x = (-view_up[0] * view[2] + view[0] * view_up[2]) / (view[2] * view[2]);
+    const double tan_step_y = (-view_up[1] * view[2] + view[1] * view_up[2]) / (view[2] * view[2]);
+    const double step_x = tan_step_x * viewport[2] / (right - left), step_y = -tan_step_y * viewport[3] / (up - down);
+    const double length = sqrt(step_x * step_x + step_y * step_y);
+    if (length > 1e-9) {
+        image_up[0] = step_x / length;
+        image_up[1] = step_y / length;
     }
     // The whole marker scales and turns about its point, which lands where the eye sees it.
     placed->scale[0] = grow * scale_x;

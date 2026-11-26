@@ -138,18 +138,19 @@ static inline bool pc_vr_projection_from_fov(const float fov[4],
 }
 
 typedef struct {
-    bool right_matches, parallel_eye, lateral_eye;
+    bool right_matches, lateral_eye;
     int offset_sign;
 } PcVrProjectionEyeBasis;
 
 // Checks the stored base-view right row against the accepted camera's RH
-// basis and the original eye copy before head rotation. No IPD/unit assumption.
+// basis, and where the eye copy sits from the base camera (that it is a copy
+// of it, head look's freshly_copied_eye says). No IPD/unit assumption.
 static inline bool pc_vr_projection_eye_basis(const PcVrHeadLookCamera *base,
     const PcVrHeadLookCamera *eye, const float stored_right[3], PcVrProjectionEyeBasis *out) {
     if (!base || !eye || !stored_right || !out) return false;
     double right[3], up[3], back[3];
     if (!pc_vr_head_look_basis(base, right, up, back)) return false;
-    PcVrProjectionEyeBasis result = {.right_matches = true, .parallel_eye = true};
+    PcVrProjectionEyeBasis result = {.right_matches = true};
     double offset[3], offset_length2 = 0, along = 0, world_scale = 1;
     for (unsigned i = 0; i < 3; ++i) {
         if (!isfinite(stored_right[i]) || !isfinite(eye->position[i]) ||
@@ -158,13 +159,8 @@ static inline bool pc_vr_projection_eye_basis(const PcVrHeadLookCamera *base,
         offset[i] = (double)eye->position[i] - base->position[i];
         along += offset[i] * right[i];
         offset_length2 += offset[i] * offset[i];
-        const double source = (double)base->target[i] - base->position[i];
-        const double copied = (double)eye->target[i] - eye->position[i];
-        const double component_scale = fmax(fmax(fabs(base->position[i]), fabs(base->target[i])),
-            fmax(fabs(eye->position[i]), fabs(eye->target[i])));
-        world_scale = fmax(world_scale, component_scale);
-        const double tolerance = 0.0001 * fmax(1.0, fabs(source)) + 4.0 * FLT_EPSILON * component_scale;
-        result.parallel_eye &= fabs(source - copied) <= tolerance && fabs(base->up[i] - eye->up[i]) <= 0.0001;
+        world_scale = fmax(world_scale, fmax(fmax(fabs(base->position[i]), fabs(base->target[i])),
+                                             fmax(fabs(eye->position[i]), fabs(eye->target[i]))));
     }
     double transverse2 = 0;
     for (unsigned i = 0; i < 3; ++i) {
@@ -176,31 +172,6 @@ static inline bool pc_vr_projection_eye_basis(const PcVrHeadLookCamera *base,
     result.offset_sign = along > 0.00001 ? 1 : along < -0.00001 ? -1 : 0;
     *out = result;
     return true;
-}
-
-// PRIMARY_STEREO specifies native index 0=left, 1=right. Verify that their
-// separation points along the located central orientation's +X axis. The
-// snapshot has no central position; do not invent one or infer meter scale.
-static inline bool pc_vr_projection_native_order(const float central_q[4],
-    const float left[3], const float right[3]) {
-    if (!central_q || !left || !right) return false;
-    double rotation[4], length_squared = 0, delta[3], length2 = 0;
-    for (unsigned i = 0; i < 4; ++i) {
-        if (!isfinite(central_q[i])) return false;
-        rotation[i] = central_q[i]; length_squared += rotation[i] * rotation[i];
-    }
-    if (!(length_squared > 0.99 && length_squared < 1.01)) return false;
-    for (unsigned i = 0; i < 4; ++i) rotation[i] /= sqrt(length_squared);
-    for (unsigned i = 0; i < 3; ++i) {
-        if (!isfinite(left[i]) || !isfinite(right[i])) return false;
-        delta[i] = (double)right[i] - left[i]; length2 += delta[i] * delta[i];
-    }
-    if (!(length2 > 1e-18)) return false;
-    const double local_right[3] = {1, 0, 0};
-    double located_right[3];
-    pc_vr_head_look_rotate(rotation, local_right, located_right);
-    const double along = pc_vr_head_look_dot(delta, located_right);
-    return along > 0 && along / sqrt(length2) >= 0.99;
 }
 
 #endif

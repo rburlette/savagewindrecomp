@@ -63,12 +63,6 @@ void pc_vr_frame_trace_update(void) {
     pc_vr_stall_sampler_moved();
 }
 
-void pc_vr_frame_trace_user_mark(void) {
-    if (!pc_vr_frame_trace_on()) return;
-    static unsigned marks;  // (the input thread alone; the present's number is read as it stands)
-    LOG("[pc-vr] user mark %u: after present %llu\n", ++marks, (unsigned long long)previous_present_id);
-}
-
 void pc_vr_frame_trace_sync(bool ended) {
     if (!pc_vr_frame_trace_on()) return;
     const uint64_t now_ns = plat_now_ns();

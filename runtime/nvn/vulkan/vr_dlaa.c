@@ -78,12 +78,6 @@ void vr_dlaa_next_mode(void) {
     atomic_store(&vr_dlaa_requested, ((requested >= 0 ? requested : shown) + 1) % VR_DLAA_MODES);
 }
 
-bool vr_dlaa_request_mode(int mode) {
-    if (!atomic_load(&vr_dlaa_switchable) || mode < 0 || mode >= VR_DLAA_MODES) return false;
-    atomic_store(&vr_dlaa_requested, mode);
-    return true;
-}
-
 // (textures.c) The eye targets' scale again from the eye size and the render ratio now.
 void vk_eye_scale_refresh(void);
 void vr_dlaa_present(void) {

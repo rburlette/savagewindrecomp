@@ -1,7 +1,6 @@
 // PC VR's configuration: the parse of its settings and diagnostics, and the process's one read of them. Interface and
 // the settings themselves: runtime/pc_vr_config.h; their lines in savagewind.ini: runtime/pc_vr_settings.inc.
 #include "pc_vr_config.h"
-#include "pc_vr_eye_size.h"
 
 #include <errno.h>
 #include <math.h>
@@ -110,20 +109,13 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
 
     out->display_rate_tracking = out->settings.headset_pace ||
                                  exactly_one(lookup(context, "SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING"));
-    value = lookup(context, "SAVAGEWIND_PC_VR_TARGET_REFRESH");
-    out->target_refresh =
-        out->settings.headset_pace == 2 && out->display_rate_tracking && (!value || exactly_one(value));
+    out->target_refresh = out->settings.headset_pace == 2 && out->display_rate_tracking;
 
     // The diagnostics.
     out->diagnostics.perf = lookup(context, "SAVAGEWIND_PC_VR_PERF") != NULL;
-    out->diagnostics.offer_trace = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_OFFER_TRACE"));
     out->diagnostics.shot_count = present_list(lookup(context, "SAVAGEWIND_PC_VR_SHOT"),
         out->diagnostics.shot_presents, PC_VR_SHOT_PRESENTS);
     out->diagnostics.quick_menu_shots = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS"));
-    out->diagnostics.no_headset_mask = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_NO_HEADSET_MASK"));
-    value = lookup(context, "SAVAGEWIND_PC_VR_COPY_WAIT_MS");
-    const int copy_wait_ms = value ? atoi(value) : 0;
-    out->diagnostics.copy_wait_ms = copy_wait_ms >= 1 && copy_wait_ms <= 100 ? (unsigned)copy_wait_ms : 0;
     value = lookup(context, "SAVAGEWIND_PC_VR_BENCH_HEAD");
     out->diagnostics.bench_head_requested = value != NULL;
     const long long bench_start = value ? atoll(value) : 0;
@@ -132,22 +124,6 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
     out->diagnostics.log_panes = value && atoi(value) > 0;
     value = lookup(context, "SAVAGEWIND_LOG_SCREENS");
     out->diagnostics.log_screens = value && atoi(value) > 0;
-    value = lookup(context, "SAVAGEWIND_PC_VR_EYE_IMAGES_FLIP");
-    out->diagnostics.eye_images_flip = value && (!strcmp(value, "0") || !strcmp(value, "1")) ? value[0] == '1' : -1;
-    value = lookup(context, "SAVAGEWIND_PC_VR_EYE_SIZE");
-    if (out->enabled && value && *value &&
-        !pc_vr_parse_eye_size(value, &out->diagnostics.eye_width, &out->diagnostics.eye_height))
-        out->diagnostics.eye_size_malformed = true;
-    out->diagnostics.ui_parallax = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_UI_PARALLAX"));
-    out->diagnostics.hud_backdrop = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_HUD_BACKDROP"));
-    value = lookup(context, "SAVAGEWIND_PC_VR_WORLD_HUD");
-    out->diagnostics.world_hud = !(value && !strcmp(value, "0"));
-    value = lookup(context, "SAVAGEWIND_PC_VR_WORLD_HUD_ROLL");
-    out->diagnostics.world_hud_upright = value && !strcmp(value, "0");
-    out->diagnostics.world_hud_test_turn = value ? atof(value) * (3.14159265358979323846 / 180.0) : 0;
-    value = lookup(context, "SAVAGEWIND_PC_VR_RUNE_AIM");
-    out->diagnostics.rune_aim = !value ? PC_VR_RUNE_AIM_ON : !strcmp(value, "0") ? PC_VR_RUNE_AIM_OFF :
-                                !strcmp(value, "flip") ? PC_VR_RUNE_AIM_FLIP : PC_VR_RUNE_AIM_ON;
 }
 
 // Appends to a line (append keeps the length it needed, past size when cut off).
@@ -213,30 +189,14 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
     describe_append(&line, "; diagnostics:");
     const size_t diagnostics_start = line.length;
     if (config->diagnostics.perf) describe_append(&line, " PERF");
-    if (config->diagnostics.offer_trace) describe_append(&line, " OFFER_TRACE");
     if (config->diagnostics.shot_count)
         describe_presents(&line, "SHOT", config->diagnostics.shot_presents, config->diagnostics.shot_count);
     if (config->diagnostics.quick_menu_shots) describe_append(&line, " QUICK_MENU_SHOTS");
-    if (config->diagnostics.no_headset_mask) describe_append(&line, " NO_HEADSET_MASK");
-    if (config->diagnostics.copy_wait_ms) describe_append(&line, " COPY_WAIT_MS=%u", config->diagnostics.copy_wait_ms);
     if (config->diagnostics.bench_head_start)
         describe_append(&line, " BENCH_HEAD=%llu", (unsigned long long)config->diagnostics.bench_head_start);
     else if (config->diagnostics.bench_head_requested) describe_append(&line, " BENCH_HEAD=invalid");
     if (config->diagnostics.log_panes) describe_append(&line, " LOG_PANES");
     if (config->diagnostics.log_screens) describe_append(&line, " LOG_SCREENS");
-    if (config->diagnostics.eye_images_flip >= 0)
-        describe_append(&line, " EYE_IMAGES_FLIP=%d", config->diagnostics.eye_images_flip);
-    if (config->diagnostics.eye_width)
-        describe_append(&line, " EYE_SIZE=%ux%u", config->diagnostics.eye_width, config->diagnostics.eye_height);
-    if (config->diagnostics.ui_parallax) describe_append(&line, " UI_PARALLAX");
-    if (config->diagnostics.hud_backdrop) describe_append(&line, " HUD_BACKDROP");
-    if (!config->diagnostics.world_hud) describe_append(&line, " WORLD_HUD=0");
-    if (config->diagnostics.world_hud_upright) describe_append(&line, " WORLD_HUD_ROLL=0");
-    else if (config->diagnostics.world_hud_test_turn != 0)
-        describe_append(&line, " WORLD_HUD_ROLL=%.6g",
-                        config->diagnostics.world_hud_test_turn * (180.0 / 3.14159265358979323846));
-    if (config->diagnostics.rune_aim != PC_VR_RUNE_AIM_ON)
-        describe_append(&line, " RUNE_AIM=%s", config->diagnostics.rune_aim == PC_VR_RUNE_AIM_OFF ? "0" : "flip");
     if (line.length == diagnostics_start) describe_append(&line, " none");
 
     describe_append(&line, "; ignored:");
@@ -263,8 +223,6 @@ static void process_configuration_read(void) {
     settings_load();  // (once per process, before anything else as a rule; it hands PC VR its lines)
     pc_vr_config_parse(process_setting, NULL, &process_configuration);
     if (process_configuration.enabled) {
-        if (process_configuration.diagnostics.eye_size_malformed)
-            FATAL("SAVAGEWIND_PC_VR_EYE_SIZE requires WxH, each axis 128..4096\n");
         char text[1024];
         pc_vr_config_describe(&process_configuration, text, sizeof text);
         LOG("[pc-vr] configuration: %s\n", text);

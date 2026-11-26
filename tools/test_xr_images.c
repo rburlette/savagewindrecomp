@@ -79,7 +79,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL image_wait_fence(VkDevice device, uint32_t
     (void)device;
     // (the owner's one bounded wait for a copy, the longer one of a retirement, or 0: asking about a copy already late)
     CHECK(count == 1 && *fences == (VkFence)(uintptr_t)42 && all &&
-          (timeout == eye_copy_wait_ns() || timeout == EYE_GPU_WAIT_NS || timeout == 0));
+          (timeout == EYE_COPY_WAIT_NS || timeout == EYE_GPU_WAIT_NS || timeout == 0));
     CHECK(gpu_mock.pending_copy);
     gpu_mock.fence_timeout = timeout;
     ++gpu_mock.fences;
@@ -661,15 +661,14 @@ static void test_image_late_copy(void) {
     CHECK(eye_gpu.submitted == 1 && eye_gpu.copied == 1 && gpu_mock.fence_asks == 0);
     // (the owner's first wait for its copy: the copy's own short bound, well under a display period)
     CHECK(gpu_mock.fence_timeout == EYE_COPY_WAIT_NS && EYE_COPY_WAIT_NS < 11111111 && EYE_COPY_WAIT_NS > 0);
-    // The next pair's copy is late, here with the bound the configuration can set.
+    // The next pair's copy is late.
     CHECK(xr_runtime_get_pose(&pair.render_pose) == XR_POSE_VALID);
     pair.game_present_id = 3;
     CHECK(xr_runtime_offer_eye_pair(&pair));
     gpu_mock.fence_result = VK_TIMEOUT;
-    xr.copy_wait_ns = 7000000;
     ++mock.predicted;
     tracking_frame(3);  // (the pair before is still what is shown: image_inspect_end checks its poses)
-    CHECK(gpu_mock.fence_timeout == 7000000);
+    CHECK(gpu_mock.fence_timeout == EYE_COPY_WAIT_NS);
     CHECK(!xr.terminal && eye_gpu.copy_pending && eye_gpu.current_valid && eye_gpu.late_copies == 1);
     CHECK(eye_gpu.submitted == 2 && eye_gpu.copied == 1 && eye_gpu.layer_valid);
     CHECK(gpu_mock.submits == 2 && gpu_mock.acquires == 4 && gpu_mock.releases == 2 && gpu_mock.retirements == 1);
@@ -1007,36 +1006,30 @@ static void test_image_over_scene(void) {
     CHECK(gpu_mock.destroys == 3);
 }
 
-static void test_offer_rejection_diagnostics(void) {
+// Each refused offer counted by its reason (pc_vr_guards.h), the pair left as it was.
+static void test_offer_refusals(void) {
     XrOwnedEyePair pair = image_prepare(), bad;
-    CHECK(!atomic_load(&eye_offer_trace));
-    const uint64_t disabled_before = atomic_load(&eye_offer_rejects[OFFER_CONTRACT]);
+#define REFUSED(guard, edit) do {     bad = pair; edit; const XrOwnedEyePair before = bad;     const uint64_t count = atomic_load(&pc_vr_guard_counts[guard]);     CHECK(!xr_runtime_offer_eye_pair(&bad));     CHECK(atomic_load(&pc_vr_guard_counts[guard]) == count + 1);     CHECK(!memcmp(&before, &bad, sizeof bad) && !eye_gpu.pending_count); } while (0)
+    const uint64_t contract_before = atomic_load(&pc_vr_guard_counts[PC_VR_GUARD_OFFER_CONTRACT]);
     CHECK(!xr_runtime_offer_eye_pair(NULL));
-    CHECK(atomic_load(&eye_offer_rejects[OFFER_CONTRACT]) == disabled_before);
-    atomic_store(&eye_offer_trace, true);
-#define DIAGNOSTIC(reason, edit) do { \
-    bad = pair; edit; const XrOwnedEyePair before = bad; \
-    const uint64_t count = atomic_load(&eye_offer_rejects[reason]); \
-    CHECK(!xr_runtime_offer_eye_pair(&bad)); \
-    CHECK(atomic_load(&eye_offer_rejects[reason]) == count + 1); \
-    CHECK(!memcmp(&before, &bad, sizeof bad) && !eye_gpu.pending_count); \
-} while (0)
-    DIAGNOSTIC(OFFER_LOCAL, ++bad.render_pose.local_definition);
-    DIAGNOSTIC(OFFER_POSE_IDENTITY, bad.render_pose.active = false);
-    // Exhausting the reporting budget never changes the rejection itself.
-    atomic_store(&eye_offer_log_count, EYE_OFFER_LOG_CAP);
-    DIAGNOSTIC(OFFER_POSE_IDENTITY, bad.render_pose.frame_id = 0);
-    CHECK(atomic_load(&eye_offer_log_count) == EYE_OFFER_LOG_CAP + 1);
-#undef DIAGNOSTIC
+    CHECK(atomic_load(&pc_vr_guard_counts[PC_VR_GUARD_OFFER_CONTRACT]) == contract_before + 1);
+    REFUSED(PC_VR_GUARD_OFFER_LOCAL, ++bad.render_pose.local_definition);
+    REFUSED(PC_VR_GUARD_OFFER_CONTRACT, bad.render_pose.active = false);
+    REFUSED(PC_VR_GUARD_OFFER_CONTRACT, bad.render_pose.frame_id = 0);
+    // An owner that no longer takes pairs refuses them as stopped, whatever they hold.
+    eye_images_enabled = false;
+    REFUSED(PC_VR_GUARD_OFFER_STOPPED, (void)0);
+    REFUSED(PC_VR_GUARD_OFFER_STOPPED, bad.render_pose.frame_id = 0);
+    eye_images_enabled = true;
+#undef REFUSED
     CHECK(xr_runtime_offer_eye_pair(&pair));
     const XrOwnedEyePair pending = eye_gpu.pending[0];
-    const uint64_t mailbox_before = atomic_load(&eye_offer_rejects[OFFER_MAILBOX]);
+    const uint64_t mailbox_before = atomic_load(&pc_vr_guard_counts[PC_VR_GUARD_OFFER_MAILBOX]);
     CHECK(!xr_runtime_offer_eye_pair(&pair));
-    CHECK(atomic_load(&eye_offer_rejects[OFFER_MAILBOX]) == mailbox_before + 1);
+    CHECK(atomic_load(&pc_vr_guard_counts[PC_VR_GUARD_OFFER_MAILBOX]) == mailbox_before + 1);
     CHECK(!memcmp(&pending, &eye_gpu.pending[0], sizeof pending) && eye_gpu.pending_count == 1);
     image_close();
     CHECK(gpu_mock.retirements == 1);
-    atomic_store(&eye_offer_trace, false);
 }
 
 int main(void) {
@@ -1055,7 +1048,7 @@ int main(void) {
     test_image_failures();
     test_image_late_copy();
     test_visible_and_wait_recovery();
-    test_offer_rejection_diagnostics();
+    test_offer_refusals();
     printf("OpenXR owned-image fake-boundary fixture: %u checks passed (no runtime/device/game data)\n", checks);
     return 0;
 }

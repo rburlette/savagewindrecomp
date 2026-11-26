@@ -80,14 +80,13 @@ static void test_camera_correspondence(void) {
     PcVrProjectionEyeBasis result;
     eye.position[0] -= 0.04f; eye.target[0] -= 0.04f;
     CHECK(pc_vr_projection_eye_basis(&base, &eye, stored_right, &result));
-    CHECK(result.right_matches && result.parallel_eye && result.lateral_eye && result.offset_sign == -1);
+    CHECK(result.right_matches && result.lateral_eye && result.offset_sign == -1);
     eye = base; eye.position[0] += 0.04f; eye.target[0] += 0.04f;
     CHECK(pc_vr_projection_eye_basis(&base, &eye, stored_right, &result));
-    CHECK(result.right_matches && result.parallel_eye && result.lateral_eye && result.offset_sign == 1);
+    CHECK(result.right_matches && result.lateral_eye && result.offset_sign == 1);
     stored_right[0] = -1;
     CHECK(pc_vr_projection_eye_basis(&base, &eye, stored_right, &result) && !result.right_matches);
-    stored_right[0] = 1; eye.target[1] += 0.1f;
-    CHECK(pc_vr_projection_eye_basis(&base, &eye, stored_right, &result) && !result.parallel_eye);
+    stored_right[0] = 1;
     eye = base; eye.position[1] += 0.04f; eye.target[1] += 0.04f;
     CHECK(pc_vr_projection_eye_basis(&base, &eye, stored_right, &result) && !result.lateral_eye && !result.offset_sign);
     eye = base;
@@ -96,21 +95,6 @@ static void test_camera_correspondence(void) {
     eye = base; stored_right[1] = INFINITY;
     CHECK(!pc_vr_projection_eye_basis(&base, &eye, stored_right, &result));
 
-    // A rotated center and arbitrary translation must preserve the geometric
-    // side correspondence. This checks signs without fixed-IPD assumptions.
-    float q[4] = {0, 0, 0, 1}, left[3] = {100, 500, 900}, right[3] = {100.071f, 500, 900};
-    CHECK(pc_vr_projection_native_order(q, left, right));
-    CHECK(!pc_vr_projection_native_order(q, right, left));
-    CHECK(!pc_vr_projection_native_order(q, left, left));
-    q[1] = q[3] = sqrtf(0.5f);
-    right[0] = left[0]; right[2] = left[2] - 0.055f;
-    CHECK(pc_vr_projection_native_order(q, left, right));
-    CHECK(!pc_vr_projection_native_order(q, right, left));
-    right[1] += 1; CHECK(!pc_vr_projection_native_order(q, left, right));
-    right[1] = left[1]; q[3] = 0; CHECK(!pc_vr_projection_native_order(q, left, right));
-    q[3] = NAN; CHECK(!pc_vr_projection_native_order(q, left, right));
-    q[1] = 0; q[3] = 1; left[0] = NAN;
-    CHECK(!pc_vr_projection_native_order(q, left, right));
 }
 
 // The temporal anti-aliasing offset (DLAA per eye): Halton's points, a frame record's offset as [-0.5, 0.5] pixels in

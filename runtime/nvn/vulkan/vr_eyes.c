@@ -37,9 +37,8 @@ static bool vr_eyes_configure(void) {
         LOG("[pc-vr-eyes] producer disabled: A2B10G10R10 to sRGB RGBA8 blit unsupported\n");
         return false;
     }
-    // Rows in the window present's order; SAVAGEWIND_PC_VR_EYE_IMAGES_FLIP=0/1 overrides it for the headset check.
-    const int flip = pc_vr_config()->diagnostics.eye_images_flip;
-    vr_eyes.flip = flip >= 0 ? flip == 1 : renderer_origin_lower_left();
+    // Rows in the window present's order.
+    vr_eyes.flip = renderer_origin_lower_left();
     // The final image holds linear values: the game's lens pass writes it to the display through an sRGB view.
     // Blitting into an sRGB image encodes them, which also keeps dark tones' precision in 8 bits.
     vr_eyes.state = 1;
@@ -298,13 +297,11 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
     // Why a frame is not offered, counted (pc_vr_guards.h); a frame with nothing captured, or a UI re-presentation,
     // is not a refusal.
     switch (outcome.rejection) {
-    case VR_FRAME_REJECTED_UNCERTIFIED:
-        pc_vr_guard_count(frame->certified == 3 ? PC_VR_GUARD_FRAME_UNCERTIFIED_DISAGREE
-                                                : PC_VR_GUARD_FRAME_UNCERTIFIED_MISSING);
-        break;
+    case VR_FRAME_REJECTED_UNCERTIFIED: pc_vr_guard_count(PC_VR_GUARD_FRAME_UNCERTIFIED); break;
     case VR_FRAME_REJECTED_MISPLACED: pc_vr_guard_count(PC_VR_GUARD_FRAME_MISPLACED); break;
-    case VR_FRAME_REJECTED_MENU_WITHOUT_POSE: pc_vr_guard_count(PC_VR_GUARD_FRAME_MENU_WITHOUT_POSE); break;
-    case VR_FRAME_REJECTED_MENU_WITHOUT_PANEL: pc_vr_guard_count(PC_VR_GUARD_FRAME_MENU_WITHOUT_PANEL); break;
+    // (a menu frame whose panel cannot be built has no calibration to place it by: counted with those without a pose)
+    case VR_FRAME_REJECTED_MENU_WITHOUT_POSE:
+    case VR_FRAME_REJECTED_MENU_WITHOUT_PANEL: pc_vr_guard_count(PC_VR_GUARD_FRAME_MENU_WITHOUT_POSE); break;
     default: break;
     }
     if (outcome.kind == VR_FRAME_HUD_OVER_HELD_SCENE || outcome.kind == VR_FRAME_MENU_PANEL) ++vr_eyes.menu_pairs;

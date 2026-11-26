@@ -60,7 +60,7 @@ static inline bool pc_vr_cull_view_build(const PcVrHeadLookCamera eyes[2], const
         const float *fov = fov_left_right_up_down[side];
         if (!pc_vr_cull_view_eye_axes(&eyes[side], eye_right[side], eye_up[side], eye_forward[side])) return false;
         for (unsigned i = 0; i < 4; ++i)
-            if (!isfinite(fov[i]) || fabsf(fov[i]) >= 1.5533430f) return false;  // (89 degrees)
+            if (fabsf(fov[i]) >= 1.5533430f) return false;  // (89 degrees; OpenXR's FOVs are finite, D116)
         if (!(fov[0] < fov[1]) || !(fov[3] < fov[2])) return false;
     }
     double forward[3], right[3], up[3], summed_up[3];

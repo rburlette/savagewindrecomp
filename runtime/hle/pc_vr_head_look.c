@@ -169,34 +169,6 @@ static const XrPoseSnapshot *frame_pose_locked(XrPoseSnapshot *published) {
     return held_valid ? &held_pose : NULL;
 }
 
-// [pc-vr-audit] SAVAGEWIND_AUDIT_WATCH_EYES=1 (Windows): once both eye layers are known, CPU data breakpoints on each
-// eye's view matrix (its third row: layer + 0x230 + 0x20) and logical projection (row 0, columns 1 and 2: layer +
-// 0x288 + 0x10), to find the game code that reads the head-rotated eye cameras (rune targeting). =2: side 0 only (the
-// game's main-camera lookup returns that layer's camera), its view matrix row, its camera's position (x, y) and
-// target (y, z) fields (layer + 0x260 and + 0x270) and its projection.
-static void audit_watch_eyes(uint64_t layer, unsigned side) {
-#ifdef _WIN32
-    static int wanted = -1;
-    static uint64_t layers[2];
-    static bool armed;
-    if (wanted < 0) {
-        const char *setting = getenv("SAVAGEWIND_AUDIT_WATCH_EYES");
-        wanted = setting ? atoi(setting) : 0;
-    }
-    if (wanted < 1 || wanted > 2 || armed) return;
-    layers[side & 1] = layer;
-    if (!layers[0] || !layers[1]) return;
-    extern bool plat_data_watch(const uint64_t addr[4]);
-    const uint64_t addresses[4] = {layers[0] + 0x250, wanted == 2 ? layers[0] + 0x260 : layers[1] + 0x250,
-        wanted == 2 ? layers[0] + 0x270 : layers[0] + 0x298, wanted == 2 ? layers[0] + 0x298 : layers[1] + 0x298};
-    armed = plat_data_watch(addresses);
-    LOG("[pc-vr-audit] watch eyes: layer side0 %llx side1 %llx armed=%d\n", (unsigned long long)layers[0],
-        (unsigned long long)layers[1], armed);
-#else
-    (void)layer, (void)side;
-#endif
-}
-
 // Whether the layer copies the verified base camera: an eye layer of the composition head look is bound to.
 static bool bound_eye_layer(uint64_t layer) {
     uint64_t layer_base = 0;
@@ -243,7 +215,6 @@ static bool eye_before_original(uint64_t eye, uint64_t output, uint64_t frame_po
     const bool given = readable &&
         pc_vr_projection_trace_eye(layer, binding.base, &current_base, fresh_copy, pose, frame_pointer);
     if (given) {
-        audit_watch_eyes(layer, !!(layer_side & LAYER_SIDE_SECOND_EYE));  // [pc-vr-audit]
         if (!first_eye_logged) {
             LOG("[pc-vr-head-look] first eye given its native view (side_bit=%u)\n",
                 !!(layer_side & LAYER_SIDE_SECOND_EYE));

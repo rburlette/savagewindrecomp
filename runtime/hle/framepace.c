@@ -43,7 +43,6 @@
 //                                  all four stick-gated sites: fsub (+0x181c / +0x1824) and their fadd mirrors;
 //                                  default: scale all four by the frame ratio (experimental, confirmed in game)
 #include <math.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,19 +59,12 @@
 #include "../pc_vr.h"
 #include "../pc_vr_frame_trace.h"
 #include "../pc_vr_pace.h"
-#include "../automation_state.h"
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 extern volatile int g_movie_playing;  // runtime/hle/movie.c: video decoders running
 extern volatile int g_movie_fps;      // runtime/hle/movie.c: the playing movie's frame rate
 
 #define VF(T, base, off) (*(T *)(uintptr_t)((base) + (off)))
 #define PAUSE_STATE g_site.pause_state  // (u32: 0 playing, 2 in the pause menu or the map)
-
-#include "pc_vr_automation_state.inc"  // the automation's observations of the game (automation_state.h)
 
 static int env_int(const char *name, int def) {
     const char *e = getenv(name);
@@ -702,7 +694,6 @@ static uint64_t shown_frames;
 uint64_t framepace_shown_frame(void) { return __atomic_load_n(&shown_frames, __ATOMIC_RELAXED); }
 
 void rt_vfr_update(uint64_t vfr) {
-    automation_sample();
     __atomic_fetch_add(&game_frames, 1, __ATOMIC_RELAXED);
     gamelib_sync();
     {

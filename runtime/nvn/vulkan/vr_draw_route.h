@@ -10,8 +10,7 @@
 // frame's draws execute, from the draws' tags and the frame so far, and feed the per-draw path; vr_frame.h classifies
 // the finished frame at its present.
 //
-// Pure: plain values in, plain values out, so a fixture (tools/test_vr_draw_route.c) compares it with the code it came
-// from on every combination of its inputs.
+// Pure: plain values in, plain values out, so a fixture (tools/test_vr_draw_route.c) checks it case by case.
 //
 // Not owned here:
 //  - the gate (exec.c vr_is_hud_draw), which runs for every draw and stays in exec.c as it was: a draw is a HUD draw

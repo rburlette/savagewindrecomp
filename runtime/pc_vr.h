@@ -37,9 +37,8 @@ void pc_vr_eye_shot_key_poll(void);
 // The requests so far; the renderer saves one pair for those it has not served yet.
 unsigned pc_vr_eye_shot_requests(void);
 
-// The exact raster size for both eye rendering and submission, PC VR only: SAVAGEWIND_PC_VR_EYE_SIZE=WxH (each axis
-// 128..4096, process-latched), else the eye scale's pixels in the OpenXR runtime's view shape once discovery has run
-// (pc_vr_eye_size.h). False: the eye targets keep Labo's shape (EyeScale alone, or none). Poses/FOV remain runtime-derived.
+// The exact raster size for both eye rendering and submission, PC VR only: the eye scale's pixels in the OpenXR
+// runtime's view shape once discovery has run (pc_vr_eye_size.h). False: the eye targets keep Labo's shape (EyeScale alone, or none). Poses/FOV remain runtime-derived.
 bool pc_vr_eye_size(unsigned *width, unsigned *height);
 // While playing, an eye scale in place of the configuration's for pc_vr_eye_size (runtime/nvn/vulkan/vr_dlaa.c: its
 // DLSS mode's), from the next frame: the renderer's scaled targets and the headset's images follow the size; 0 or 1: the

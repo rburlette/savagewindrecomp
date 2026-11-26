@@ -146,33 +146,11 @@ static void cmd_eyeshot(int argc, char **argv, ControlReply *reply) {
 #endif
 }
 
-// (probe) `dlaa <mode>`: PC VR's DLAA mode from the next present, as the '9' key steps them (runtime/nvn/vulkan/
-// vr_dlaa.h: 0 none, 1 DLAA, 2 DLSS), unless vr_antialiasing = off.
-static void cmd_dlaa(int argc, char **argv, ControlReply *reply) {
-#ifndef SAVAGEWIND_WITH_OPENXR
-    (void)argc, (void)argv;
-    control_fail(reply, "dlaa: a PC VR build only");
-#else
-    extern bool vr_dlaa_request_mode(int mode);
-    if (argc != 2) {
-        control_fail(reply, "Usage: dlaa <0 none | 1 DLAA | 2 DLSS>");
-        return;
-    }
-    const int mode = atoi(argv[1]);
-    if (!vr_dlaa_request_mode(mode)) {
-        control_fail(reply, "dlaa: off for this run (vr_antialiasing = off), DLSS does not run here, or no such mode");
-        return;
-    }
-    control_field_int(reply, "requested", mode);
-#endif
-}
-
 void rt_data_watch_control_init(void) {
     static const ControlCmd commands[] = {
         {"watch", "<address> [<address> ...]", "Log the code that reads or writes up to four guest words", cmd_watch},
         {"head", "<yaw degrees> <pitch degrees> [<right m> <up m> <back m>] | off",
          "Hold the head turned, and moved, from the tracked pose (probe)", cmd_head},
-        {"eyeshot", "", "Save the next frame's two eye images at full size (probe)", cmd_eyeshot},
-        {"dlaa", "<mode>", "PC VR's DLAA mode from the next present, as the 9 key steps them (probe)", cmd_dlaa}};
-    control_register(commands, 4);
+        {"eyeshot", "", "Save the next frame's two eye images at full size (probe)", cmd_eyeshot}};
+    control_register(commands, 3);
 }

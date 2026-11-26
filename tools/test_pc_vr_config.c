@@ -44,7 +44,6 @@ void pc_vr_motion_contract_timestamp_reset(void) { abort(); }
 // (what an eye shot's request reads and marks, runtime/pc_vr.c: nothing here asks for one)
 bool control_place_line(char *line, size_t size) { (void)line; (void)size; abort(); }
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) { (void)out; abort(); }
-void pc_vr_frame_trace_user_mark(void) { abort(); }
 // The OpenXR runtime's recommended eye size (0: discovery has not run), as xr_runtime.c reports it.
 static unsigned mock_view_width, mock_view_height;
 bool xr_runtime_recommended_eye_size(unsigned *width, unsigned *height) {
@@ -86,9 +85,8 @@ static void test_enabled(void) {
     const char *off[] = {NULL, "", "0", "true", "no", "00"};
     for (unsigned i = 0; i < sizeof off / sizeof off[0]; ++i) {
         PcVrConfig config;
-        test_pc_vr_parse((const char *const[]){"vr", off[i], "SAVAGEWIND_PC_VR_EYE_SIZE", "2064x2208", NULL}, &config);
-        CHECK(!config.enabled && !config.diagnostics.eye_width && !config.diagnostics.eye_height);
-        CHECK(!config.diagnostics.eye_size_malformed);
+        test_pc_vr_parse((const char *const[]){"vr", off[i], NULL}, &config);
+        CHECK(!config.enabled);
     }
     const char *on[] = {"1", "01", "2", " 1", "1 "};
     for (unsigned i = 0; i < sizeof on / sizeof on[0]; ++i) CHECK(with_setting("vr", on[i]).enabled);
@@ -137,14 +135,9 @@ static void test_defaults(void) {
     CHECK(config.settings.antialiasing == PC_VR_ANTIALIASING_DLSS);
     CHECK(config.settings.dlss_ratio == 1.5 && config.settings.dlss_eye_scale == 3.0);
     CHECK(config.display_rate_tracking && config.target_refresh);
-    CHECK(config.diagnostics.eye_images_flip == -1 && !config.diagnostics.eye_width && !config.diagnostics.eye_height);
-    CHECK(!config.diagnostics.eye_size_malformed && !config.diagnostics.ui_parallax);
-    CHECK(!config.diagnostics.hud_backdrop && config.diagnostics.world_hud && !config.diagnostics.world_hud_upright);
-    CHECK(config.diagnostics.world_hud_test_turn == 0 && config.diagnostics.rune_aim == PC_VR_RUNE_AIM_ON);
-    CHECK(!config.diagnostics.perf);
-    CHECK(!config.diagnostics.offer_trace && !config.diagnostics.shot_count && !config.diagnostics.quick_menu_shots);
+    CHECK(!config.diagnostics.perf && !config.diagnostics.shot_count && !config.diagnostics.quick_menu_shots);
     CHECK(!config.diagnostics.bench_head_requested && !config.diagnostics.log_panes && !config.diagnostics.log_screens);
-    CHECK(!config.diagnostics.no_headset_mask && !config.diagnostics.copy_wait_ms && !config.settings_ignored);
+    CHECK(!config.settings_ignored);
     // (PC VR off: the same values, unused)
     test_pc_vr_parse((const char *const[]){NULL}, &off);
     CHECK(!off.enabled && !memcmp(&off.settings, &config.settings, sizeof off.settings));
@@ -305,17 +298,12 @@ static void test_diagnostics(void) {
     test_pc_vr_parse((const char *const[]){"vr", "1", NULL}, &plain);
     PcVrConfig config = with_setting("SAVAGEWIND_PC_VR_PERF", "0");  // (any value)
     CHECK(config.diagnostics.perf && !memcmp(&config.settings, &plain.settings, sizeof plain.settings));
-    CHECK(with_setting("SAVAGEWIND_PC_VR_OFFER_TRACE", "1").diagnostics.offer_trace);
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_OFFER_TRACE", "2").diagnostics.offer_trace);
-    // Alternate refreshes targeted: pace 2 with the head pose every display frame, unless TARGET_REFRESH says other
-    // than 1
-    const struct { const char *pace, *tracking, *target; bool enabled; } target_cases[] = {
-        {"2", NULL, NULL, true}, {"2", "1", "1", true}, {"2", NULL, "0", false}, {"2", NULL, "true", false},
-        {"0", "1", "1", false}, {"1", NULL, NULL, false}, {"3", "1", "1", false}};
+    // Alternate refreshes targeted: pace 2 with the head pose every display frame (D128)
+    const struct { const char *pace, *tracking; bool enabled; } target_cases[] = {
+        {"2", NULL, true}, {"2", "1", true}, {"0", "1", false}, {"1", NULL, false}, {"3", "1", false}};
     for (unsigned i = 0; i < sizeof target_cases / sizeof target_cases[0]; ++i) {
         test_pc_vr_parse((const char *const[]){"vr", "1", "vr_headset_pace", target_cases[i].pace,
-            "SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING", target_cases[i].tracking,
-            "SAVAGEWIND_PC_VR_TARGET_REFRESH", target_cases[i].target, NULL}, &config);
+            "SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING", target_cases[i].tracking, NULL}, &config);
         CHECK(config.target_refresh == target_cases[i].enabled);
         char target_line[1024];
         pc_vr_config_describe(&config, target_line, sizeof target_line);
@@ -333,14 +321,6 @@ static void test_diagnostics(void) {
     CHECK(config.diagnostics.shot_count == 1 && config.diagnostics.shot_presents[0] == 7);
     CHECK(with_setting("SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "1").diagnostics.quick_menu_shots);
     CHECK(!with_setting("SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "yes").diagnostics.quick_menu_shots);
-    CHECK(with_setting("SAVAGEWIND_PC_VR_NO_HEADSET_MASK", "1").diagnostics.no_headset_mask);
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_NO_HEADSET_MASK", "yes").diagnostics.no_headset_mask);
-    // The XR owner's first wait for a copy: its own unless 1 to 100 milliseconds.
-    CHECK(with_setting("SAVAGEWIND_PC_VR_COPY_WAIT_MS", "100").diagnostics.copy_wait_ms == 100);
-    CHECK(with_setting("SAVAGEWIND_PC_VR_COPY_WAIT_MS", "1").diagnostics.copy_wait_ms == 1);
-    const char *bad_copy_wait[] = {"0", "101", "-3", "abc", ""};
-    for (unsigned i = 0; i < sizeof bad_copy_wait / sizeof bad_copy_wait[0]; ++i)
-        CHECK(!with_setting("SAVAGEWIND_PC_VR_COPY_WAIT_MS", bad_copy_wait[i]).diagnostics.copy_wait_ms);
     config = with_setting("SAVAGEWIND_PC_VR_BENCH_HEAD", "3000");
     CHECK(config.diagnostics.bench_head_requested && config.diagnostics.bench_head_start == 3000);
     const char *bad_bench[] = {"0", "100001", "-5", "abc", ""};
@@ -354,50 +334,6 @@ static void test_diagnostics(void) {
     CHECK(!with_setting("SAVAGEWIND_LOG_SCREENS", "-1").diagnostics.log_screens);
     config = with_setting("SAVAGEWIND_LOG_SCREENS", "1");
     CHECK(!memcmp(&config.settings, &plain.settings, sizeof plain.settings) && !config.settings_ignored);
-    // EYE_IMAGES_FLIP: 0 or 1, otherwise the window present's order
-    const struct { const char *value; int expected; } flips[] = {
-        {"0", 0}, {"1", 1}, {"2", -1}, {"auto", -1}, {"", -1}, {"01", -1}};
-    for (unsigned i = 0; i < sizeof flips / sizeof flips[0]; ++i) {
-        config = with_setting("SAVAGEWIND_PC_VR_EYE_IMAGES_FLIP", flips[i].value);
-        CHECK(config.diagnostics.eye_images_flip == flips[i].expected && !config.settings_ignored);
-    }
-    // EYE_SIZE, PC VR only: a malformed one stops startup (the process's read), an empty one is none.
-    config = with_setting("SAVAGEWIND_PC_VR_EYE_SIZE", "2064x2208");
-    CHECK(config.diagnostics.eye_width == 2064 && config.diagnostics.eye_height == 2208);
-    CHECK(!config.diagnostics.eye_size_malformed);
-    config = with_setting("SAVAGEWIND_PC_VR_EYE_SIZE", "");
-    CHECK(!config.diagnostics.eye_width && !config.diagnostics.eye_height && !config.diagnostics.eye_size_malformed);
-    const char *bad_sizes[] = {"0x2208", "2064x0", "2064", "2064X2208", " 2064x2208", "112x2208",
-        "4112x2208", "2064x2208junk"};
-    for (unsigned i = 0; i < sizeof bad_sizes / sizeof bad_sizes[0]; ++i) {
-        config = with_setting("SAVAGEWIND_PC_VR_EYE_SIZE", bad_sizes[i]);
-        CHECK(config.diagnostics.eye_size_malformed && !config.diagnostics.eye_width);
-        CHECK(!config.diagnostics.eye_height);
-    }
-    // The A/B switches that take exactly 1.
-    CHECK(with_setting("SAVAGEWIND_PC_VR_UI_PARALLAX", "1").diagnostics.ui_parallax);
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_UI_PARALLAX", "0").diagnostics.ui_parallax);
-    CHECK(with_setting("SAVAGEWIND_PC_VR_HUD_BACKDROP", "1").diagnostics.hud_backdrop);
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_HUD_BACKDROP", "01").diagnostics.hud_backdrop);
-    // WORLD_HUD: only exactly 0 is off (an empty value is a real one here, unlike Windows' environment).
-    const struct { const char *value; bool on; } world[] = {
-        {NULL, true}, {"0", false}, {"1", true}, {"00", true}, {"0 ", true}, {"", true}};
-    for (unsigned i = 0; i < sizeof world / sizeof world[0]; ++i)
-        CHECK(with_setting("SAVAGEWIND_PC_VR_WORLD_HUD", world[i].value).diagnostics.world_hud == world[i].on);
-    // WORLD_HUD_ROLL: unset turns with the world's up, 0 upright, a number of degrees more (in radians here).
-    const struct { const char *value; bool upright; double degrees; } rolls[] = {
-        {NULL, false, 0}, {"0", true, 0}, {"90", false, 90}, {"-45", false, -45}, {"abc", false, 0}, {"", false, 0}};
-    for (unsigned i = 0; i < sizeof rolls / sizeof rolls[0]; ++i) {
-        config = with_setting("SAVAGEWIND_PC_VR_WORLD_HUD_ROLL", rolls[i].value);
-        CHECK(config.diagnostics.world_hud_upright == rolls[i].upright);
-        CHECK(config.diagnostics.world_hud_test_turn == rolls[i].degrees * (3.14159265358979323846 / 180.0));
-    }
-    // RUNE_AIM: 0 off, flip, anything else on.
-    const struct { const char *value; PcVrRuneAim aim; } aims[] = {
-        {NULL, PC_VR_RUNE_AIM_ON}, {"0", PC_VR_RUNE_AIM_OFF}, {"flip", PC_VR_RUNE_AIM_FLIP}, {"1", PC_VR_RUNE_AIM_ON},
-        {"FLIP", PC_VR_RUNE_AIM_ON}, {"", PC_VR_RUNE_AIM_ON}};
-    for (unsigned i = 0; i < sizeof aims / sizeof aims[0]; ++i)
-        CHECK(with_setting("SAVAGEWIND_PC_VR_RUNE_AIM", aims[i].value).diagnostics.rune_aim == aims[i].aim);
 }
 
 // The "[pc-vr] configuration:" line: vr = 1 alone (what the play runs' settings file holds), ignored settings with
@@ -413,18 +349,17 @@ static void test_describe(void) {
     CHECK(pc_vr_config_describe(&config, text, sizeof text) == strlen(play) && !strcmp(text, play));
     printf("[pc-vr] configuration: %s\n", text);
     test_pc_vr_parse((const char *const[]){"vr", "1", "vr_menu_distance", "30", "vr_headset_pace", "0",
-        "vr_game_units_per_meter", "x", "SAVAGEWIND_PC_VR_EYE_SIZE", "2064x2208",
-        "SAVAGEWIND_PC_VR_WORLD_HUD_ROLL", "90", "SAVAGEWIND_PC_VR_RUNE_AIM", "flip", NULL}, &config);
+        "vr_game_units_per_meter", "x", "SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "1", NULL}, &config);
     pc_vr_config_describe(&config, text, sizeof text);
     CHECK(strstr(text, " vr_menu_distance=0.77 ") && strstr(text, " vr_headset_pace=0 "));
-    CHECK(strstr(text, "; head pose every game present; diagnostics: EYE_SIZE=2064x2208 WORLD_HUD_ROLL=90 "
-                       "RUNE_AIM=flip; ignored: vr_game_units_per_meter vr_menu_distance"));
-    test_pc_vr_parse((const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_PERF", "1", "SAVAGEWIND_PC_VR_OFFER_TRACE", "1", "SAVAGEWIND_PC_VR_SHOT", "5498",
+    CHECK(strstr(text, "; head pose every game present; diagnostics: QUICK_MENU_SHOTS; ignored: "
+                       "vr_game_units_per_meter vr_menu_distance"));
+    test_pc_vr_parse((const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_PERF", "1", "SAVAGEWIND_PC_VR_SHOT", "5498",
         "SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "1", "SAVAGEWIND_PC_VR_BENCH_HEAD", "x", "SAVAGEWIND_LOG_PANES", "1",
-        "SAVAGEWIND_PC_VR_WORLD_HUD_ROLL", "0", NULL}, &config);
+        "SAVAGEWIND_LOG_SCREENS", "1", NULL}, &config);
     pc_vr_config_describe(&config, text, sizeof text);
-    CHECK(strstr(text, "; diagnostics: PERF OFFER_TRACE SHOT=5498 "
-        "QUICK_MENU_SHOTS BENCH_HEAD=invalid LOG_PANES WORLD_HUD_ROLL=0; ignored: none"));
+    CHECK(strstr(text, "; diagnostics: PERF SHOT=5498 QUICK_MENU_SHOTS BENCH_HEAD=invalid LOG_PANES LOG_SCREENS; "
+        "ignored: none"));
     // (cut off: the length it needed, and a terminated text)
     char short_text[16];
     memset(short_text, 'x', sizeof short_text);
@@ -437,33 +372,31 @@ static void test_describe(void) {
 static void test_eye_size(void) {
     set_env("SAVAGEWIND_SCALE", "2");  // (upstream's final-image scale, read once by output_scale.c: the exact size wins)
     set_env("SAVAGEWIND_WIDE_TEST", "");
+    mock_view_width = 1824, mock_view_height = 1968;
     const struct { const char *name; const char *const *settings; bool enabled, exact; } modes[] = {
-        {"eye-size", (const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_EYE_SIZE", "2064x2208", NULL},
-         true, true},
-        {"eye-size-default", (const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_EYE_SIZE", "", NULL},
-         true, false},
-        {"eye-size-off", (const char *const[]){"vr", "0", "SAVAGEWIND_PC_VR_EYE_SIZE", "2064x2208", NULL},
-         false, false},
+        {"eye-scale", (const char *const[]){"vr", "1", "vr_eye_scale", "3", NULL}, true, true},
+        {"eye-scale-1", (const char *const[]){"vr", "1", "vr_eye_scale", "1", NULL}, true, false},
+        {"eye-scale-off", (const char *const[]){"vr", "0", "vr_eye_scale", "3", NULL}, false, false},
     };
     for (unsigned mode = 0; mode < sizeof modes / sizeof modes[0]; ++mode) {
         test_pc_vr_configure(modes[mode].settings);
         const bool exact = modes[mode].exact, enabled = modes[mode].enabled;
         unsigned width = 42, height = 42;
         CHECK(pc_vr_eye_size(&width, &height) == exact);
-        CHECK(width == (exact ? 2064u : 0u) && height == (exact ? 2208u : 0u));
+        CHECK(width == (exact ? 2451u : 0u) && height == (exact ? 2644u : 0u));
         OutScale out;
         output_scale(3840, 2400, true, &out);
         // (desktop: upstream widens or narrows the views to the window's shape, here 16:10; PC VR keeps 16:9)
-        CHECK(lround(1920 * out.sx) == (exact ? 4128 : enabled ? 3840 : 3456));
-        CHECK(lround(1080 * out.sy) == (exact ? 2208 : 2160));
+        CHECK(lround(1920 * out.sx) == (exact ? 4902 : enabled ? 3840 : 3456));
+        CHECK(lround(1080 * out.sy) == (exact ? 2644 : 2160));
         if (exact) {
             // Production texture allocation uses float scales and lroundf. The 800x900 eye targets and the
             // 960x1080 halves of the final image must land on identical pixels: the eye's finished scene is placed
             // in its half 1:1. (Only at full size: their fractions are unrelated targets.)
             CHECK(lroundf(800.0f * ((float)width / 800)) == lroundf(960.0f * (float)out.sx));
             CHECK(lroundf(900.0f * ((float)height / 900)) == lroundf(1080.0f * (float)out.sy));
-            CHECK(lround(1600 * out.scene_sx) == 4128 && lround(900 * out.scene_sy) == 2208);
-            CHECK(fabs(out.vw / out.vh - 4128.0 / 2208.0) < 1e-12);
+            CHECK(lround(1600 * out.scene_sx) == 4902 && lround(900 * out.scene_sy) == 2644);
+            CHECK(fabs(out.vw / out.vh - 4902.0 / 2644.0) < 1e-12);
             CHECK(out.shape == 1 && g_view_shape == 1 && g_fov == 1); // raster size cannot widen native camera FOV
             CHECK(out.crop[0] == 0 && out.crop[1] == 0 && out.crop[2] == 1 && out.crop[3] == 1);
             CHECK(!output_ui_needs_centering((float)out.sx, (float)out.sy, pc_vr_enabled()));
@@ -471,17 +404,7 @@ static void test_eye_size(void) {
             CHECK(!output_ui_needs_centering(2, 2, false));
         }
     }
-    const char *bad[] = {NULL, "", "0x2208", "2064x0", "2064", "2064x", "x2208", "2064X2208",
-        "2064x2208 ", " 2064x2208", "+2064x2208", "02064x2208", "2064x2208junk", "2064x2208x16",
-        "112x2208", "4112x2208", "999999999999999999999x2208"};
-    unsigned width, height;
-    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
-        width = height = 42;
-        CHECK(!pc_vr_parse_eye_size(bad[i], &width, &height) && width == 0 && height == 0);
-    }
-    CHECK(pc_vr_parse_eye_size("128x128", &width, &height) && width == 128 && height == 128);
-    CHECK(pc_vr_parse_eye_size("4096x4096", &width, &height) && width == 4096 && height == 4096);
-    CHECK(pc_vr_parse_eye_size("2451x2644", &width, &height) && width == 2451 && height == 2644);
+    mock_view_width = mock_view_height = 0;
 }
 
 // The eye size from an eye scale in the OpenXR runtime's view shape: the scale's pixels of 800x900, whole pixels.
@@ -496,16 +419,13 @@ static void test_eye_size_from_view(void) {
     CHECK(pc_vr_eye_size_for_view(5.0, 100, 4000, &width, &height) && width == 671 && height == 4096);
     CHECK(!pc_vr_eye_size_for_view(1.0, 1824, 1968, &width, &height) && !width && !height);
     CHECK(!pc_vr_eye_size_for_view(3.0, 0, 1968, &width, &height) && !width && !height);
-    // Through pc_vr.c: only in PC VR, only once the runtime is discovered; an explicit EYE_SIZE wins.
+    // Through pc_vr.c: only in PC VR, only once the runtime is discovered.
     const char *const scaled[] = {"vr", "1", "vr_eye_scale", "3", NULL};
     test_pc_vr_configure(scaled);
     mock_view_width = mock_view_height = 0;
     CHECK(!pc_vr_eye_size(&width, &height));
     mock_view_width = 1824, mock_view_height = 1968;
     CHECK(pc_vr_eye_size(&width, &height) && width == 2451 && height == 2644);
-    test_pc_vr_configure((const char *const[]){"vr", "1", "vr_eye_scale", "3",
-                                               "SAVAGEWIND_PC_VR_EYE_SIZE", "2064x2208", NULL});
-    CHECK(pc_vr_eye_size(&width, &height) && width == 2064 && height == 2208);
     test_pc_vr_configure((const char *const[]){"vr", "0", "vr_eye_scale", "3", NULL});
     CHECK(!pc_vr_eye_size(&width, &height));
     test_pc_vr_configure((const char *const[]){"vr", "1", "vr_eye_scale", "1", NULL});
@@ -569,22 +489,17 @@ static void test_panels_off(void) {
 static int environment_test(void) {
     CHECK(pc_vr_settings_take("vr", "1") && pc_vr_settings_take("vr_game_units_per_meter", "20"));
     set_env("vr_eye_scale", "3");  // (not a launch option)
-    set_env("SAVAGEWIND_PC_VR_EYE_SIZE", "2064x2208");
-    set_env("SAVAGEWIND_PC_VR_UI_PARALLAX", "1");
+    set_env("SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "1");
     set_env("SAVAGEWIND_LOG_PANES", "1");
-    CHECK(!pc_vr_settings_take("SAVAGEWIND_PC_VR_HUD_BACKDROP", "1"));  // (not a setting)
+    CHECK(!pc_vr_settings_take("SAVAGEWIND_PC_VR_PERF", "1"));  // (not a setting)
     const PcVrConfig *config = pc_vr_config();  // (logs its "[pc-vr] configuration:" line)
-    CHECK(config->enabled && pc_vr_enabled() && config->diagnostics.ui_parallax && !config->diagnostics.hud_backdrop);
+    CHECK(config->enabled && pc_vr_enabled() && config->diagnostics.quick_menu_shots && !config->diagnostics.perf);
     CHECK(config->settings.native_view_units_per_meter == 20 && config->diagnostics.log_panes);
     CHECK(config->settings.eye_scale == 2.5);
-    unsigned width, height;
-    CHECK(pc_vr_eye_size(&width, &height) && width == 2064 && height == 2208);
     CHECK(pc_vr_settings_take("vr", "0") && pc_vr_settings_take("vr_game_units_per_meter", "30"));
-    set_env("SAVAGEWIND_PC_VR_EYE_SIZE", "1920x2160");
-    set_env("SAVAGEWIND_PC_VR_UI_PARALLAX", "0");
-    CHECK(pc_vr_config() == config && pc_vr_enabled() && config->diagnostics.ui_parallax);
+    set_env("SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "0");
+    CHECK(pc_vr_config() == config && pc_vr_enabled() && config->diagnostics.quick_menu_shots);
     CHECK(config->settings.native_view_units_per_meter == 20);
-    CHECK(pc_vr_eye_size(&width, &height) && width == 2064 && height == 2208);
     printf("PC VR configuration, its one read: %u checks passed (constant after)\n", checks);
     return 0;
 }

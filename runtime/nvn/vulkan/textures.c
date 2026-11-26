@@ -2610,26 +2610,9 @@ static VkCompareOp compare_op(uint32_t f) {
 // they put stepped light outlines along edges (around Link's bow and quiver most) - and the blended draws:
 // particles, effects, decals, whose quads' square edges the wider footprint brought out (floating dust as small
 // squares). Both the worse the higher the setting.
-// [pc-vr-audit] (docs/vr-resolution-audit.md; off unless set): SAVAGEWIND_AUDIT_ANISO=<2|4|8|16>@<first>-<last> acts
-// as that Video > Anisotropic filtering setting in those presents only (a same-view A/B in one run).
-static int audit_aniso(int setting) {
-    static int read, level;
-    static unsigned long long first, last;
-    if (!read) {
-        read = 1;
-        const char *setting = getenv("SAVAGEWIND_AUDIT_ANISO");
-        unsigned anisotropy = 0;
-        if (setting && sscanf(setting, "%u@%llu-%llu", &anisotropy, &first, &last) == 3)
-            level = anisotropy >= 16 ? 4 : anisotropy >= 8 ? 3 : anisotropy >= 4 ? 2 : anisotropy >= 2 ? 1 : 0;
-        if (setting) LOG("[pc-vr-audit] anisotropy %ux in presents %llu-%llu (diagnostic)\n", anisotropy, first, last);
-    }
-    const uint64_t present = renderer_present_count() + 1;
-    return level && present >= first && present <= last ? level : setting;
-}
-
 static float sampler_aniso(const NvnSamplerDesc *d, bool aniso_ok) {
     float game = d->max_aniso > 1 ? fminf(d->max_aniso, 16) : 1;
-    int a = audit_aniso(g_settings.anisotropy);
+    int a = g_settings.anisotropy;
     if (a <= 0 || a > 4 || !g_vk.feat_aniso || !aniso_ok) return game;
     if (d->compare_mode || d->mag_filter != 1 || (d->min_filter != 3 && d->min_filter != 5)) return game;
     if (d->lod_max - d->lod_min < 0.5f) return game;

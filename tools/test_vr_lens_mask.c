@@ -30,7 +30,7 @@ bool pc_vr_render_trace_resolve(uint64_t id, PcVrRenderCertificate *out) {
     return true;
 }
 const XrMaskArea *xr_runtime_mask_area(unsigned eye, bool hidden) { return eye < 2 ? areas[hidden][eye] : NULL; }
-static PcVrConfig configuration;  // (the diagnostics' no_headset_mask, set by a check)
+static PcVrConfig configuration;
 const PcVrConfig *pc_vr_config(void) { return &configuration; }
 
 static bool near(float value, float expected) { return fabsf(value - expected) < 1e-5f; }
@@ -150,24 +150,6 @@ static void test_draw(void) {
     VrLensDraw depth_about_axis;
     CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS_HIDDEN, DEPTH, 48, 7, stride, true, &depth_about_axis) &&
           depth_about_axis.vertex_address == depth.vertex_address);
-    // SAVAGEWIND_PC_VR_NO_HEADSET_MASK=1: the screen quad covers the whole image, the depth mask nothing.
-    configuration.diagnostics.no_headset_mask = true;
-    VrLensDraw off;
-    // (about the view axis: the whole view's rectangle in that layout, at the eye's FOV)
-    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_EYE, LENS, 48, 7, stride, true, &off) && off.index_count == 6 &&
-          off.vertex_address != rectangle && off.vertex_size == 4 * sizeof(VrLensVertex));
-    const VrLensVertex *axis_rectangle = (const VrLensVertex *)(uintptr_t)off.vertex_address;
-    CHECK(near(axis_rectangle[0].position[0], fov[0] / (fov[1] - fov[0])) &&
-          near(axis_rectangle[0].position[1], fov[2] / (fov[2] - fov[3])));
-    CHECK(near(axis_rectangle[3].position[0], fov[1] / (fov[1] - fov[0])) &&
-          near(axis_rectangle[3].position[1], fov[3] / (fov[2] - fov[3])));
-    CHECK(near(axis_rectangle[0].texture[0], 0) && near(axis_rectangle[0].texture[1], 0) &&
-          near(axis_rectangle[3].texture[0], 1) && near(axis_rectangle[3].texture[1], 1));
-    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS | PC_VR_LAYER_DRAW_EYE, LENS, 48, 7, stride, false, &off) &&
-          off.vertex_address == rectangle);
-    CHECK(vr_lens_draw(PC_VR_LAYER_DRAW_LENS_HIDDEN | PC_VR_LAYER_DRAW_EYE, DEPTH, 48, 7, stride, false, &off) &&
-          off.index_count == 3 && off.indices[0] == 0 && off.indices[2] == 0);
-    configuration.diagnostics.no_headset_mask = false;
     // Untagged draws of the same geometries (another call drawing the lens polygon or the depth mask): treated the
     // same; another buffer, or the same buffer with another count, is not one of them.
     VrLensDraw untagged;

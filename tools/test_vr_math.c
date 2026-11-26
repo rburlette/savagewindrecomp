@@ -9,8 +9,7 @@
 // as they were. vr_letterbox (the window mirror's placement of the left eye) is checked at the scale of 1, a wider and
 // a taller window, a larger final image, a tiny window and the cases with nothing to copy. vr_aim_ray_hit (where the
 // aim ray meets the scene): a hit between two points, at the first and at the last, misses, stored depths out of range
-// or not numbers, a z behind the eye, terms with no z, both depth modes; and on 1,000,000 random samplings the same bits
-// and step as the search it replaced (vr_aim.c at ca3cd86), written as it was. No renderer, GPU or headset is involved.
+// or not numbers, a z behind the eye, terms with no z, both depth modes. No renderer, GPU or headset is involved.
 #include "../runtime/nvn/vulkan/vr_math.h"
 
 #include <math.h>
@@ -217,35 +216,6 @@ typedef struct {
     float stored_depth[AIM_POINTS];  // (what the GPU copied: the read's `depth`)
 } AimSample;
 
-// The hit search of vr_aim_read as it was at ca3cd86 (vr_aim.c), with vr_aim.samples[k] as `sample`.
-static double aim_hit_before(const AimSample *sample, unsigned *hit_step_out) {
-    const float *depth = sample->stored_depth;
-    const unsigned steps = sample->steps;
-    double hit = 0;     // the distance along the ray where it meets the scene (0: not yet)
-    double before = 0;  // how far in front of the scene the previous point was
-    unsigned hit_step = 0;    // the point at the hit (for the log)
-    for (unsigned i = 0; i < steps && !hit; ++i) {
-        const double stored = depth[i];
-        const double point_depth = sample->eye_depth[i],
-                     along = sample->ray_distance[i];
-        const double device_depth = sample->gl_depth_range ? 2 * stored - 1 : stored;
-        const float *terms = sample->depth_terms;
-        // (the view-space z, negative ahead, from device_depth = (terms[0] z + terms[1]) / (terms[2] z + terms[3]))
-        const double denominator = device_depth * terms[2] - terms[0];
-        const double view = denominator ? (terms[1] - device_depth * terms[3]) / denominator : 0;
-        const double scene = stored > 0 && stored < 1 && view < 0 ? -view : 1e30;
-        if (point_depth < scene) {
-            before = scene - point_depth;
-            continue;
-        }
-        const double past = point_depth - scene, previous = i ? sample->ray_distance[i - 1] : 0;
-        hit = i && before + past > 0 ? previous + (along - previous) * before / (before + past) : along;
-        hit_step = i;
-    }
-    *hit_step_out = hit_step;
-    return hit;
-}
-
 static double aim_hit_now(const AimSample *sample, unsigned *hit_step) {
     return vr_aim_ray_hit(sample->stored_depth, sample->ray_distance, sample->eye_depth, sample->steps,
                           sample->depth_terms, sample->gl_depth_range, hit_step);
@@ -263,55 +233,6 @@ static AimSample aim_sample(unsigned steps, const double *along, const float *st
     }
     memcpy(sample.depth_terms, terms, sizeof sample.depth_terms);
     return sample;
-}
-
-// A random sampling: a projection's depth terms for the mode (0..1, or OpenGL's -1..1), a ray of increasing points,
-// and the scene's depths at them: mostly a real surface somewhere along the ray, sometimes cleared, far, behind or not
-// a number, and now and then terms or point depths that are not usable.
-static void random_aim_sample(AimSample *sample) {
-    memset(sample, 0, sizeof *sample);
-    sample->steps = (unsigned)random_between(0, AIM_POINTS + 1);
-    sample->gl_depth_range = random_between(0, 1) < 0.5;
-    const double near = random_between(0.05, 2), far = random_between(500, 20000);
-    double terms[4];
-    if (sample->gl_depth_range) {
-        terms[0] = (far + near) / (near - far);
-        terms[1] = 2 * far * near / (near - far);
-    } else {
-        terms[0] = far / (near - far);
-        terms[1] = near * far / (near - far);
-    }
-    terms[2] = -1;
-    terms[3] = 0;
-    const double terms_kind = random_between(0, 1);
-    for (unsigned j = 0; j < 4; ++j) {
-        if (terms_kind < 0.02) terms[j] = random_between(-3, 3);  // (arbitrary terms)
-        sample->depth_terms[j] = (float)terms[j];
-    }
-    if (terms_kind >= 0.02 && terms_kind < 0.025) sample->depth_terms[(unsigned)random_between(0, 4)] = NAN;
-    if (terms_kind >= 0.025 && terms_kind < 0.03) sample->depth_terms[(unsigned)random_between(0, 4)] = INFINITY;
-    const double surface = 0.3 * pow(20000, random_between(0, 1));  // (the scene's depth along most of the ray)
-    double along = random_between(0.2, 0.3);
-    for (unsigned i = 0; i < AIM_POINTS; ++i) {
-        along *= random_between(1.0, 1.4);
-        sample->ray_distance[i] = along;
-        sample->eye_depth[i] = along * random_between(0.7, 1.0);  // (the ray at an angle to the eye's view)
-        const double scene = random_between(0, 1) < 0.8 ? surface : 0.3 * pow(20000, random_between(0, 1));
-        double device = (terms[0] * -scene + terms[1]) / (terms[2] * -scene + terms[3]);
-        double stored = sample->gl_depth_range ? (device + 1) / 2 : device;
-        const double stored_kind = random_between(0, 1);
-        if (stored_kind < 0.03) stored = 0;
-        else if (stored_kind < 0.06) stored = 1;
-        else if (stored_kind < 0.07) stored = NAN;
-        else if (stored_kind < 0.08) stored = INFINITY;
-        else if (stored_kind < 0.09) stored = -random_between(0, 1);
-        else if (stored_kind < 0.10) stored = 1 + random_between(0, 1);
-        else if (stored_kind < 0.12) stored = random_between(0, 1);
-        sample->stored_depth[i] = (float)stored;
-        const double point_kind = random_between(0, 1);
-        if (point_kind < 0.003) sample->eye_depth[i] = NAN;
-        else if (point_kind < 0.006) sample->eye_depth[i] = -INFINITY;
-    }
 }
 
 // DLAA per eye (vr_dlaa_camera, vr_dlaa_cut, vr_dlaa_jitter_pixels): the camera from a certificate's view and device
@@ -660,27 +581,6 @@ int main(void) {
         sample = aim_sample(2, low_along, low_stored, one_over, true);
         CHECK(aim_hit_now(&sample, &hit_step) == 0);
     }
-    // Against the search as it was, on random samplings in both modes: the same bits for the distance and the same
-    // step, misses, NaNs and all.
-    unsigned aim_cases = 0, aim_disagreements = 0, aim_hits = 0, aim_misses = 0, aim_not_numbers = 0, aim_modes[2] = {0};
-    for (unsigned trial = 0; trial < 1000000; ++trial) {
-        AimSample sample;
-        random_aim_sample(&sample);
-        unsigned step_before = 99, step_now = 77;
-        const double hit_before = aim_hit_before(&sample, &step_before), hit_now = aim_hit_now(&sample, &step_now);
-        ++aim_cases;
-        ++aim_modes[sample.gl_depth_range];
-        aim_disagreements += !same_bits(&hit_before, &hit_now, 1) || step_before != step_now;
-        aim_hits += hit_before > 0;
-        aim_misses += hit_before == 0;
-        aim_not_numbers += isnan(hit_before) != 0;
-    }
-    CHECK(aim_disagreements == 0);
-    // (the random cases reach hits, misses and NaNs, in both modes)
-    CHECK(aim_hits > 100000 && aim_misses > 100000 && aim_not_numbers > 0 && aim_modes[0] > 100000 &&
-          aim_modes[1] > 100000);
-    printf("vr_math aim hit: %u samplings, %u disagreements (hits %u, misses %u, NaN %u; modes 0..1 %u, OpenGL %u)\n",
-           aim_cases, aim_disagreements, aim_hits, aim_misses, aim_not_numbers, aim_modes[0], aim_modes[1]);
 
     test_dlaa_camera();
     printf("vr_math fixture: %u checks, %u failures\n", checks, failures);

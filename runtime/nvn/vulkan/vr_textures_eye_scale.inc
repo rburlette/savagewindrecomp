@@ -16,8 +16,8 @@ static bool eye_scale_from_size(void) {
     if (scale_x == g_rs[RS_EYE][0] && scale_y == g_rs[RS_EYE][1]) return true;
     g_rs[RS_EYE][0] = scale_x;
     g_rs[RS_EYE][1] = scale_y;
-    LOG("[pc-vr-eye-size] exact eye renders %ux%u (%s); final halves match, poses/FOV unchanged\n", width, height,
-        pc_vr_config()->diagnostics.eye_width ? "SAVAGEWIND_PC_VR_EYE_SIZE" : "the eye scale's pixels in the runtime's view shape");
+    LOG("[pc-vr-eye-size] exact eye renders %ux%u (the eye scale's pixels in the runtime's view shape); final halves "
+        "match, poses/FOV unchanged\n", width, height);
     if (ratio > 1)
         LOG("[pc-vr-eye-size] eyes rendered %.4g times smaller (%ldx%ld), DLSS bringing them up to %ux%u\n", ratio,
             lround(width / ratio), lround(height / ratio), width, height);

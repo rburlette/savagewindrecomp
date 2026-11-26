@@ -66,7 +66,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL mock_vk_create(VkPhysicalDevice physical,
 static VKAPI_ATTR VkResult VKAPI_CALL mock_vk_instance(const VkInstanceCreateInfo *info,
         const VkAllocationCallbacks *allocator, VkInstance *instance) {
     (void)allocator;
-    CHECK(info->pApplicationInfo->apiVersion == VK_API_VERSION_1_3);
+    CHECK(info->pApplicationInfo->apiVersion == requested_vulkan_api);  // (the game's request, kept)
     *instance = (VkInstance)(uintptr_t)1;
     return VK_SUCCESS;
 }
@@ -631,6 +631,12 @@ static void test_guard(void) {
     app.apiVersion = VK_API_VERSION_1_3;
     CHECK(create_instance(&instance_info, NULL, &instance) == VK_SUCCESS);
     CHECK(instance != VK_NULL_HANDLE && successful_instance_creates == 1);
+    // The game's own Vulkan 1.2 (SAVAGEWIND_VK_API12, 1.3's commands through extensions): a 1.2 instance is its request.
+    requested_vulkan_api = VK_API_VERSION_1_2;
+    app.apiVersion = VK_API_VERSION_1_2;
+    instance = VK_NULL_HANDLE;
+    CHECK(create_instance(&instance_info, NULL, &instance) == VK_SUCCESS);
+    CHECK(instance != VK_NULL_HANDLE && successful_instance_creates == 2);
 }
 
 static void test_owner(void) {

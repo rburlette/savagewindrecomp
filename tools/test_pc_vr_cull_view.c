@@ -190,14 +190,11 @@ static void test_refusals(void) {
     memcpy(broken, eyes, sizeof broken);
     for (unsigned i = 0; i < 3; ++i) broken[0].up[i] = (float)head.forward[i];
     CHECK(!pc_vr_cull_view_build(broken, link_fov, &view) && !memcmp(&view, &untouched, sizeof view));
-    // A field of view that is not a frustum, or not finite, or 89 degrees and more.
+    // A field of view that is not a frustum, or 89 degrees and more.
     float bad_fov[2][4];
     memcpy(bad_fov, link_fov, sizeof bad_fov);
     bad_fov[0][0] = 0.8f;
     CHECK(!pc_vr_cull_view_build(eyes, bad_fov, &view) && !memcmp(&view, &untouched, sizeof view));
-    memcpy(bad_fov, link_fov, sizeof bad_fov);
-    bad_fov[1][2] = NAN;
-    CHECK(!pc_vr_cull_view_build(eyes, bad_fov, &view));
     memcpy(bad_fov, link_fov, sizeof bad_fov);
     bad_fov[1][1] = 1.56f;
     CHECK(!pc_vr_cull_view_build(eyes, bad_fov, &view));

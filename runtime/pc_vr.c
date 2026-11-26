@@ -60,7 +60,7 @@ void pc_vr_eye_shot_request(void) {
 
 // The eye shot's keyboard key, Right Ctrl, read from the keyboard's own state and not from the window's events: in
 // the headset the game's desktop window often lacks the focus, and Windows keeps an Xbox controller's Share button
-// for its own screenshots. A press also marks the late-frame trace, as the capture button does.
+// for its own screenshots.
 #ifdef _WIN32
 __declspec(dllimport) short __stdcall GetAsyncKeyState(int virtual_key);  // (user32; windows.h is not wanted here)
 #endif
@@ -70,10 +70,7 @@ void pc_vr_eye_shot_key_poll(void) {
     if (!pc_vr_enabled()) return;
     static bool was_down;  // (the input thread alone)
     const bool down = (GetAsyncKeyState(VIRTUAL_KEY_RIGHT_CONTROL) & 0x8000) != 0;
-    if (down && !was_down) {
-        pc_vr_frame_trace_user_mark();
-        pc_vr_eye_shot_request();
-    }
+    if (down && !was_down) pc_vr_eye_shot_request();
     was_down = down;
 #endif
 }
@@ -86,14 +83,11 @@ void pc_vr_eye_scale_override(double scale) {
     atomic_store_explicit(&eye_scale_override, scale > 1 ? scale : 0, memory_order_relaxed);
 }
 
-// EYE_SIZE when given; else, in PC VR with an eye scale (a DLAA mode's in place of the configuration's while one is
-// set), that scale's pixels in the OpenXR runtime's view shape (pc_vr_eye_size_for_view), known from discovery on,
+// In PC VR, the eye scale's (a DLAA mode's in place of the configuration's while one is set) pixels in the OpenXR runtime's view shape (pc_vr_eye_size_for_view), known from discovery on,
 // which comes before the Vulkan device and any render target.
 bool pc_vr_eye_size(unsigned *width, unsigned *height) {
+    *width = *height = 0;
     const PcVrConfig *config = pc_vr_config();
-    *width = config->diagnostics.eye_width;
-    *height = config->diagnostics.eye_height;
-    if (config->diagnostics.eye_width) return true;
     const double override = atomic_load_explicit(&eye_scale_override, memory_order_relaxed);
     unsigned view_width, view_height;
     return config->enabled && xr_runtime_recommended_eye_size(&view_width, &view_height) &&

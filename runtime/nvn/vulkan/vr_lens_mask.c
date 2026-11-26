@@ -143,10 +143,10 @@ bool vr_lens_draw(uint32_t layer_draw, uint64_t index_address, uint64_t index_co
     const VrLensVertex *axis_rectangle = NULL;
     PcVrRenderCertificate certificate;
     about_axis = about_axis && !hidden;
-    if (certificate_id && pc_vr_render_trace_resolve(certificate_id, &certificate) && certificate.native_index < 2) {
+    if (certificate_id && pc_vr_render_trace_resolve(certificate_id, &certificate)) {
         const unsigned eye = certificate.native_index;
         // (SAVAGEWIND_PC_VR_NO_HEADSET_MASK=1: neither takes the headset's shape, for an A/B run against the mask)
-        const XrMaskArea *area = pc_vr_config()->diagnostics.no_headset_mask ? NULL : xr_runtime_mask_area(eye, hidden);
+        const XrMaskArea *area = xr_runtime_mask_area(eye, hidden);
         const float *angles = certificate.native_snapshot.eyes[eye].fov_left_right_up_down;
         const float fov_tangents[4] = {tanf(angles[0]), tanf(angles[1]), tanf(angles[2]), tanf(angles[3])};
         if (area) mesh = lens_mesh(hidden, eye, about_axis, area, fov_tangents);

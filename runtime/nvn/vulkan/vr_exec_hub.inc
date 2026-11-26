@@ -90,7 +90,7 @@ static uint32_t vr_draw_marker;
 static PcVrPaneRole vr_draw_role;
 // The draw's own render certificate (0: none): the eye layer it was recorded in, with that frame's pose.
 static uint64_t vr_draw_certificate;
-static PcVrRuneAim vr_draw_rune_aim;  // Rune-aim mode for this draw, off for draws outside the game's rune target test.
+static bool vr_draw_rune_test;  // This draw is the game's rune target test (its position moved onto the aim ray).
 // [pc-vr-audit] SAVAGEWIND_LOG_PANES: the number of the UI pane that recorded the draw (0: none, or logging off).
 static uint32_t vr_draw_pane;
 
@@ -262,7 +262,7 @@ static bool vr_backdrop_source(const NvnTexture *texture) { return texture && (t
 static bool vr_backdrop_pictures_black, vr_backdrop_erase;
 static VrBackdropFate vr_hud_backdrop_fate(Prog *program) {
     const VrBackdropFate fate = vr_backdrop_fate_of_role(vr_draw_role);
-    if (pc_vr_config()->diagnostics.hud_backdrop || !fate) return VR_BACKDROP_NONE;
+    if (!fate) return VR_BACKDROP_NONE;
     for (int i = 0; i < program->fi->ntex; i++)
         if (vr_backdrop_source(shader_texture_object(1, &program->fi->tex[i]))) return fate;
     return VR_BACKDROP_NONE;
@@ -366,7 +366,7 @@ static void vr_after_draw(Prog *program, const CmdRec *command) {
             (unsigned long long)eye_finals, (unsigned long long)eye_placements);
     PcVrRenderCertificate certificate;
     const bool certified = (eye_final || eye_placement) && vr_draw_certificate &&
-        pc_vr_render_trace_resolve(vr_draw_certificate, &certificate) && certificate.native_index < 2;
+        pc_vr_render_trace_resolve(vr_draw_certificate, &certificate);
     // ---- job 1: an eye's scene-final draw
     if (eye_final) {
         vr_eyes.frame.scene_seen = true;
@@ -512,8 +512,7 @@ static bool vr_world_hud_patch(uint64_t address, uint64_t size, VkDescriptorBuff
 // sets up vr_world_hud's move so the draw goes into its eye's half instead (vr_hud_marker_move: _patch, _scissor,
 // _rscale), and returns true.
 static bool vr_world_hud_draw(void) {
-    const PcVrConfig *config = pc_vr_config();
-    if (!config->diagnostics.world_hud || !st.rt.color[0]) return false;
+    if (!st.rt.color[0]) return false;
     // D088: where the draw goes. Exactly: the game stored a reported point into its pane, or one of its parents
     // (vr_draw_marker, the binding: the helper's markers, the speech balloons), or its pane belongs to an aiming
     // reticle (vr_draw_role). A piece at the game's own fixed HUD place (PC_VR_MARKER_FLAT) and everything else stay
@@ -572,8 +571,7 @@ static bool vr_world_hud_draw(void) {
     const double focus = pc_vr_camera_focus_distance();
     // Project the marker's panes, or the reticle and its count on the aim ray, as one card for both eyes.
     VrHudMarkerPlacement placed;
-    vr_hud_marker_move(&seen, marker, viewport, labo_offset, tan_per_pixel, focus, config->diagnostics.world_hud_upright,
-                       config->diagnostics.world_hud_test_turn, &vr_world_hud.move, &placed);
+    vr_hud_marker_move(&seen, marker, viewport, labo_offset, tan_per_pixel, focus, &vr_world_hud.move, &placed);
     ++vr_world_hud.draws;
     ++vr_world_hud.frame_draws;
     return true;

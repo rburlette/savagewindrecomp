@@ -246,13 +246,6 @@ bool pc_vr_projection_trace_root(uint64_t frame) {
     return projection_saved_frame(frame, saved) && saved[1] == PROJ_ROOT_RETURN;
 }
 
-// A pose with native views: what the eyes are rendered with and xrEndFrame is given. Its flags, not its values (D116:
-// OpenXR's poses and FOVs are used as given), nor its age (D101: the frame keeps the pose head look took).
-static bool projection_native_pose(const XrPoseSnapshot *pose) {
-    return pose->active && pose->orientation_valid && pose->orientation_tracked && pose->views_valid &&
-        pose->native_views_valid && pose->frame_id && pose->generation && pose->calibration.epoch;
-}
-
 bool pc_vr_render_trace_enabled(void) {
     return atomic_load_explicit(&render_enabled, memory_order_relaxed);
 }
@@ -539,15 +532,16 @@ bool pc_vr_projection_trace_eye(uint64_t layer, uint64_t base, const PcVrHeadLoo
     bool counted = true;  // (a sibling of a root already refused is not counted again)
     if (!framed || (!root && saved[1] != PROJ_SIBLING_RETURN)) {
         record->open = false;
-        refused = PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE;
+        refused = PC_VR_GUARD_TRAVERSAL;
     } else if (root) {
         // A new frame: the record starts afresh (an open earlier root is abandoned).
         record->open = false;
         record->serial = ++projection_root_serial;
         if (!readable || !projection_config_address(config) || sibling == layer || (sibling & 7) ||
-            sibling < GUEST_LO || sibling > GUEST_HI - 0x448) refused = PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY;
+            sibling < GUEST_LO || sibling > GUEST_HI - 0x448) refused = PC_VR_GUARD_TRAVERSAL;
         else if (!fresh) refused = PC_VR_GUARD_VIEW_NOT_FRESH;
-        else if (!pose || !projection_native_pose(pose)) refused = PC_VR_GUARD_VIEW_NO_POSE;
+        // (head look's pose: its flags checked there, D116; the last usable one held, D101)
+        else if (!pose) refused = PC_VR_GUARD_VIEW_NO_POSE;
         else {
             // (the D053 calibration of this LOCAL definition: the heading and origin the views are relative to)
             PcVrNativeViewReference reference = {.generation = pose->calibration.epoch};
@@ -592,23 +586,24 @@ bool pc_vr_projection_trace_eye(uint64_t layer, uint64_t base, const PcVrHeadLoo
             projection_sibling_call(saved, record->frame_pointer, record->thread) &&
             !memcmp(base_camera, &record->base_camera, sizeof *base_camera) &&
             projection_live_link(record->root_layer, record->frame_pointer, layer, config);
-        if (!linked) refused = PC_VR_GUARD_TRAVERSAL_NOT_SIBLING;
+        if (!linked) refused = PC_VR_GUARD_TRAVERSAL;
         else if (!fresh) refused = PC_VR_GUARD_VIEW_NOT_FRESH;
         record->open = false;
     }
-    // Which runtime eye this layer's camera is: the game's copy sits to one side of the base camera along its right,
-    // the root's to the other; the runtime's view 0 is the left eye (PRIMARY_STEREO, used as given: D116).
+    // Which runtime eye this layer's camera is: the game's copy (fresh: head look's test that it is the base camera
+    // moved) sits to one side of the base camera along its right, the root's to the other; the runtime's view 0 is the
+    // left eye (PRIMARY_STEREO, used as given: D116).
     PcVrProjectionEyeBasis basis = {0};
     if (refused == PC_VR_GUARD_COUNT &&
         (!pc_vr_projection_eye_basis(&record->base_camera, &eye_camera, right, &basis) || !basis.right_matches ||
-         !basis.parallel_eye || !basis.lateral_eye || !basis.offset_sign ||
+         !basis.lateral_eye || !basis.offset_sign ||
          (!root && basis.offset_sign != -record->root_offset_sign))) refused = PC_VR_GUARD_VIEW_PLACEMENT;
     const unsigned native_index = basis.offset_sign < 0 ? 0 : 1;
     // One write (D115 step 5c), not read back: labo_guest_copy refuses a page that is not writable before it copies,
     // and the eye layer is the game's heap object. A refused write leaves the eye without a certificate this frame.
     if (refused == PC_VR_GUARD_COUNT &&
         !labo_guest_copy(layer + 0x260, &record->pair.eyes[native_index], sizeof(PcVrHeadLookCamera), true))
-        refused = PC_VR_GUARD_VIEW_WRITE_FAILED;
+        refused = PC_VR_GUARD_WRITE_FAILED;
     if (refused == PC_VR_GUARD_COUNT && root) record->root_offset_sign = basis.offset_sign;
     if (refused != PC_VR_GUARD_COUNT) {
         if (root) record->open = false;
@@ -718,7 +713,7 @@ static bool projection_write_native_fov(uint64_t object) {
     else {
         pc_vr_projection_offset_centre(mapped, jitter);
         // One write, not read back (as the camera's in pc_vr_projection_trace_eye).
-        if (!labo_guest_copy(object + 0xa0, mapped + 2, 7 * sizeof(float), true)) refused = PC_VR_GUARD_FOV_WRITE_FAILED;
+        if (!labo_guest_copy(object + 0xa0, mapped + 2, 7 * sizeof(float), true)) refused = PC_VR_GUARD_WRITE_FAILED;
     }
     if (refused != PC_VR_GUARD_COUNT) projection_refuse_locked(refused);
     else {
@@ -729,19 +724,12 @@ static bool projection_write_native_fov(uint64_t object) {
     return refused == PC_VR_GUARD_COUNT;
 }
 
-// The one post-condition (D115 step 5c): the logical matrix the game's writer built from the parameters written gives
-// the eye's own frustum, moved by the offset written with it (pc_vr_projection_native_rays_offset).
+// The game's writer has built the logical matrix from the parameters written (its fixed conversion, not checked again:
+// it never differed in any run, D137).
 static void projection_logical_built(uint64_t object) {
     pthread_mutex_lock(&projection_lock);
     RecordEye *eye = record_eye_of_projection_locked(object);
-    float logical[16];
-    if (eye && eye->fov_written && !eye->logical_ok) {
-        if (projection_read(object + 0xc, logical, sizeof logical) &&
-            pc_vr_projection_native_rays_offset(eye->pose.eyes[eye->native_index].fov_left_right_up_down,
-                                                eye->jitter_ndc, logical))
-            eye->logical_ok = eye->logical_current = true;
-        else projection_refuse_locked(PC_VR_GUARD_FOV_CONVERSION_MISMATCH);
-    }
+    if (eye && eye->fov_written && !eye->logical_ok) eye->logical_ok = eye->logical_current = true;
     pthread_mutex_unlock(&projection_lock);
 }
 

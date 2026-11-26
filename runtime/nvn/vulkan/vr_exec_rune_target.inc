@@ -11,20 +11,19 @@
 // The test's draw is known by the game call that issues it (PC_VR_LAYER_DRAW_RUNE_TEST, tools/game_sites.py
 // pcvr_rune_test_draw), and the block with the position by the game's own setup of the test, which reports the block
 // it fills (runtime/pc_vr_hud.c rt_rune_test).
-// SAVAGEWIND_PC_VR_RUNE_AIM=0: off; =flip: the position's y counted from the bottom.
 
 // For each fragment constant buffer about to be bound (cbuf_info, per draw): when it is the rune target test's, sets
 // *out to a copy with the position moved onto the aim ray, and returns true. False: bind the game's buffer as it is.
 static bool vr_rune_aim_patch(Range buffer, VkDescriptorBufferInfo *out) {
     // (a draw of the test's, and its constants the block the game's own setup of the test reported, two vectors of
     // four floats; the draw's mode first, as this runs for every fragment constant buffer)
-    if (vr_draw_rune_aim == PC_VR_RUNE_AIM_OFF || buffer.size < 32 || !pc_vr_rune_test_constants(buffer.addr) || !st.tpool)
+    if (!vr_draw_rune_test || buffer.size < 32 || !pc_vr_rune_test_constants(buffer.addr) || !st.tpool)
         return false;
     const float *constants = (const float *)(uintptr_t)buffer.addr;
     // The test's draw is recorded inside an eye's layer and carries that eye's certificate: which eye's scene it
     // samples and the pose that scene was drawn with, this frame's. Without one the test stays as the game set it.
     PcVrRenderCertificate own;
-    if (!vr_draw_certificate || !pc_vr_render_trace_resolve(vr_draw_certificate, &own) || own.native_index >= 2) {
+    if (!vr_draw_certificate || !pc_vr_render_trace_resolve(vr_draw_certificate, &own)) {
         static uint64_t uncertified;
         if (uncertified++ % 300 == 0)
             LOG("[pc-vr-rune-aim] test at %.4f %.4f left as it is: its draw carries no eye's certificate (%llu times) "
@@ -66,7 +65,7 @@ static bool vr_rune_aim_patch(Range buffer, VkDescriptorBufferInfo *out) {
     float patched[8];
     memcpy(patched, constants, sizeof patched);
     patched[0] = (float)image_x;
-    patched[1] = (float)(vr_draw_rune_aim == PC_VR_RUNE_AIM_FLIP ? 1 - image_y : image_y);
+    patched[1] = (float)image_y;
     static uint64_t logged;
     if (logged < 12 || !(logged % 600)) {
         LOG("[pc-vr-rune-aim] eye %d (its own draw's certificate) test %.4f %.4f -> %.4f %.4f (aim %.1f game units) "

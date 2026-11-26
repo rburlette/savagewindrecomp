@@ -57,7 +57,7 @@ static unsigned checks, originals, overrides, lookups;
 static bool mock_pc_vr = true, missing_device, missing_render;
 static uint64_t mock_now = UINT64_C(10000000000);
 static XrPoseSnapshot mock_pose;
-static bool mock_generate_projection, mock_bad_logical;
+static bool mock_generate_projection;
 static atomic_bool hold_original, original_entered, release_original;
 static void fixture_yield(void) {
 #ifdef _WIN32
@@ -143,8 +143,7 @@ static void frustum(float params[9], float matrix[16], float left, float right, 
 }
 
 // The game's two projection writers, as the fixture's originals: the logical matrix from the parameters (+0x98), and
-// the device matrix from the logical one and the depth terms (+0x90). mock_bad_logical: a logical matrix that does not
-// give the parameters' frustum.
+// the device matrix from the logical one and the depth terms (+0x90).
 static void emulate_projection(Cpu *c) {
     const uint64_t object = c->x[0];
     float matrix[16];
@@ -155,7 +154,6 @@ static void emulate_projection(Cpu *c) {
             0, 1 / p[5], 2 * p[8], 0, 0, 0, (float)(-(f + n) / (f - n)),
             (float)(-2 * f * n / (f - n)), 0, 0, -1, 0};
         memcpy(matrix, values, sizeof matrix);
-        if (mock_bad_logical) matrix[2] += 0.1f;
         memcpy((void *)(uintptr_t)c->x[1], matrix, sizeof matrix);
     } else if (c->x[30] == PROJ_DEVICE_CALLER && c->x[1] == object + 0x4c) {
         memcpy(matrix, (void *)(uintptr_t)(object + 0xc), sizeof matrix);
@@ -273,7 +271,7 @@ static void restart_at(double units_per_meter) {
     pc_vr_projection_trace_reset();
     memcpy((void *)(uintptr_t)region, clean_region, sizeof clean_region);
     fixture_init_at(units_per_meter); native_pose();
-    mock_generate_projection = true; mock_bad_logical = false;
+    mock_generate_projection = true;
     fail_next_parameter_write = false;
     parameter_write_calls = 0;
     guards_mark();
@@ -546,57 +544,48 @@ static void test_root_refusals(void) {
 } while (0)
     // (the eye is not the game's fresh copy of the base camera)
     ROOT_REFUSED((void)0, eye_call(layers[0], frames[0], false, &mock_pose), PC_VR_GUARD_VIEW_NOT_FRESH, 0);
-    // (no pose with native views: none, or one whose flags say it has none; D116: its values are not checked)
+    // (no pose: head look has none with native views; it checks the flags, D116: the values are not checked)
     ROOT_REFUSED((void)0, eye_call(layers[0], frames[0], true, NULL), PC_VR_GUARD_VIEW_NO_POSE, 0);
-    ROOT_REFUSED(mock_pose.active = false, root_call(), PC_VR_GUARD_VIEW_NO_POSE, 0);
-    ROOT_REFUSED(mock_pose.orientation_valid = false, root_call(), PC_VR_GUARD_VIEW_NO_POSE, 0);
-    ROOT_REFUSED(mock_pose.orientation_tracked = false, root_call(), PC_VR_GUARD_VIEW_NO_POSE, 0);
-    ROOT_REFUSED(mock_pose.views_valid = false, root_call(), PC_VR_GUARD_VIEW_NO_POSE, 0);
-    ROOT_REFUSED(mock_pose.native_views_valid = false, root_call(), PC_VR_GUARD_VIEW_NO_POSE, 0);
-    ROOT_REFUSED(mock_pose.frame_id = 0, root_call(), PC_VR_GUARD_VIEW_NO_POSE, 0);
-    ROOT_REFUSED(mock_pose.generation = 0, root_call(), PC_VR_GUARD_VIEW_NO_POSE, 0);
-    ROOT_REFUSED(mock_pose.calibration.epoch = 0, root_call(), PC_VR_GUARD_VIEW_NO_POSE, 0);
     // (the pair cannot be built: both eyes at one place, no baseline)
     ROOT_REFUSED(memcpy(mock_pose.eyes[1].position_xyz, mock_pose.eyes[0].position_xyz, sizeof mock_pose.eyes[1].position_xyz),
                  root_call(), PC_VR_GUARD_VIEW_PAIR, 0);
     // (the root's layer, configuration or sibling not valid objects, or the layer not of this base camera)
-    ROOT_REFUSED(u64(layers[0] + 0x210, 0), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(layers[0] + 0x210, region + 0x3004), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(layers[0] + 0x208, 0), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(layers[0] + 0x208, layers[0]), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(layers[0] + 0x208, layers[1] + 4), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(layers[0] + 0x288, PROJ_VTABLE + 8), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(layers[0] + 0x220, layers[0] + 0x290), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(layers[0] + 0x228, PROJ_EYE_VTABLE + 8), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(layers[0] + 0x80, base + 8), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    ROOT_REFUSED(u64(base, PROJ_BASE_VTABLE + 8), root_call(), PC_VR_GUARD_TRAVERSAL_ROOT_IDENTITY, 0);
-    // (the game's eye copy not the base camera moved sideways along its right: off the right axis, turned, not moved,
-    // or the base's stored right row not its camera's)
+    ROOT_REFUSED(u64(layers[0] + 0x210, 0), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(layers[0] + 0x210, region + 0x3004), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(layers[0] + 0x208, 0), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(layers[0] + 0x208, layers[0]), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(layers[0] + 0x208, layers[1] + 4), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(layers[0] + 0x288, PROJ_VTABLE + 8), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(layers[0] + 0x220, layers[0] + 0x290), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(layers[0] + 0x228, PROJ_EYE_VTABLE + 8), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(layers[0] + 0x80, base + 8), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    ROOT_REFUSED(u64(base, PROJ_BASE_VTABLE + 8), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
+    // (the game's eye copy not the base camera moved sideways along its right: off the right axis, not moved, or the
+    // base's stored right row not its camera's; that it is a copy at all is head look's fresh test)
     ROOT_REFUSED((((float *)(uintptr_t)(layers[0] + 0x260))[1] += 0.1f, ((float *)(uintptr_t)(layers[0] + 0x260))[4] += 0.1f),
                  root_call(), PC_VR_GUARD_VIEW_PLACEMENT, 0);
-    ROOT_REFUSED(((float *)(uintptr_t)(layers[0] + 0x260))[3] += 0.5f, root_call(), PC_VR_GUARD_VIEW_PLACEMENT, 0);
     ROOT_REFUSED(put_eye_copy(layers[0], 0), root_call(), PC_VR_GUARD_VIEW_PLACEMENT, 0);
     ROOT_REFUSED(*(float *)(uintptr_t)(base + 8) = -1, root_call(), PC_VR_GUARD_VIEW_PLACEMENT, 0);
     // (the camera write refused: one attempt, nothing copied, not tried again)
-    ROOT_REFUSED(fail_next_parameter_write = true, root_call(), PC_VR_GUARD_VIEW_WRITE_FAILED, 1);
+    ROOT_REFUSED(fail_next_parameter_write = true, root_call(), PC_VR_GUARD_WRITE_FAILED, 1);
     // (a frame record that cannot be read, or that is neither eye's call: no root)
     const uint64_t invalid_frames[] = {0, GUEST_HI - 8, frames[0] + 8, region + 0x4000};
     for (unsigned i = 0; i < sizeof invalid_frames / sizeof invalid_frames[0]; ++i) {
         CHECK(!pc_vr_projection_trace_root(invalid_frames[i]));
         ROOT_REFUSED((void)0, eye_call(layers[0], invalid_frames[i], true, &mock_pose),
-                     PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE, 0);
+                     PC_VR_GUARD_TRAVERSAL, 0);
     }
     const uint64_t invalid_parents[] = {0, frames[0], frames[0] - 16, frames[0] + 8};
     for (unsigned i = 0; i < sizeof invalid_parents / sizeof invalid_parents[0]; ++i) {
-        ROOT_REFUSED(u64(frames[0], invalid_parents[i]), root_call(), PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE, 0);
+        ROOT_REFUSED(u64(frames[0], invalid_parents[i]), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
         CHECK(!pc_vr_projection_trace_root(frames[0]));
     }
-    ROOT_REFUSED(u64(frames[0] + 8, PROJ_ROOT_RETURN + 4), root_call(), PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE, 0);
+    ROOT_REFUSED(u64(frames[0] + 8, PROJ_ROOT_RETURN + 4), root_call(), PC_VR_GUARD_TRAVERSAL, 0);
 #undef ROOT_REFUSED
-    // A frame-unreadable call also closes a record left open.
+    // A call whose frame record cannot be read also closes a record left open.
     restart(); CHECK(root_call() && projection_record.open);
     CHECK(!eye_call(layers[1], frames[0] + 8, true, NULL) && !projection_record.open);
-    CHECK(guards_counted(PC_VR_GUARD_TRAVERSAL_FRAME_UNREADABLE, 1));
+    CHECK(guards_counted(PC_VR_GUARD_TRAVERSAL, 1));
     pc_vr_projection_trace_reset();
     CHECK(VirtualFree((void *)(uintptr_t)region, 0, MEM_RELEASE));
 }
@@ -627,29 +616,29 @@ static void test_sibling_refusals(void) {
 } while (0)
     // (not the root's sibling layer, its configuration changed, the base camera moved since the root, the root's link
     // to it gone, the root's call no longer on the stack, or a sibling call saving another frame than the root's)
-    SIBLING_REFUSED((void)0, eye_call(third_layer, frames[1], true, NULL), PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1);
-    SIBLING_REFUSED(u64(layers[1] + 0x210, region + 0x3100), sibling_call(), PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1);
-    SIBLING_REFUSED(*(float *)(uintptr_t)(base + 0x38 + 12) += 0.5f, sibling_call(), PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1);
-    SIBLING_REFUSED(u64(layers[0] + 0x208, third_layer), sibling_call(), PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1);
-    SIBLING_REFUSED(u64(frames[0] + 8, PROJ_ROOT_RETURN + 4), sibling_call(), PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1);
-    SIBLING_REFUSED(u64(frames[1], frames[0] + 16), sibling_call(), PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1);
+    SIBLING_REFUSED((void)0, eye_call(third_layer, frames[1], true, NULL), PC_VR_GUARD_TRAVERSAL, 1);
+    SIBLING_REFUSED(u64(layers[1] + 0x210, region + 0x3100), sibling_call(), PC_VR_GUARD_TRAVERSAL, 1);
+    SIBLING_REFUSED(*(float *)(uintptr_t)(base + 0x38 + 12) += 0.5f, sibling_call(), PC_VR_GUARD_TRAVERSAL, 1);
+    SIBLING_REFUSED(u64(layers[0] + 0x208, third_layer), sibling_call(), PC_VR_GUARD_TRAVERSAL, 1);
+    SIBLING_REFUSED(u64(frames[0] + 8, PROJ_ROOT_RETURN + 4), sibling_call(), PC_VR_GUARD_TRAVERSAL, 1);
+    SIBLING_REFUSED(u64(frames[1], frames[0] + 16), sibling_call(), PC_VR_GUARD_TRAVERSAL, 1);
     // (another thread than the root's)
-    SIBLING_REFUSED((void)0, sibling_on_other_thread(), PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1);
+    SIBLING_REFUSED((void)0, sibling_on_other_thread(), PC_VR_GUARD_TRAVERSAL, 1);
     // A linked sibling whose eye is not the game's fresh copy: view-not-fresh.
     SIBLING_REFUSED((void)0, eye_call(layers[1], frames[1], false, NULL), PC_VR_GUARD_VIEW_NOT_FRESH, 1);
     // Its copy on the root's side of the base's right: placement.
     SIBLING_REFUSED(put_eye_copy(layers[1], -1), sibling_call(), PC_VR_GUARD_VIEW_PLACEMENT, 1);
     // Its camera write refused (one attempt).
-    SIBLING_REFUSED(fail_next_parameter_write = true, sibling_call(), PC_VR_GUARD_VIEW_WRITE_FAILED, 2);
+    SIBLING_REFUSED(fail_next_parameter_write = true, sibling_call(), PC_VR_GUARD_WRITE_FAILED, 2);
 #undef SIBLING_REFUSED
     // A sibling layer that is not an eye layer (its camera not of the eye camera class): not the sibling, and the
     // layer is no eye layer of the record.
     restart(); CHECK(root_call()); u64(layers[1] + 0x228, PROJ_EYE_VTABLE + 8); guards_mark(); copies_mark();
-    CHECK(!sibling_call() && guards_counted(PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1) && !projection_record.open);
+    CHECK(!sibling_call() && guards_counted(PC_VR_GUARD_TRAVERSAL, 1) && !projection_record.open);
     CHECK(copies_unchanged() && parameter_write_calls == 1 && !record_eye_layer(layers[1]));
     // The same side as the root's: not the sibling, and the root's eye, written this frame, is left as it was.
     restart(); CHECK(root_call()); u16(layers[1] + 0x90, 0); guards_mark();
-    CHECK(!sibling_call() && guards_counted(PC_VR_GUARD_TRAVERSAL_NOT_SIBLING, 1) && !projection_record.open);
+    CHECK(!sibling_call() && guards_counted(PC_VR_GUARD_TRAVERSAL, 1) && !projection_record.open);
     CHECK(record_eye(0)->layer == layers[0] && record_eye(0)->view_written && !record_eye(1)->layer);
     // A sibling layer whose objects cannot be read (its side unknown) leaves both eyes as they were.
     restart(); CHECK(root_call()); u64(layers[1] + 0x228, PROJ_EYE_VTABLE + 8);
@@ -767,18 +756,12 @@ static void test_native_fov(void) {
     CHECK(root_call()); camera_built(0); CHECK(!eye_call(layers[1], frames[1], false, NULL));
     guards_mark(); camera_built(1); projection_built(1);
     CHECK(guards_counted(PC_VR_GUARD_COUNT, 0) && parameter_write_calls == 1 && !record_eye(1)->certificate);
-    // The parameter write refused: fov-write-failed (one attempt), no certificate.
+    // The parameter write refused: write-failed (one attempt), no certificate.
     restart();
     CHECK(root_call()); camera_built(0);
     fail_next_parameter_write = true; projection_built(0);
-    CHECK(guards_counted(PC_VR_GUARD_FOV_WRITE_FAILED, 1) && parameter_write_calls == 2);
+    CHECK(guards_counted(PC_VR_GUARD_WRITE_FAILED, 1) && parameter_write_calls == 2);
     CHECK(!record_eye(0)->fov_written && !record_eye(0)->certificate);
-    // The game's logical matrix not the eye's frustum: fov-conversion-mismatch, no certificate.
-    restart();
-    CHECK(root_call()); camera_built(0);
-    mock_bad_logical = true; projection_built(0);
-    CHECK(guards_counted(PC_VR_GUARD_FOV_CONVERSION_MISMATCH, 1) && record_eye(0)->fov_written);
-    CHECK(!record_eye(0)->logical_ok && !record_eye(0)->certificate);
     // The device stage alone (no logical stage this frame) publishes nothing.
     restart();
     CHECK(root_call()); camera_built(0);
