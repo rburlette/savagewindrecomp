@@ -2,7 +2,6 @@
 // preconditions: vr_eyes.h. Moved here from exec.c; the bodies are exec.c's.
 #include <SDL3/SDL_timer.h>
 #include <math.h>
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,9 +11,7 @@
 #include "vr_eyes.h"
 #include "../renderer.h"
 #include "../../pc_vr.h"
-#include "../../pc_vr_frame_trace.h"
 #include "../../pc_vr_guards.h"
-#include "../../platform.h"
 #include "../../pc_vr_hud.h"
 #include "../../xr/xr_vulkan.h"
 
@@ -26,66 +23,6 @@ void renderer_submit(void);             // (exec.c) submits the commands recorde
 // hands the slot back.
 static void vr_eye_slot_release(void *context) {
     atomic_store_explicit(&((VrEyeSlot *)context)->busy, false, memory_order_release);
-}
-
-// ------------------------------------------------------------------------------- the finish watcher (an experiment)
-// When the GPU finished each offered eye pair, for the frame trace's "[pc-vr] finish" lines (pc_vr_frame_trace.h). The
-// XR owner asks once a display frame, so what it knows is 11 ms coarse. A thread of its own waits on the renderer's
-// timeline for each pair's value, in the order the pairs were offered, and stamps its wake-up. With the timing windows
-// only. It reads nothing of the producer's state: each watch carries its present and its value.
-enum { VR_FINISH_WATCHES = 16 };
-typedef struct { uint64_t present_id, ready_value; } VrFinishWatch;
-static struct {
-    pthread_mutex_t lock;
-    pthread_cond_t offered;
-    VrFinishWatch watches[VR_FINISH_WATCHES];
-    unsigned first, count;
-    bool started;
-} vr_finish = {.lock = PTHREAD_MUTEX_INITIALIZER, .offered = PTHREAD_COND_INITIALIZER};
-
-static void *vr_finish_thread(void *unused) {
-    (void)unused;
-    for (;;) {
-        pthread_mutex_lock(&vr_finish.lock);
-        while (!vr_finish.count) pthread_cond_wait(&vr_finish.offered, &vr_finish.lock);
-        const VrFinishWatch watch = vr_finish.watches[vr_finish.first];
-        vr_finish.first = (vr_finish.first + 1) % VR_FINISH_WATCHES;
-        --vr_finish.count;
-        pthread_mutex_unlock(&vr_finish.lock);
-        // When the driver had the pair's submission (the recorder's vkQueueSubmit2 returned): looked at five times a
-        // millisecond, so the recorder itself is left alone. Without the recorder the submit was made before the offer.
-        uint64_t submitted_ns = 0;
-        if (rec_on()) {
-            const uint64_t give_up_ns = plat_now_ns() + 500000000ull;
-            while (rec_submitted() < watch.ready_value && plat_now_ns() < give_up_ns)
-                plat_wait_until_ns(plat_now_ns() + 200000);
-            submitted_ns = plat_now_ns();
-        }
-        const VkSemaphoreWaitInfo wait = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
-            .pSemaphores = &g_vk.timeline, .pValues = &watch.ready_value};
-        // (half a second: a pair whose work does not finish in that time is not reported)
-        if (vkWaitSemaphores(g_vk.dev, &wait, 500000000ull) == VK_SUCCESS)
-            pc_vr_frame_trace_gpu_finished(watch.present_id, submitted_ns, plat_now_ns());
-    }
-    return NULL;
-}
-
-// The queue's thread, as a pair is offered. A full list drops the watch (the watcher is far behind).
-static void vr_finish_watch(uint64_t present_id, uint64_t ready_value) {
-    if (!pc_vr_frame_trace_on() || !present_id) return;
-    pthread_mutex_lock(&vr_finish.lock);
-    if (!vr_finish.started) {
-        pthread_t thread;
-        vr_finish.started = true;
-        if (pthread_create(&thread, NULL, vr_finish_thread, NULL) == 0) pthread_detach(thread);
-    }
-    if (vr_finish.count < VR_FINISH_WATCHES) {
-        vr_finish.watches[(vr_finish.first + vr_finish.count) % VR_FINISH_WATCHES] =
-            (VrFinishWatch){.present_id = present_id, .ready_value = ready_value};
-        ++vr_finish.count;
-        pthread_cond_signal(&vr_finish.offered);
-    }
-    pthread_mutex_unlock(&vr_finish.lock);
 }
 
 // Arms the producer on first use. Off (for good) when the GPU cannot blit A2B10G10R10 into sRGB RGBA8.
@@ -315,7 +252,6 @@ static void vr_eyes_present_offer(VrEyeSlot *slot, VrFrameInputs inputs, uint64_
         .width = vr_eyes.width, .height = vr_eyes.height,
         .ready_timeline = g_vk.timeline, .ready_value = vr_eyes.ready_seq,
         .game_present_id = game_present_id, .release = vr_eye_slot_release, .context = slot};
-    vr_finish_watch(game_present_id, vr_eyes.ready_seq);  // (the finish watcher: when the GPU has done this pair)
     if (!frame->scene_seen) {
         // Menus (D053): world-locked at the calibration pose, where the game's forward is, through tracking
         // loss and reopening; each offer carries the current tracking generation. Shown only as quads (D056, D068):

@@ -55,11 +55,6 @@ bool vr_shot_due(const char *name);
 // not their brightness. alpha_as_grey: save an RGBA8 image's alpha (the HUD's coverage) as grey instead of its colour.
 void vr_shot(TexBackend *image, const char *name, bool alpha_as_grey);
 
-// (development, vr_effect_trace.c) Saves image now as build/<name>.png, written in the background, as vr_shot saves
-// its kinds (vr_shot_image_savable's formats; D32 depth as grey with a pixel census logged). Outside a render pass.
-// false: not savable.
-bool vr_shot_save_now(TexBackend *image, const char *name);
-
 // Which side (0 or 1) the finished image output_serial is in this frame's uncertified scene shots, the eyes being known
 // only by the order of their images; -1 when both sides already have other images. Called at each scene-final draw
 // without a certificate, which then shoots hdr-scene<side> and scene<side>.

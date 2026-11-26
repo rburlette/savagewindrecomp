@@ -94,7 +94,7 @@ static struct {
     float clip[6];
     float flat_scale[2], flat_offset[2];
     float half_left, half_right;  // the eye's half of the final image, which the scissor stays inside
-    uint64_t draws, unmatched, behind, logged, frame_draws, exact;
+    uint64_t draws, unmatched, behind, frame_draws, exact;
 } old_hud;
 static MarkerLog old_log;
 static int old_fade_eye;
@@ -276,7 +276,6 @@ static bool world_hud_draw_before(void) {
     world_hud_place_before(viewport, labo_offset, anchor, eye_at, scale, image_up);
     ++old_hud.draws;
     ++old_hud.frame_draws;
-    if (old_hud.logged < 16 || !(old_hud.draws % 8192)) ++old_hud.logged;
     old_log = (MarkerLog){how, eye, {origin_x * 640, origin_y * 360, marker->layout[0], marker->layout[1],
                                      marker->offset, marker->camera[0], marker->camera[1], marker->camera[2],
                                      depth / units_per_meter, anchor[0], anchor[1], eye_at[0], eye_at[1], scale[0],
@@ -417,7 +416,6 @@ static bool world_hud_draw_now(void) {
                        config->diagnostics.world_hud_test_turn, &vr_world_hud.move, &placed);
     ++vr_world_hud.draws;
     ++vr_world_hud.frame_draws;
-    if (vr_world_hud.logged < 16 || !(vr_world_hud.draws % 8192)) ++vr_world_hud.logged;
     new_log = (MarkerLog){how, eye, {origin[0] * 640, origin[1] * 360, marker->layout[0], marker->layout[1],
                                      marker->offset, marker->camera[0], marker->camera[1], marker->camera[2],
                                      seen.depth / cert->units_per_meter, placed.anchor[0], placed.anchor[1],
@@ -466,7 +464,7 @@ static bool same_state(void) {
            !memcmp(&old_hud.half_left, &move->half_left, sizeof move->half_left) &&
            !memcmp(&old_hud.half_right, &move->half_right, sizeof move->half_right) &&
            old_hud.draws == vr_world_hud.draws && old_hud.unmatched == vr_world_hud.unmatched &&
-           old_hud.behind == vr_world_hud.behind && old_hud.logged == vr_world_hud.logged &&
+           old_hud.behind == vr_world_hud.behind &&
            old_hud.frame_draws == vr_world_hud.frame_draws && old_hud.exact == vr_world_hud.exact;
 }
 

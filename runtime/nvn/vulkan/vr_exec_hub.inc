@@ -67,28 +67,6 @@ static VrSceneDepth vr_scene_depth = {.last_eye = -1};
 VrAimResult vr_aim_result;
 // DLAA on each eye image at its placement (an experiment, vr_dlaa.h): scene_post's call, with the eye's scene depth.
 #include "vr_dlaa.h"
-// (development) The passes of one eye's scene, the effect system's draws among them (SAVAGEWIND_PC_VR_EFFECT_TRACE,
-// vr_effect_trace.h): draw_ gives it each draw once its program is ready, with what the draw samples.
-#include "vr_effect_trace.h"
-static void vr_effect_trace_gather(const Prog *program, const CmdRec *command) {
-    NvnTexture *sampled[8];
-    int sampled_count = 0;
-    for (int i = 0; program->fi && i < program->fi->ntex && sampled_count < 8; ++i) {
-        const NvnTexEntry *entry = shader_texture_entry(1, &program->fi->tex[i]);
-        // (with SAVAGEWIND_PC_VR_EFFECT_TRACE=2 also the reduced targets read through an object that is no render target:
-        // the game's second texture over the same memory)
-        const bool reduced = entry && entry->tex && vr_effect_trace_small_targets() && entry->tex->width <= 200 &&
-                             entry->tex->levels == 1 && (entry->tex->format == 0x5 || entry->tex->format == 0xd);
-        if (entry && entry->tex && ((entry->tex->flags & 9) || reduced)) sampled[sampled_count++] = entry->tex;
-    }
-    const VrEffectTraceDraw draw = {
-        .command = command, .colors = st.rt.color, .color_count = st.rt.ncolor, .depth = st.rt.depth,
-        .sampled = sampled, .sampled_count = sampled_count, .fragment_hash = g_cur_fs_hash,
-        .blended = st.color_state[0] & 1, .depth_test = st.ds[0], .depth_write = st.ds[1],
-        .field_haze = program->vr_field_cloud, .viewport = st.viewport[0], .scissor = st.scissor[0]};
-    vr_effect_trace_draw(&draw);
-}
-
 // D073, D088: the world-tied HUD. When the HUD draw being recorded is a marker's, a reticle's or the fade's
 // (vr_world_hud_draw, vr_hud_fade), how to move it into its eye's half: the model, the move and its geometry are
 // vr_world_hud.h, the hub below (HUD markers in the world). The move is applied to the draw's vertices, in the
@@ -316,15 +294,6 @@ static void vr_hud_blend(PipeState *state) {
     }
     if (!(state->blend_on & 1)) return;
     const bool additive = blend[2] == 2, multiply = blend[1] == 9;
-    if (multiply) {
-        static unsigned logged;
-        if (logged < 8) {
-            ++logged;
-            LOG("[pc-vr-hud-blend] present=%llu a multiplying HUD draw (colour %u/%u op %u, alpha %u/%u op %u) keeps the "
-                "coverage, fs=%llx\n", (unsigned long long)renderer_present_count(), blend[1], blend[2], blend[5],
-                blend[3], blend[4], blend[6], (unsigned long long)st.program->stages[1].code_addr);
-        }
-    }
     blend[3] = additive || multiply ? 1 : 2;
     blend[4] = additive || multiply ? 2 : 6;
     blend[6] = 1;
@@ -568,16 +537,14 @@ static bool vr_world_hud_draw(void) {
     const XrPoseSnapshot *pose = &cert->native_snapshot;
     if (!(cert->units_per_meter > 0) || !pose->calibration.epoch) return false;
 
-    // Which point the draw belongs to (marker), and how it was found (how).
+    // Which point the draw belongs to (marker).
     PcVrHudPoint linked;
     const PcVrHudPoint *marker = NULL;
-    const char *how = "none";
     if (vr_draw_marker && pc_vr_hud_point_by_seq(vr_draw_marker, &linked)) {
         // Linked by pane: the report bound to it, however old (the binding keeps a copy when the ring has moved on),
         // scaled to where the panes are drawn.
         vr_hud_marker_on_layer(&linked);
         marker = &linked;
-        how = "pane";
         ++vr_world_hud.exact;
     } else if (vr_draw_role == PC_VR_PANE_RETICLE && vr_aim_result.distance > 0) {
         // A reticle's pane (the bow's, a rune's, a thrown weapon's): on the aim ray, at the depth the scene has there
@@ -585,7 +552,6 @@ static bool vr_world_hud_draw(void) {
         // before the first since the game reset), as the rune aim holds it: no window of presents (backlog 9).
         linked = vr_hud_reticle_point(vr_aim_result.distance);
         marker = &linked;
-        how = "reticle";
     }
     if (!marker) {
         ++vr_world_hud.unmatched;
@@ -610,26 +576,6 @@ static bool vr_world_hud_draw(void) {
                        config->diagnostics.world_hud_test_turn, &vr_world_hud.move, &placed);
     ++vr_world_hud.draws;
     ++vr_world_hud.frame_draws;
-    // (a large pane placed: the binding or role took one that the size cap before backlog 9 left on the panel)
-    static unsigned large_logged;
-    if (pane_size > VR_WORLD_HUD_PANE_LARGE && large_logged++ < 8) {
-        const char *screen = pc_vr_screen_name(vr_draw_screen);
-        LOG("[pc-vr-world-hud] large pane placed: screen=%s how=%s size=%.0f (layout units)\n", screen ? screen : "-",
-            how, pane_size);
-    }
-    if (vr_world_hud.logged < 16 || !(vr_world_hud.draws % 8192)) {
-        ++vr_world_hud.logged;
-        const char *screen = pc_vr_screen_name(vr_draw_screen);
-        LOG("[pc-vr-world-hud] draw=%llu screen=%s how=%s eye=%u pane=%.1f,%.1f marker=%.1f,%.1f offset=%.3f camera=%.2f,%.2f,%.2f depth_m=%.2f "
-            "anchor=%.1f,%.1f eye_at=%.1f,%.1f scale=%.3f,%.3f roll_deg=%.1f exact=%llu unmatched=%llu behind=%llu\n",
-            (unsigned long long)vr_world_hud.draws, screen ? screen : "-", how, eye, origin[0] * 640,
-            origin[1] * 360, marker->layout[0], marker->layout[1], marker->offset,
-            marker->camera[0], marker->camera[1], marker->camera[2], seen.depth / cert->units_per_meter,
-            placed.anchor[0], placed.anchor[1], placed.eye_at[0], placed.eye_at[1], placed.scale[0], placed.scale[1],
-            atan2(placed.image_up[0], -placed.image_up[1]) * (180.0 / 3.14159265358979323846),
-            (unsigned long long)vr_world_hud.exact, (unsigned long long)vr_world_hud.unmatched,
-            (unsigned long long)vr_world_hud.behind);
-    }
     return true;
 }
 
@@ -647,9 +593,6 @@ static bool vr_hud_fade(Prog *program) {
     const double labo_offset = offset_constants.addr && offset_constants.size >= 4 ?
         ((const float *)(uintptr_t)offset_constants.addr)[0] : 0;
     vr_hud_fade_move(&vr_world_hud.move, viewport, labo_offset);
-    static unsigned logged;
-    if (logged++ < 4)
-        LOG("[pc-vr-world-hud] fade over the HUD's layout drawn into eye %d's view\n", viewport[0] >= half_width * 0.5f);
     return true;
 }
 
@@ -745,7 +688,6 @@ static VrDrawRoute vr_route_hud_draw(Prog *program) {
 void vk_vr_present(uint64_t game_present_id) {
     pc_vr_screens_log();
     vr_dlaa_present();  // (a DLAA mode the '9' key asked for, from the next frame: vr_dlaa.h)
-    vr_effect_trace_present();  // (development: a traced frame's end, the next on a capture request)
     const bool over_world = vr_eyes.frame.over_world;  // (this frame's, before vr_eyes_present resets the findings)
     vr_frame_world_left_out = 0;
     if (game_present_id) vr_unlinked_world_present(game_present_id, over_world);

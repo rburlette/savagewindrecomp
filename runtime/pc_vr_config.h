@@ -109,8 +109,6 @@ typedef struct {
     bool target_refresh;
     // The diagnostics, launch options SAVAGEWIND_PC_VR_<name>, all off by default.
     struct {
-        bool head_look_timing;    // HEAD_LOOK_TIMING=1: head look's bounded timing lines
-        int projection_list;      // PROJECTION_LIST: 1 every perspective projection, 2 the world's
         bool perf;                // PERF, any value: the XR owner's timing windows
         bool offer_trace;         // OFFER_TRACE=1
         uint64_t shot_presents[PC_VR_SHOT_PRESENTS];  // SHOT=<present>[,...]

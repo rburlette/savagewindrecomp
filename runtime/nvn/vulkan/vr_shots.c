@@ -213,49 +213,6 @@ static unsigned vr_shot_bit(const char *name) {
         name[strlen(name) - 1] == '1' ? 2 : 1;
 }
 
-bool vr_shot_save_now(TexBackend *image, const char *name) {
-    char path[256];
-    if (!image || !name || snprintf(path, sizeof path, "build/%s.png", name) >= (int)sizeof path) return false;
-    if (vr_shot_image_savable(image)) return vr_save_png(image, path, false, false, true);
-    // Another single-sample colour image (RGBA16F, R32F...): converted by a blit into a B10G11R11 image first, so it is
-    // saved through the HDR preview mapping (its alpha and anything below zero left out).
-    if (!image->image || image->aspect != VK_IMAGE_ASPECT_COLOR_BIT || image->samples != 1 || image->depth != 1 ||
-        !image->width || !image->height || image->width > 4096 || image->height > 4096)
-        return false;
-    static TexBackend converted;
-    if (converted.image && (converted.width != image->width || converted.height != image->height)) {
-        vk_views_forget(&converted);
-        vk_defer_image(converted.image, converted.mem);
-        converted.image = VK_NULL_HANDLE;
-        converted.mem = VK_NULL_HANDLE;
-    }
-    if (!converted.image) {
-        VkImageCreateInfo info = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-            .format = VK_FORMAT_B10G11R11_UFLOAT_PACK32, .extent = {image->width, image->height, 1}, .mipLevels = 1,
-            .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
-        VmaAllocationCreateInfo memory = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-        if (vmaCreateImage(g_vk.vma, &info, &memory, &converted.image, &converted.mem, NULL) != VK_SUCCESS)
-            return false;
-        converted.format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
-        converted.width = image->width, converted.height = image->height;
-        converted.depth = converted.layers = converted.levels = converted.samples = 1;
-        converted.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-        converted.base_type = VK_IMAGE_VIEW_TYPE_2D;
-        vk_image_init_layout(vk_cmd(), converted.image, converted.aspect);
-    }
-    VkCommandBuffer commands = vk_cmd();
-    vk_full_barrier(commands);
-    const VkImageBlit blit = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                              .srcOffsets = {{0, 0, 0}, {(int32_t)image->width, (int32_t)image->height, 1}},
-                              .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                              .dstOffsets = {{0, 0, 0}, {(int32_t)image->width, (int32_t)image->height, 1}}};
-    rec_CmdBlitImage(commands, image->image, VK_IMAGE_LAYOUT_GENERAL, converted.image, VK_IMAGE_LAYOUT_GENERAL, 1,
-                     &blit, VK_FILTER_NEAREST);
-    vk_full_barrier(commands);
-    return vr_save_png(&converted, path, false, false, true);
-}
-
 bool vr_shot_due(const char *name) {
     const PcVrConfig *config = pc_vr_config();
     const unsigned bit = vr_shot_bit(name);

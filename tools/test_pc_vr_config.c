@@ -141,7 +141,7 @@ static void test_defaults(void) {
     CHECK(!config.diagnostics.eye_size_malformed && !config.diagnostics.ui_parallax);
     CHECK(!config.diagnostics.hud_backdrop && config.diagnostics.world_hud && !config.diagnostics.world_hud_upright);
     CHECK(config.diagnostics.world_hud_test_turn == 0 && config.diagnostics.rune_aim == PC_VR_RUNE_AIM_ON);
-    CHECK(!config.diagnostics.head_look_timing && !config.diagnostics.projection_list && !config.diagnostics.perf);
+    CHECK(!config.diagnostics.perf);
     CHECK(!config.diagnostics.offer_trace && !config.diagnostics.shot_count && !config.diagnostics.quick_menu_shots);
     CHECK(!config.diagnostics.bench_head_requested && !config.diagnostics.log_panes && !config.diagnostics.log_screens);
     CHECK(!config.diagnostics.no_headset_mask && !config.diagnostics.copy_wait_ms && !config.settings_ignored);
@@ -303,12 +303,8 @@ static void test_settings(void) {
 static void test_diagnostics(void) {
     PcVrConfig plain;
     test_pc_vr_parse((const char *const[]){"vr", "1", NULL}, &plain);
-    PcVrConfig config = with_setting("SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING", "1");
-    CHECK(config.diagnostics.head_look_timing && !memcmp(&config.settings, &plain.settings, sizeof plain.settings));
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING", "true").diagnostics.head_look_timing);
-    CHECK(with_setting("SAVAGEWIND_PC_VR_PROJECTION_LIST", "2").diagnostics.projection_list == 2);
-    CHECK(!with_setting("SAVAGEWIND_PC_VR_PROJECTION_LIST", "x").diagnostics.projection_list);
-    CHECK(with_setting("SAVAGEWIND_PC_VR_PERF", "0").diagnostics.perf);  // (any value)
+    PcVrConfig config = with_setting("SAVAGEWIND_PC_VR_PERF", "0");  // (any value)
+    CHECK(config.diagnostics.perf && !memcmp(&config.settings, &plain.settings, sizeof plain.settings));
     CHECK(with_setting("SAVAGEWIND_PC_VR_OFFER_TRACE", "1").diagnostics.offer_trace);
     CHECK(!with_setting("SAVAGEWIND_PC_VR_OFFER_TRACE", "2").diagnostics.offer_trace);
     // Alternate refreshes targeted: pace 2 with the head pose every display frame, unless TARGET_REFRESH says other
@@ -423,13 +419,11 @@ static void test_describe(void) {
     CHECK(strstr(text, " vr_menu_distance=0.77 ") && strstr(text, " vr_headset_pace=0 "));
     CHECK(strstr(text, "; head pose every game present; diagnostics: EYE_SIZE=2064x2208 WORLD_HUD_ROLL=90 "
                        "RUNE_AIM=flip; ignored: vr_game_units_per_meter vr_menu_distance"));
-    test_pc_vr_parse((const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING", "1",
-        "SAVAGEWIND_PC_VR_PROJECTION_LIST", "2",
-        "SAVAGEWIND_PC_VR_PERF", "1", "SAVAGEWIND_PC_VR_OFFER_TRACE", "1", "SAVAGEWIND_PC_VR_SHOT", "5498",
+    test_pc_vr_parse((const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_PERF", "1", "SAVAGEWIND_PC_VR_OFFER_TRACE", "1", "SAVAGEWIND_PC_VR_SHOT", "5498",
         "SAVAGEWIND_PC_VR_QUICK_MENU_SHOTS", "1", "SAVAGEWIND_PC_VR_BENCH_HEAD", "x", "SAVAGEWIND_LOG_PANES", "1",
         "SAVAGEWIND_PC_VR_WORLD_HUD_ROLL", "0", NULL}, &config);
     pc_vr_config_describe(&config, text, sizeof text);
-    CHECK(strstr(text, "; diagnostics: HEAD_LOOK_TIMING PROJECTION_LIST=2 PERF OFFER_TRACE SHOT=5498 "
+    CHECK(strstr(text, "; diagnostics: PERF OFFER_TRACE SHOT=5498 "
         "QUICK_MENU_SHOTS BENCH_HEAD=invalid LOG_PANES WORLD_HUD_ROLL=0; ignored: none"));
     // (cut off: the length it needed, and a terminated text)
     char short_text[16];

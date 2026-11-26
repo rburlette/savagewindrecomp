@@ -115,9 +115,6 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
         out->settings.headset_pace == 2 && out->display_rate_tracking && (!value || exactly_one(value));
 
     // The diagnostics.
-    out->diagnostics.head_look_timing = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING"));
-    value = lookup(context, "SAVAGEWIND_PC_VR_PROJECTION_LIST");
-    out->diagnostics.projection_list = value ? atoi(value) : 0;
     out->diagnostics.perf = lookup(context, "SAVAGEWIND_PC_VR_PERF") != NULL;
     out->diagnostics.offer_trace = exactly_one(lookup(context, "SAVAGEWIND_PC_VR_OFFER_TRACE"));
     out->diagnostics.shot_count = present_list(lookup(context, "SAVAGEWIND_PC_VR_SHOT"),
@@ -215,9 +212,6 @@ size_t pc_vr_config_describe(const PcVrConfig *config, char *text, size_t size) 
 
     describe_append(&line, "; diagnostics:");
     const size_t diagnostics_start = line.length;
-    if (config->diagnostics.head_look_timing) describe_append(&line, " HEAD_LOOK_TIMING");
-    if (config->diagnostics.projection_list)
-        describe_append(&line, " PROJECTION_LIST=%d", config->diagnostics.projection_list);
     if (config->diagnostics.perf) describe_append(&line, " PERF");
     if (config->diagnostics.offer_trace) describe_append(&line, " OFFER_TRACE");
     if (config->diagnostics.shot_count)

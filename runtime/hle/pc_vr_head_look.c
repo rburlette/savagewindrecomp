@@ -14,7 +14,6 @@
 // Which camera is the base: the camera controller the game updates each frame (pc_vr_head_look_observe_controller,
 // from pc_vr_camera_update.c) leads through its camera actor to it. Every guest object is checked by address range,
 // alignment and vtable before it is used. Head look is part of the PC VR play configuration (runtime/pc_vr_config.h).
-// The counters below feed bounded log summaries; the diagnostic SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING=1 adds timing.
 #include <math.h>
 #include <float.h>
 #include <pthread.h>
@@ -30,16 +29,7 @@
 #include "../pc_vr.h"
 #include "../pc_vr_pace.h"
 #include "../xr/xr_runtime.h"
-static uint64_t memory_timing_begin(void);
-static void memory_timing_end(unsigned operation, uint64_t start, bool ok);
-static void memory_timing_reject(void);
-#define LABO_GUEST_TIMING_BEGIN() memory_timing_begin()
-#define LABO_GUEST_TIMING_END(operation, start, ok) memory_timing_end(operation, start, ok)
-#define LABO_GUEST_TIMING_REJECT() memory_timing_reject()
 #include "labo_guest_memory.h"
-#undef LABO_GUEST_TIMING_BEGIN
-#undef LABO_GUEST_TIMING_END
-#undef LABO_GUEST_TIMING_REJECT
 #include "pc_vr_head_look.h"
 #include "pc_vr_render_trace.h"
 #include "pc_vr_head_look_math.h"
@@ -50,7 +40,6 @@ static void memory_timing_reject(void);
 #define ACTOR_VTABLE g_site.pcvr_actor_vtable
 #define BASE_VTABLE g_site.pcvr_base_vtable
 #define EYE_VTABLE g_site.pcvr_eye_vtable
-#define SUMMARY_CAP 120                        // log summaries, at most one a second
 
 // Guest layouts (1.9.0) read here.
 #define CAMERA_LOOK_AT 0x38        // a camera's look-at: PcVrHeadLookCamera (position, target, up), 0x24 bytes
@@ -81,59 +70,7 @@ static bool binding_valid;
 // visible), until LOCAL is redefined (a new session or a recenter). Never cleared by a camera rebinding.
 static XrPoseSnapshot held_pose;
 static bool held_valid;
-static uint64_t summary_start_ns;
-static unsigned summaries;
-static bool summary_active;
-static uint64_t eye_calls, applied, rejected, unavailable;
 static bool first_binding_logged, first_eye_logged;
-static _Atomic bool timing_enabled;
-static bool timing_active;
-static uint64_t timing_window_ns;
-static unsigned timing_windows;
-static _Atomic uint64_t timing_generic, timing_eye_candidates, timing_bound_eye, timing_eye_self_ns;
-static _Atomic uint64_t timing_observe_calls, timing_observe_ns;
-static _Atomic uint64_t timing_original_samples, timing_original_sample_ns;
-static _Atomic uint64_t timing_memory_calls[LABO_GUEST_TIMING_OPERATIONS];
-static _Atomic uint64_t timing_memory_ns[LABO_GUEST_TIMING_OPERATIONS];
-static _Atomic uint64_t timing_memory_failed[LABO_GUEST_TIMING_OPERATIONS];
-static _Atomic uint64_t timing_guard_rejected;
-// Only wrapper/observer work is attributed. In particular, an original builder
-// (including the fixture's guarded reads) must never contribute to these totals.
-static _Thread_local bool timing_memory_scope;
-
-static uint64_t memory_timing_begin(void) {
-    return timing_memory_scope ? plat_now_ns() : 0;
-}
-
-static void memory_timing_end(unsigned operation, uint64_t start, bool ok) {
-    if (!timing_memory_scope) return;
-    const uint64_t end = plat_now_ns();
-    atomic_fetch_add(&timing_memory_calls[operation], 1);
-    if (end >= start) atomic_fetch_add(&timing_memory_ns[operation], end - start);
-    if (!ok) atomic_fetch_add(&timing_memory_failed[operation], 1);
-}
-
-static void memory_timing_reject(void) {
-    if (timing_memory_scope) atomic_fetch_add(&timing_guard_rejected, 1);
-}
-
-static void reset_timing_counts(void) {
-    atomic_store(&timing_generic, 0);
-    atomic_store(&timing_eye_candidates, 0);
-    atomic_store(&timing_bound_eye, 0);
-    atomic_store(&timing_eye_self_ns, 0);
-    atomic_store(&timing_observe_calls, 0);
-    atomic_store(&timing_observe_ns, 0);
-    atomic_store(&timing_original_samples, 0);
-    atomic_store(&timing_original_sample_ns, 0);
-    for (unsigned i = 0; i < LABO_GUEST_TIMING_OPERATIONS; ++i) {
-        atomic_store(&timing_memory_calls[i], 0);
-        atomic_store(&timing_memory_ns[i], 0);
-        atomic_store(&timing_memory_failed[i], 0);
-    }
-    atomic_store(&timing_guard_rejected, 0);
-}
-
 static bool read_u64(uint64_t address, uint64_t *out) {
     return labo_guest_copy(address, out, sizeof *out, false);
 }
@@ -194,74 +131,14 @@ static bool freshly_copied_eye(const PcVrHeadLookCamera *base,
     return true;
 }
 
-static void maybe_timing_summary_locked(uint64_t now) {
-    if (!timing_active || timing_windows >= SUMMARY_CAP || now < timing_window_ns ||
-        now - timing_window_ns < UINT64_C(1000000000)) return;
-    LOG("[pc-vr-head-look-timing] window=%u generic=%llu eye_caller=%llu bound_eye=%llu eye_self_ns=%llu observe_calls=%llu observe_ns=%llu original_sampled=%llu original_sample_ns=%llu sample_stride=64 query_calls=%llu query_ns=%llu query_failed=%llu read_calls=%llu read_ns=%llu read_failed=%llu write_calls=%llu write_ns=%llu write_failed=%llu guard_rejected=%llu page_query_calls=%llu page_query_ns=%llu page_query_failed=%llu\n",
-        timing_windows + 1,
-        (unsigned long long)atomic_exchange(&timing_generic, 0),
-        (unsigned long long)atomic_exchange(&timing_eye_candidates, 0),
-        (unsigned long long)atomic_exchange(&timing_bound_eye, 0),
-        (unsigned long long)atomic_exchange(&timing_eye_self_ns, 0),
-        (unsigned long long)atomic_exchange(&timing_observe_calls, 0),
-        (unsigned long long)atomic_exchange(&timing_observe_ns, 0),
-        (unsigned long long)atomic_exchange(&timing_original_samples, 0),
-        (unsigned long long)atomic_exchange(&timing_original_sample_ns, 0),
-        (unsigned long long)atomic_exchange(&timing_memory_calls[LABO_GUEST_QUERY], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_ns[LABO_GUEST_QUERY], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_failed[LABO_GUEST_QUERY], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_calls[LABO_GUEST_READ], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_ns[LABO_GUEST_READ], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_failed[LABO_GUEST_READ], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_calls[LABO_GUEST_WRITE], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_ns[LABO_GUEST_WRITE], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_failed[LABO_GUEST_WRITE], 0),
-        (unsigned long long)atomic_exchange(&timing_guard_rejected, 0),
-        (unsigned long long)atomic_exchange(&timing_memory_calls[LABO_GUEST_WORKING_SET], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_ns[LABO_GUEST_WORKING_SET], 0),
-        (unsigned long long)atomic_exchange(&timing_memory_failed[LABO_GUEST_WORKING_SET], 0));
-    timing_window_ns = now;
-    ++timing_windows;
-}
-
-static void maybe_summary_locked(uint64_t now) {
-    if (atomic_load_explicit(&timing_enabled, memory_order_relaxed))
-        maybe_timing_summary_locked(now);
-    // Menu and unrelated layer calls can precede the first verified base for
-    // a long load. Preserve the finite reporting window for this camera path.
-    if (!summary_active) return;
-    if (!summary_start_ns) summary_start_ns = now;
-    if (summaries >= SUMMARY_CAP || now < summary_start_ns ||
-        now - summary_start_ns < UINT64_C(1000000000)) return;
-    LOG("[pc-vr-head-look] window=%u eye=%llu applied=%llu rejected=%llu unavailable=%llu\n", summaries + 1,
-        (unsigned long long)eye_calls, (unsigned long long)applied, (unsigned long long)rejected,
-        (unsigned long long)unavailable);
-    eye_calls = applied = rejected = unavailable = 0;
-    summary_start_ns = now;
-    ++summaries;
-}
-
 bool pc_vr_head_look_enabled(void) {
     return atomic_load_explicit(&look_enabled, memory_order_acquire);
 }
 
 void pc_vr_head_look_observe_controller(uint64_t controller) {
     if (!pc_vr_head_look_enabled()) return;
-    const bool timing = atomic_load_explicit(&timing_enabled, memory_order_relaxed);
-    const uint64_t timing_start = timing ? plat_now_ns() : 0;
     CameraBinding observed;
-    const bool previous_scope = timing_memory_scope;
-    timing_memory_scope = timing;
-    const bool observed_valid = read_binding(controller, &observed);
-    timing_memory_scope = previous_scope;
-    if (!observed_valid) {
-        if (timing) {
-            const uint64_t end = plat_now_ns();
-            atomic_fetch_add(&timing_observe_calls, 1);
-            if (end >= timing_start) atomic_fetch_add(&timing_observe_ns, end - timing_start);
-        }
-        return;
-    }
+    if (!read_binding(controller, &observed)) return;
     pthread_mutex_lock(&look_lock);
     if (!binding_valid || !same_binding(&binding, &observed)) {
         binding = observed;
@@ -270,17 +147,6 @@ void pc_vr_head_look_observe_controller(uint64_t controller) {
             LOG("[pc-vr-head-look] first verified controller/actor/DefaultCamera binding\n");
             first_binding_logged = true;
         }
-    }
-    if (timing) {
-        const uint64_t end = plat_now_ns();
-        if (!timing_active) {
-            timing_active = true;
-            timing_window_ns = end;
-            reset_timing_counts(); // Discard menu/unknown-controller work.
-        }
-        atomic_fetch_add(&timing_observe_calls, 1);
-        if (end >= timing_start) atomic_fetch_add(&timing_observe_ns, end - timing_start);
-        maybe_timing_summary_locked(end);
     }
     pthread_mutex_unlock(&look_lock);
 }
@@ -300,7 +166,6 @@ static const XrPoseSnapshot *frame_pose_locked(XrPoseSnapshot *published) {
         return published;
     }
     if (held_valid && published->local_definition != held_pose.local_definition) held_valid = false;
-    if (!held_valid) ++unavailable;
     return held_valid ? &held_pose : NULL;
 }
 
@@ -353,7 +218,6 @@ static bool eye_before_original(uint64_t eye, uint64_t output, uint64_t frame_po
     // the lock, for the display frame whose pose it then takes below.
     if (pc_vr_pace_pose_wait_on() && pc_vr_projection_trace_root(frame_pointer) && bound_eye_layer(layer))
         pc_vr_pace_pose_wait();
-    const uint64_t log_now = plat_now_ns();
     pthread_mutex_lock(&look_lock);
     CameraBinding observed;
     PcVrHeadLookCamera current_base, current_eye;
@@ -363,12 +227,9 @@ static bool eye_before_original(uint64_t eye, uint64_t output, uint64_t frame_po
     // camera is our verified base belongs to this head-look composition.
     if (!binding_valid || !read_u64(layer + LAYER_SOURCE_CAMERA, &layer_base) ||
         layer_base != binding.base) {
-        maybe_summary_locked(log_now);
         pthread_mutex_unlock(&look_lock);
         return false;
     }
-    ++eye_calls;
-    summary_active = true;
     const bool readable = read_binding(binding.controller, &observed) && same_binding(&binding, &observed) &&
         read_camera(binding.base, &current_base);
     const bool fresh_copy = readable && eye != binding.base &&
@@ -381,9 +242,7 @@ static bool eye_before_original(uint64_t eye, uint64_t output, uint64_t frame_po
         frame_pose_locked(&published) : NULL;
     const bool given = readable &&
         pc_vr_projection_trace_eye(layer, binding.base, &current_base, fresh_copy, pose, frame_pointer);
-    if (!given) ++rejected;
-    else {
-        ++applied;
+    if (given) {
         audit_watch_eyes(layer, !!(layer_side & LAYER_SIDE_SECOND_EYE));  // [pc-vr-audit]
         if (!first_eye_logged) {
             LOG("[pc-vr-head-look] first eye given its native view (side_bit=%u)\n",
@@ -391,7 +250,6 @@ static bool eye_before_original(uint64_t eye, uint64_t output, uint64_t frame_po
             first_eye_logged = true;
         }
     }
-    maybe_summary_locked(log_now);
     pthread_mutex_unlock(&look_lock);
     return given;
 }
@@ -403,35 +261,9 @@ static void head_look_builder(Cpu *cpu) {
     // A recording worker must not retain eligibility while this invocation
     // prepares camera fields or calls the original matrix writer.
     pc_vr_render_trace_invalidate_camera(object);
-    const bool enabled = pc_vr_head_look_enabled();
-    const bool timing = enabled && atomic_load_explicit(&timing_enabled, memory_order_relaxed);
-    const uint64_t call_index = timing ? atomic_fetch_add(&timing_generic, 1) : 0;
-    if (timing && caller == EYE_CALLER) atomic_fetch_add(&timing_eye_candidates, 1);
-    bool given = false;
-    if (enabled && caller == EYE_CALLER) {
-        const uint64_t start = timing ? plat_now_ns() : 0;
-        const bool previous_scope = timing_memory_scope;
-        timing_memory_scope = timing;
-        given = eye_before_original(object, output, cpu->x[29]);
-        timing_memory_scope = previous_scope;
-        if (timing) {
-            const uint64_t end = plat_now_ns();
-            if (end >= start) atomic_fetch_add(&timing_eye_self_ns, end - start);
-            if (given) atomic_fetch_add(&timing_bound_eye, 1);
-        }
-    }
-    const bool sample_original = timing && !(call_index & 63);
-    const uint64_t original_start = sample_original ? plat_now_ns() : 0;
-    const bool previous_scope = timing_memory_scope;
-    timing_memory_scope = false;
+    const bool given = pc_vr_head_look_enabled() && caller == EYE_CALLER &&
+        eye_before_original(object, output, cpu->x[29]);
     original_builder(cpu); // Exactly once, including every rejected/unsupported call.
-    timing_memory_scope = previous_scope;
-    if (sample_original) {
-        const uint64_t end = plat_now_ns();
-        atomic_fetch_add(&timing_original_samples, 1);
-        if (end >= original_start)
-            atomic_fetch_add(&timing_original_sample_ns, end - original_start);
-    }
     if (given) pc_vr_projection_trace_eye_built(object - LAYER_EYE_CAMERA);
 }
 
@@ -455,36 +287,16 @@ void pc_vr_head_look_init(void) {
     }
     memset(&binding, 0, sizeof binding);
     binding_valid = false;
-    summary_start_ns = 0;
-    summaries = 0;
-    summary_active = false;
-    eye_calls = applied = rejected = unavailable = 0;
-    timing_active = false;
-    timing_window_ns = 0;
-    timing_windows = 0;
-    reset_timing_counts();
-    atomic_store_explicit(&timing_enabled, pc_vr_config()->diagnostics.head_look_timing, memory_order_release);
     atomic_store_explicit(&look_enabled, true, memory_order_release);
     pthread_mutex_unlock(&look_lock);
     LOG("[pc-vr-head-look] armed pinned DefaultCamera/eye composition\n");
     pc_vr_projection_trace_init();
-    if (atomic_load_explicit(&timing_enabled, memory_order_relaxed))
-        LOG("[pc-vr-head-look-timing] armed bounded 1Hz attribution; original builder sampled 1/64 calls\n");
 }
 
 RT_ON_RESET(pc_vr_head_look_reset) {
     atomic_store_explicit(&look_enabled, false, memory_order_release);
-    atomic_store_explicit(&timing_enabled, false, memory_order_release);
     pthread_mutex_lock(&look_lock);
     memset(&binding, 0, sizeof binding);
     binding_valid = false;
-    summary_start_ns = 0;
-    summaries = 0;
-    summary_active = false;
-    eye_calls = applied = rejected = unavailable = 0;
-    timing_active = false;
-    timing_window_ns = 0;
-    timing_windows = 0;
-    reset_timing_counts();
     pthread_mutex_unlock(&look_lock);
 }

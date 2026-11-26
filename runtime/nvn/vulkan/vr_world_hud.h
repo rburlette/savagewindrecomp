@@ -71,7 +71,6 @@
 #define VR_WORLD_HUD_SIZE_MIN 0.4      // a marker's size against its size at Link's distance: at least
 #define VR_WORLD_HUD_SIZE_MAX 1.5      // and at most
 #define VR_AIM_SIZE_MIN 0.6            // the crosshair's least size (it must stay big enough to aim with)
-#define VR_WORLD_HUD_PANE_LARGE 400.0f // layout units: a placed pane larger is logged (the size cap before backlog 9)
 #define VR_UI_TAN_X 0.82904            // the UI camera's horizontal half-FOV as a tangent: tan(25 degrees) * 16 / 9
 #define VR_HUD_LAYER_X 0.92f           // Labo's HUD layer: the layout's scale (square in the half's pixels)
 #define VR_HUD_LAYER_Y 0.46f
@@ -105,12 +104,12 @@ typedef struct {
 //    vr_hud_fade_move), just before active is set true; a refused draw leaves the last one there, unused.
 //  - frame_draws: markers placed since the last present; reset at each game present (exec.c vk_vr_present) and at a
 //    game reset (vk_exec_reset); the "shot frame" log line of an eye capture reads it (exec.c vr_capture_eyes).
-//  - draws, exact (linked by pane), unmatched (no report and no fresh aim), behind (behind the UI camera or the eye),
-//    logged: for the process, never reset; for the logs only.
+//  - draws, exact (linked by pane), unmatched (no report and no fresh aim), behind (behind the UI camera or the eye):
+//    for the process, never reset; what the placements did, counted (the fixture compares them with the code before).
 typedef struct {
     bool active;
     VrHudMove move;
-    uint64_t draws, unmatched, behind, logged, frame_draws, exact;
+    uint64_t draws, unmatched, behind, frame_draws, exact;
 } VrWorldHud;
 
 // Sets up the move for a draw into the half with this viewport (guest pixels): scaled by scale about anchor, turned so

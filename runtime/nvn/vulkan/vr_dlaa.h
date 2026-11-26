@@ -79,12 +79,4 @@ TexBackend *vr_dlaa_eye(VkCommandBuffer cb, TexBackend *color, TexBackend *depth
 // The game's reset: every eye's history starts over.
 void vr_dlaa_reset(void);
 
-// (development) SAVAGEWIND_PC_VR_DLAA_CHECK=1: the camera taken from the certificate compared with what the eye's
-// draws read. vr_dlaa_checking: whether it is on. vr_dlaa_check_block: for each draw with this certificate id, its
-// first constant block (block, bytes; the layout exec.c's frame generation reads for the flat game's world camera);
-// when the id changes, one line for the last: how many perspective camera blocks it saw, how many were its camera, and
-// how far the closest one's view, view-projection and projection were from the certificate's (the first 64).
-bool vr_dlaa_checking(void);
-void vr_dlaa_check_block(uint64_t certificate_id, const float *block, size_t bytes);
-
 #endif

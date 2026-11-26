@@ -822,40 +822,13 @@ void pc_vr_projection_trace_eye_layer(uint64_t layer, uint64_t guest_frame_point
     pthread_mutex_unlock(&projection_lock);
 }
 
-// (diagnostic) SAVAGEWIND_PC_VR_PROJECTION_LIST=1: each perspective projection the game builds, by object, with its
-// fovy, aspect and centre, when first seen and when those change (at most 64 lines); =2: only the world camera's and
-// its copies (16:9, far plane 20000 or more).
-static void projection_list(uint64_t object, uint64_t caller) {
-    static uint64_t objects[32];
-    static float seen[32][3];
-    static unsigned count, lines;
-    const int on = pc_vr_config()->diagnostics.projection_list;
-    float params[9];
-    if (!on || lines >= 64 || !projection_read(object + 0x98, params, sizeof params)) return;
-    if (on == 2 && !(params[1] >= 20000 && fabsf(params[6] - 16.0f / 9.0f) < 0.01f)) return;
-    pthread_mutex_lock(&projection_lock);  // (for the list's own state: nothing a certificate depends on changes)
-    unsigned i = 0;
-    while (i < count && objects[i] != object) ++i;
-    const bool fresh = i == count && count < 32;
-    if (fresh) objects[count++] = object;
-    if (lines < 64 && i < count && (fresh || seen[i][0] != params[2] || seen[i][1] != params[6] || seen[i][2] != params[7])) {
-        seen[i][0] = params[2], seen[i][1] = params[6], seen[i][2] = params[7];
-        ++lines;
-        LOG("[pc-vr-projection-list] object=%llx caller=%llx fovy_deg=%.4f aspect=%.5f center=%.5f,%.5f near=%.4g far=%.6g\n",
-            (unsigned long long)object, (unsigned long long)caller, params[2] * 57.29578f,
-            params[6], params[7], params[8], params[0], params[1]);
-    }
-    pthread_mutex_unlock(&projection_lock);
-}
-
 static void projection_builder_wrapper(Cpu *cpu) {
-    const uint64_t object = cpu->x[0], caller = cpu->x[30];
+    const uint64_t object = cpu->x[0];
     render_invalidate_projection(object, false);
     const bool exact = cpu->x[30] == PROJ_BUILD_CALLER && cpu->x[1] == object + 0xc;
     const bool written = exact && projection_write_native_fov(object);
     projection_original(cpu);
     if (written) projection_logical_built(object);
-    projection_list(object, caller);
 }
 
 static void projection_device_wrapper(Cpu *cpu) {

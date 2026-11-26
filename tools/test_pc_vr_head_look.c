@@ -51,7 +51,6 @@ static unsigned checks, override_calls, lookup_calls, original_calls, pose_reads
 
 static bool mock_pc_vr;
 static uint64_t mock_ns = UINT64_C(1000000000000000);
-static uint64_t mock_clock_step, mock_original_cost_ns;
 static XrPoseReadResult mock_pose_result = XR_POSE_VALID;
 static XrPoseSnapshot mock_pose;
 static uint64_t mock_local_definition = 1, mock_calibration_epoch = 1;
@@ -129,9 +128,7 @@ void pc_vr_projection_trace_eye_built(uint64_t layer) {
 const GameLibTables *gamelib_tables(void) { return &game_tables; }
 Module *loader_module(const char *name) { return !strcmp(name, "main") ? &loaded_main : NULL; }
 uint64_t plat_now_ns(void) {
-    const uint64_t result = mock_ns;
-    mock_ns += mock_clock_step;
-    return result;
+    return mock_ns;
 }
 XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
     ++pose_reads;
@@ -141,7 +138,6 @@ XrPoseReadResult xr_runtime_get_pose(XrPoseSnapshot *out) {
 static void mock_original(Cpu *c) {
     ++original_calls;
     original_order = ++mock_order;
-    mock_ns += mock_original_cost_ns;
     if (valid_camera_address(c->x[0])) (void)read_camera(c->x[0], &original_seen);
     c->x[5] ^= UINT64_C(0x54321);
     c->sp -= 32;
@@ -157,12 +153,6 @@ void hle_override(uint64_t address, HostFn fn, const char *name) {
     override_function = fn;
 }
 void rt_fatal_trace(void) { abort(); }
-// The diagnostic SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING in the process's configuration (pc_vr_config.h); head look itself
-// is PC VR's play configuration (mock_pc_vr here).
-static void set_timing_optin(const char *value) {
-    test_pc_vr_configure((const char *const[]){"vr", "1", "SAVAGEWIND_PC_VR_HEAD_LOOK_TIMING", value, NULL});
-}
-
 // A usable published pose (every flag head look asks for set), told apart by its frame id, in the current LOCAL
 // definition and calibration epoch.
 static void set_pose(uint64_t frame_id) {
@@ -229,19 +219,6 @@ static void call_builder(uint64_t object, uint64_t output, uint64_t caller) {
     if (built_calls) CHECK(eye_built_order > original_order && eye_built_layer == object - LAYER_EYE_CAMERA);
 }
 
-// The head-look counters the summary prints, and the change since a snapshot.
-typedef struct {
-    uint64_t eye_calls, applied, rejected, unavailable;
-} SummaryCounts;
-static SummaryCounts summary_counts(void) {
-    return (SummaryCounts){eye_calls, applied, rejected, unavailable};
-}
-static bool counts_changed_by(SummaryCounts before, uint64_t eye_delta, uint64_t applied_delta,
-                              uint64_t rejected_delta, uint64_t unavailable_delta) {
-    return eye_calls == before.eye_calls + eye_delta && applied == before.applied + applied_delta &&
-        rejected == before.rejected + rejected_delta && unavailable == before.unavailable + unavailable_delta;
-}
-
 #ifdef _WIN32
 static uint64_t controller, weak, actor, base, other_base, layer, eye, layer2, eye2;
 static PcVrHeadLookCamera base_initial, eye_initial, eye2_initial;
@@ -294,14 +271,12 @@ static void eye_call(uint64_t eye_object, bool root) {
 #endif
 
 int main(void) {
-    // Without PC VR, no head look, whatever the diagnostics ask (with it, head look is part of the play configuration:
-    // no switch of its own turns it off).
-    set_timing_optin("1");
+    // Without PC VR, no head look (with it, head look is part of the play configuration: no switch of its own turns it
+    // off).
+    test_pc_vr_configure((const char *const[]){"vr", "1", NULL});
     mock_pc_vr = false;
     pc_vr_head_look_init();
-    CHECK(!pc_vr_head_look_enabled() && !atomic_load(&timing_enabled) &&
-          !registered && !override_calls && !trace_init_calls);
-    set_timing_optin(NULL);
+    CHECK(!pc_vr_head_look_enabled() && !registered && !override_calls && !trace_init_calls);
     mock_pc_vr = true;
     // A game version without PC VR's sites, or a main module of another layout: not armed.
     const uint64_t builder = g_site.pcvr_matrix_builder;
@@ -318,21 +293,18 @@ int main(void) {
     CHECK(pc_vr_head_look_enabled() && registered && override_calls == 1 && trace_init_calls == 1);
     CHECK(override_address == BUILDER && override_function == head_look_builder);
     CHECK(lookup_calls == 1);
-    CHECK(!summary_active && summaries == 0);
 
 #ifdef _WIN32
     setup_guest();
     mock_frame_pointer = UINT64_C(0x7100001000);
     set_pose(1);
     // No binding yet: each eye builder call still names its layer to the frame record (eye_layer), and nothing else is
-    // asked; nothing is counted, and long menu time consumes no summary budget.
+    // asked.
     eye_call(eye, true);
     CHECK(eye_layer_calls == 1 && eye_layer_layer == layer);
-    mock_ns += UINT64_C(300000000000);
     eye_call(eye2, false);
     CHECK(eye_layer_calls == 2 && eye_layer_layer == layer2);
     CHECK(!trace_eye.calls && !eye_built_calls && !pose_reads && !root_calls);
-    CHECK(!summary_active && summaries == 0 && !eye_calls && !applied && !rejected && !unavailable);
     // Not an eye call: another caller, or an output that is not the camera's matrix. No eye layer named.
     call_builder(eye, eye + 8, MAIN_BASE + 0x9999);
     call_builder(eye, eye + 16, EYE_CALLER);
@@ -340,33 +312,26 @@ int main(void) {
     pc_vr_head_look_observe_controller(controller);
     CHECK(binding_valid && binding.base == base && binding.actor == actor && binding.weak == weak);
 
-    // Root, fresh, but no usable pose yet in this LOCAL definition: the frame record is asked with none, and the
-    // unavailable pose is counted.
+    // Root, fresh, but no usable pose yet in this LOCAL definition: the frame record is asked with none.
     mock_pose.active = false;
-    SummaryCounts before = summary_counts();
     eye_call(eye, true);
     CHECK(trace_eye.calls == 1 && trace_eye.fresh && !trace_eye.pose_given && root_frame_pointer == mock_frame_pointer);
-    CHECK(counts_changed_by(before, 1, 1, 0, 1) && summary_active);
 
     // Root and fresh: the frame record gets the published usable pose, the bound base and the base as read now.
     set_pose(2);
     mock_frame_pointer += 0x100;
     unsigned reads_before = pose_reads;
-    before = summary_counts();
     eye_call(eye, true);
     CHECK(trace_eye.calls == 2 && trace_eye.layer == layer && trace_eye.base == base && trace_eye.fresh);
     CHECK(trace_eye.pose_given && same_pose(&trace_eye.pose, &mock_pose) && pose_reads == reads_before + 1);
     CHECK(same_camera(&trace_eye.base_camera, &base_initial) && root_frame_pointer == mock_frame_pointer);
     CHECK(eye_built_calls == 2 && eye_built_layer == layer && held_valid);
-    CHECK(counts_changed_by(before, 1, 1, 0, 0));
     // The sibling (not the root): no pose, not even a read of the published one, which has moved on.
     set_pose(3);
     reads_before = pose_reads;
-    before = summary_counts();
     eye_call(eye2, false);
     CHECK(trace_eye.calls == 3 && trace_eye.layer == layer2 && trace_eye.fresh && !trace_eye.pose_given);
     CHECK(pose_reads == reads_before && eye_built_calls == 3 && eye_built_layer == layer2);
-    CHECK(counts_changed_by(before, 1, 1, 0, 0));
     // Not a fresh copy at the root (the game reused the eye: its view no longer the base's, or a wrong vtable): the
     // frame record is told so, with no pose and no pose read.
     write_camera(eye, &(PcVrHeadLookCamera){.position = {0.03f, 2, 5}, .target = {1.03f, 2, 0}, .up = {0, 1, 0}});
@@ -389,31 +354,26 @@ int main(void) {
     CHECK(!freshly_copied_eye(&far_base, &far_eye));
     // The frame record says no: rejected, no eye_built; the original still runs once (call_builder).
     mock_trace_result = false;
-    before = summary_counts();
     eye_call(eye, true);
     CHECK(trace_eye.calls == 6 && trace_eye.fresh && trace_eye.pose_given && eye_built_calls == 5);
-    CHECK(counts_changed_by(before, 1, 0, 1, 0));
     mock_trace_result = true;
-    // An unrelated layer (its source camera not the bound base): its layer named, nothing asked, nothing counted.
+    // An unrelated layer (its source camera not the bound base): its layer named, nothing asked.
     write_u64(layer2 + 0x80, other_base);
-    before = summary_counts();
     const unsigned layers_before = eye_layer_calls;
     eye_call(eye2, false);
     CHECK(eye_layer_calls == layers_before + 1 && eye_layer_layer == layer2);
-    CHECK(trace_eye.calls == 6 && eye_built_calls == 5 && counts_changed_by(before, 0, 0, 0, 0));
+    CHECK(trace_eye.calls == 6 && eye_built_calls == 5);
     write_u64(layer2 + 0x80, base);
-    // The bound chain no longer reads as bound (the actor's vtable changed): counted as an eye call and rejected
-    // without asking the frame record or reading the pose.
+    // The bound chain no longer reads as bound (the actor's vtable changed): rejected without asking the frame record
+    // or reading the pose.
     write_u64(actor, ACTOR_VTABLE + 8);
-    before = summary_counts();
     reads_before = pose_reads;
     eye_call(eye, true);
     CHECK(trace_eye.calls == 6 && eye_built_calls == 5 && pose_reads == reads_before);
-    CHECK(counts_changed_by(before, 1, 0, 1, 0));
     write_u64(actor, ACTOR_VTABLE);
 
     // D101: a published pose that becomes unusable (each flag in turn, then an unavailable read) leaves the frame
-    // record the last usable one, uncounted, while LOCAL keeps its definition.
+    // record the last usable one while LOCAL keeps its definition.
     set_pose(10);
     eye_call(eye, true);
     const XrPoseSnapshot last_usable = mock_pose;
@@ -429,21 +389,18 @@ int main(void) {
         if (mode == 6) mock_pose.frame_id = 0;
         if (mode == 7) mock_pose.calibration.epoch = 0;
         if (mode == 8) mock_pose_result = XR_POSE_UNAVAILABLE;
-        before = summary_counts();
         eye_call(eye, true);
         CHECK(trace_eye.pose_given && same_pose(&trace_eye.pose, &last_usable));
-        CHECK(counts_changed_by(before, 1, 1, 0, 0));
     }
     // LOCAL redefined (a recenter, a new session) while the publication is unusable (here before the XR core's
-    // calibration in it): no pose, counted, and again on the next root.
+    // calibration in it): no pose, and again none on the next root.
     ++mock_local_definition;
     set_pose(30);
     mock_pose.calibration.epoch = 0;
-    before = summary_counts();
     eye_call(eye, true);
     CHECK(!trace_eye.pose_given && !held_valid);
     eye_call(eye, true);
-    CHECK(!trace_eye.pose_given && counts_changed_by(before, 2, 2, 0, 2));
+    CHECK(!trace_eye.pose_given);
     // A new usable pose is taken, and becomes the one held.
     set_pose(31);
     const XrPoseSnapshot new_usable = mock_pose;
@@ -468,97 +425,20 @@ int main(void) {
     CHECK(binding_valid && binding.base == base && held_valid);
     set_pose(33);
 
-    // The summary prints and clears the counters once a second has passed since its window opened.
-    CHECK(summaries == 0 && eye_calls && applied && rejected && unavailable);
-    mock_ns += UINT64_C(1000000000);
-    eye_call(eye, true);
-    CHECK(summaries == 1 && !eye_calls && !applied && !rejected && !unavailable);
-    eye_call(eye, true);
-    CHECK(summaries == 1 && eye_calls == 1 && applied == 1 && !rejected && !unavailable);
-
-    // The optional timer excludes the original generated builder from wrapper self-cost, samples that original only
-    // once per 64 generic calls, and discards prebinding menu traffic before its bounded report window.
+    // Guest reads the guards refuse copy nothing: above the guest range, a failed query or working-set lookup, a failed
+    // read or write, a guard page, a page without access, decommitted memory.
     pc_vr_head_look_reset();
-    set_timing_optin("1");
-    pc_vr_head_look_init();
-    CHECK(pc_vr_head_look_enabled() && atomic_load(&timing_enabled));
-    CHECK(override_calls == 1 && lookup_calls == 1 && trace_init_calls == 2);
-    mock_clock_step = 100;
-    mock_original_cost_ns = UINT64_C(1000000);
-    for (unsigned i = 0; i < 65; ++i)
-        call_builder(base, base + 8, MAIN_BASE + 0x9999);
-    CHECK(!timing_active && atomic_load(&timing_generic) == 65);
-    pc_vr_head_look_observe_controller(controller);
-    CHECK(timing_active && atomic_load(&timing_generic) == 0);
-    CHECK(atomic_load(&timing_observe_calls) == 1);
-    for (unsigned i = 0; i < 64; ++i)
-        call_builder(base, base + 8, MAIN_BASE + 0x9999);
-    CHECK(atomic_load(&timing_generic) == 64);
-    CHECK(atomic_load(&timing_original_samples) == 1);
-    CHECK(atomic_load(&timing_original_sample_ns) >= mock_original_cost_ns);
-    CHECK(atomic_load(&timing_original_sample_ns) < 2 * mock_original_cost_ns);
-    CHECK(atomic_load(&timing_eye_self_ns) == 0);
-    // Both the expected and actual original mock call read_camera; neither is wrapper work, and the first binding's
-    // prewindow checks were discarded.
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_QUERY]) == 0 &&
-          atomic_load(&timing_memory_calls[LABO_GUEST_READ]) == 0 &&
-          atomic_load(&timing_memory_calls[LABO_GUEST_WRITE]) == 0 &&
-          atomic_load(&timing_memory_calls[LABO_GUEST_WORKING_SET]) == 0);
-    // One bound eye call: its own work attributed (guest reads only: head look writes nothing), the original sampled
-    // as call 64.
-    set_pose(40);
-    eye_call(eye, true);
-    CHECK(atomic_load(&timing_generic) == 65);
-    CHECK(atomic_load(&timing_eye_candidates) == 1 && atomic_load(&timing_bound_eye) == 1);
-    CHECK(atomic_load(&timing_eye_self_ns) > 0);
-    CHECK(atomic_load(&timing_original_samples) == 2);
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_QUERY]) == 0);
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_READ]) > 0 &&
-          atomic_load(&timing_memory_calls[LABO_GUEST_WORKING_SET]) > 0);
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_WRITE]) == 0);
-    CHECK(atomic_load(&timing_memory_ns[LABO_GUEST_READ]) ==
-              100 * atomic_load(&timing_memory_calls[LABO_GUEST_READ]) &&
-          atomic_load(&timing_memory_ns[LABO_GUEST_WORKING_SET]) ==
-              100 * atomic_load(&timing_memory_calls[LABO_GUEST_WORKING_SET]));
-    CHECK(!atomic_load(&timing_guard_rejected) && !timing_memory_scope);
-    // A rejected bound eye call (the frame record says no) is a candidate but not a bound eye.
-    mock_trace_result = false;
-    eye_call(eye, true);
-    mock_trace_result = true;
-    CHECK(atomic_load(&timing_eye_candidates) == 2 && atomic_load(&timing_bound_eye) == 1);
-    mock_ns += UINT64_C(1000000000);
-    pc_vr_head_look_observe_controller(controller);
-    CHECK(timing_windows == 1 && atomic_load(&timing_generic) == 0);
-    CHECK(atomic_load(&timing_eye_self_ns) == 0);
-    for (unsigned i = 0; i < LABO_GUEST_TIMING_OPERATIONS; ++i)
-        CHECK(!atomic_load(&timing_memory_calls[i]) &&
-              !atomic_load(&timing_memory_ns[i]) && !atomic_load(&timing_memory_failed[i]));
-
-    // Failed APIs and early guard rejection still contribute to attribution.
-    // Guards must remain in place; the diagnostic never copies rejected pages.
     uint64_t scratch = 0;
-    timing_memory_scope = true;
     CHECK(!labo_guest_copy(GUEST_HI, &scratch, sizeof scratch, false));
-    CHECK(atomic_load(&timing_guard_rejected) == 1 &&
-          !atomic_load(&timing_memory_calls[LABO_GUEST_QUERY]));
     fail_query = fail_working_set = true;
     CHECK(!labo_guest_copy(base, &scratch, sizeof scratch, false));
     fail_query = fail_working_set = false;
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_QUERY]) == 1 &&
-          atomic_load(&timing_memory_failed[LABO_GUEST_QUERY]) == 1 &&
-          atomic_load(&timing_guard_rejected) == 2);
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_WORKING_SET]) == 1 &&
-          atomic_load(&timing_memory_failed[LABO_GUEST_WORKING_SET]) == 1);
     fail_read = true;
     CHECK(!labo_guest_copy(base, &scratch, sizeof scratch, false));
     fail_read = false;
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_READ]) == 1 &&
-          atomic_load(&timing_memory_failed[LABO_GUEST_READ]) == 1);
     fail_write = true;
     CHECK(!labo_guest_copy(base, &scratch, sizeof scratch, true));
     fail_write = false;
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_WRITE]) == 1 &&
-          atomic_load(&timing_memory_failed[LABO_GUEST_WRITE]) == 1);
     const uint64_t guard_page = MAIN_BASE + UINT64_C(0x22004000);
     DWORD prior_protect;
     MEMORY_BASIC_INFORMATION guard_info;
@@ -572,29 +452,10 @@ int main(void) {
     CHECK(!labo_guest_copy(guard_page, &scratch, sizeof scratch, true));
     CHECK(VirtualFree((void *)(uintptr_t)guard_page, 0x1000, MEM_DECOMMIT));
     CHECK(!labo_guest_copy(guard_page, &scratch, sizeof scratch, false));
-    CHECK(atomic_load(&timing_memory_calls[LABO_GUEST_QUERY]) == 4 &&
-          atomic_load(&timing_memory_calls[LABO_GUEST_WORKING_SET]) == 6 &&
-          atomic_load(&timing_memory_calls[LABO_GUEST_READ]) == 1 &&
-          atomic_load(&timing_memory_calls[LABO_GUEST_WRITE]) == 1 &&
-          atomic_load(&timing_guard_rejected) == 5);
-    timing_memory_scope = false;
-    timing_windows = SUMMARY_CAP;
-    mock_ns += UINT64_C(1000000000);
-    pc_vr_head_look_observe_controller(controller);
-    CHECK(timing_windows == SUMMARY_CAP);
-    pc_vr_head_look_reset();
-    CHECK(!atomic_load(&timing_enabled) && !timing_active &&
-          atomic_load(&timing_generic) == 0);
-    for (unsigned i = 0; i < LABO_GUEST_TIMING_OPERATIONS; ++i)
-        CHECK(!atomic_load(&timing_memory_calls[i]) &&
-              !atomic_load(&timing_memory_ns[i]) && !atomic_load(&timing_memory_failed[i]));
-    CHECK(!atomic_load(&timing_guard_rejected) && !timing_memory_scope);
-    mock_clock_step = mock_original_cost_ns = 0;
-    set_timing_optin(NULL);
 
     // After a reset head look is off: an eye call only runs the original (call_builder), names no layer and asks
-    // nothing; the binding and the counters are gone.
-    CHECK(!pc_vr_head_look_enabled() && !binding_valid && !summary_active && !eye_calls && !applied && !rejected);
+    // nothing; the binding is gone.
+    CHECK(!pc_vr_head_look_enabled() && !binding_valid);
     const unsigned layers_after_reset = eye_layer_calls, traces_after_reset = trace_eye.calls;
     eye_call(eye, true);
     CHECK(eye_layer_calls == layers_after_reset && trace_eye.calls == traces_after_reset);

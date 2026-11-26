@@ -265,12 +265,7 @@ static uint8_t tex_scale_group(const NvnTexture *t) {
     if (t->target == 1 && t->width == 2250 && t->height == 1080) return RS_MAP;  // (and its depth target, if any)
     if (t->target == 1 && t->width == 288 && t->height == 288 && t->format == 0x3d) return RS_MAP;  // (the minimap's)
     float a = (float)t->width / (float)t->height;
-    if (a >= 0.87f && a <= 0.91f && eye_scale_on()) {
-        static unsigned logged;
-        if (logged++ < 24) LOG("[pc-vr-eye-scale] eye target %ux%u flags %#x format %#x layers %u levels %u\n",
-                               t->width, t->height, t->flags, t->format, t->depth, t->levels);
-        return RS_EYE;
-    }
+    if (a >= 0.87f && a <= 0.91f && eye_scale_on()) return RS_EYE;
     if (a < 1.74f || a > 1.81f) return RS_NONE;
     if (t->flags & 1) return RS_OUT;  // NVN_TEXTURE_FLAGS_DISPLAY: the images the game presents
     for (int k = 0; k < 4; k++)       // the final image's 1920x1080 and its halves (rounded either way)
