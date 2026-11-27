@@ -645,6 +645,12 @@ SITES = [
     # builder of a layer's model entries calls to pick the level (1.9.0 0x70010575a4), at its load of the entry's
     # stored depth
     Site('pcvr_model_detail_depth', 'code', '7100082a 5400022b bd401801 bd400042 1e222821 1e202020', 2),
+    # PC VR's sound listener turned with the head (runtime/hle/pc_vr_listener.c): the entry of the game's
+    # snd::ListenerPoser calc (vtable +0x38; x1 the listener's view, x2 the camera's view), which the audio library's
+    # listener update (1.9.0 0x7000f1380c) calls once a frame for the poser it holds
+    Site('pcvr_listener_poser', 'code', 'd10403ff fd004bea f9005ffb 6d09a3e9 a90afbfd a90c67fa a90d5ff8 a90e57f6 '
+         'a90f4ff4 9102a3fd 9102c017 aa0003f4 aa0203f5 aa1703e0 aa0103f3 94000000/fc000000 bd40de80 1e202008 '
+         '5400000c/ff00001f', 0),
     # sead::LookAtCamera::doUpdateMatrix (tools/patches.py _lookat_update): its first load of the eye (+0x38); eye,
     # at (+0x44) and up (+0x50) make the view matrix written to x1 (free camera, runtime/hle/freecam.c)
     Site('lookat_update', 'code', '2d470801 2d480c00 1e232020 2d491404 1e240440 1e250400 54000000/ff00001f 1e233823', 0),
@@ -884,6 +890,7 @@ OPTIONAL_GROUPS = [
     ('pcvr_grass_volume', 'pcvr_grass_projection', 'pcvr_grass_view', 'pcvr_volume_view', 'pcvr_volume_projection',
      'pcvr_volume_copy'),  # (1.9.0 only)
     ('pcvr_model_detail_depth',),  # (1.9.0 only)
+    ('pcvr_listener_poser',),  # (1.9.0 only; without it the sounds stay with the game camera)
     ('pcvr_ui_parallax',),
     ('pcvr_layer_final_draw', 'pcvr_layer_placement_draw', 'pcvr_display_lens_draw', 'pcvr_display_copy_draw'),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
@@ -1290,6 +1297,7 @@ KNOWN = {
         'pcvr_volume_projection': 0x7000f90cf4,
         'pcvr_volume_copy': 0x700101a468,
         'pcvr_model_detail_depth': 0x70010575e0,
+        'pcvr_listener_poser': 0x700138a278,
         'pcvr_ui_parallax': 0x7000eeee50,
         'pcvr_layer_final_draw': 0x700126c080,
         'pcvr_layer_placement_draw': 0x7000fec358,

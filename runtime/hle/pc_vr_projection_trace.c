@@ -33,6 +33,7 @@
 #include "../xr/xr_runtime.h"
 #include "labo_guest_memory.h"
 #include "pc_vr_cull_view.h"
+#include "pc_vr_listener.h"
 #include "pc_vr_projection_math.h"
 #include "pc_vr_projection_trace.h"
 #include "pc_vr_render_trace.h"
@@ -567,6 +568,8 @@ bool pc_vr_projection_trace_eye(uint64_t layer, uint64_t base, const PcVrHeadLoo
                 memcpy(eye_fov[0], pose->eyes[0].fov_left_right_up_down, sizeof eye_fov[0]);
                 memcpy(eye_fov[1], pose->eyes[1].fov_left_right_up_down, sizeof eye_fov[1]);
                 pc_vr_cull_view_publish(base, record->pair.eyes, eye_fov);
+                // The head's offset from the base camera, for the sound listener (pc_vr_listener.c).
+                pc_vr_listener_publish(base, base_camera, record->pair.eyes);
                 double focus = 0;
                 for (unsigned i = 0; i < 3; ++i) focus += pow((double)base_camera->target[i] - base_camera->position[i], 2);
                 focus = sqrt(focus) / projection_view_scale;

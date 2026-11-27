@@ -82,6 +82,15 @@ void pc_vr_cull_view_publish(uint64_t base_camera, const PcVrHeadLookCamera eyes
     ++cull_view_publications;
     cull_view_last_base = base_camera;
 }
+// The head's offset for the sound listener (runtime/hle/pc_vr_listener.c; its math has its own fixture): the calls,
+// the last base camera and whether the base camera given is the record's.
+static unsigned listener_publications;
+static uint64_t listener_last_base;
+void pc_vr_listener_publish(uint64_t base_camera, const PcVrHeadLookCamera *base, const PcVrHeadLookCamera eyes[2]) {
+    (void)eyes;
+    ++listener_publications;
+    listener_last_base = base && base_camera ? base_camera : 0;
+}
 const GameLibTables *gamelib_tables(void) { return &game_tables; }
 Module *loader_module(const char *name) { return !strcmp(name, "main") ? &loaded_main : NULL; }
 bool pc_vr_main_compatible(void) { return pc_vr_main_layout(gamelib_tables(), loader_module("main")); }
@@ -1483,6 +1492,8 @@ int main(void) {
     test_play_configuration();
     // Every accepted root call published its two eye views with its base camera (for the head view of visibility).
     CHECK(cull_view_publications > 0 && cull_view_last_base != 0);
+    // ... and the head's offset from the same base camera, for the sound listener, as often.
+    CHECK(listener_publications == cull_view_publications && listener_last_base == cull_view_last_base);
     printf("PC VR projection/native-view fixture: %u checks passed (synthetic guest pages only)\n", checks);
     return 0;
 }

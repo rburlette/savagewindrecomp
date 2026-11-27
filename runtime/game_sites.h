@@ -145,7 +145,8 @@
     X(replace_weapon_modifier) \
     X(pcvr_volume_view)       /* a view volume set from a view matrix (runtime/hle/pc_vr_cull_view.c) */ \
     X(pcvr_volume_projection) /* a view volume set from a projection */ \
-    X(pcvr_volume_copy)       /* a view volume copied */
+    X(pcvr_volume_copy)       /* a view volume copied */ \
+    X(pcvr_listener_poser)    /* the sound listener poser's calc (runtime/hle/pc_vr_listener.c) */
 
 typedef struct {
 #define GAME_SITE_FIELD(n) uint64_t n;
