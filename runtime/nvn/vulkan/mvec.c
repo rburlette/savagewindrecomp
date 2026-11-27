@@ -240,7 +240,8 @@ bool mvec_enabled(void) {
     static bool on;
     uint64_t f = renderer_present_count();
     extern volatile int g_fg_want;  // (vulkan/exec.c: frame generation interpolates with them too)
-    if (f != at) at = f, on = rt_temporal() || (g_fg_want && mvec_for_framegen());
+    extern bool vr_dlaa_object_vectors(void);  // (PC VR: DLSS on the eye images, vr_dlaa.h)
+    if (f != at) at = f, on = rt_temporal() || (g_fg_want && mvec_for_framegen()) || vr_dlaa_object_vectors();
     return on;
 }
 

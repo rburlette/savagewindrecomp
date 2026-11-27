@@ -202,6 +202,97 @@ static inline bool vr_dlaa_cut(const VrDlaaCamera *now, const VrDlaaCamera *prev
     return !(moved <= 100) || !(turned >= 0.82);
 }
 
+// The inverse of a 4x4 matrix (row-major, in double): false when it has none.
+static inline bool vr_invert4(const double matrix[16], double inverse[16]) {
+    double cofactor[16];
+    const double *m = matrix;
+    cofactor[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] +
+        m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    cofactor[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] -
+        m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    cofactor[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] +
+        m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    cofactor[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] -
+        m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    cofactor[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] -
+        m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    cofactor[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] +
+        m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    cofactor[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] -
+        m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    cofactor[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] +
+        m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    cofactor[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] +
+        m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    cofactor[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] -
+        m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    cofactor[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] +
+        m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    cofactor[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] -
+        m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    cofactor[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] -
+        m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    cofactor[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] +
+        m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    cofactor[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] -
+        m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    cofactor[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] +
+        m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    const double determinant = m[0] * cofactor[0] + m[1] * cofactor[4] + m[2] * cofactor[8] + m[3] * cofactor[12];
+    if (!(fabs(determinant) > 0) || !isfinite(determinant)) return false;
+    for (unsigned i = 0; i < 16; ++i) inverse[i] = cofactor[i] / determinant;
+    return true;
+}
+
+// Per-object motion vectors per eye (vr_dlaa.c, with upstream's mvec_fill.frag): an eye's camera reprojection between
+// its previous frame and this one, made as upstream's mvec_reprojection (mvec.c) makes the flat scene's, from each
+// frame's view (the certificate's 3x4 world-to-view matrix, rigid, row-major) and device projection as drawn (4x4,
+// row-major, its sub-pixel offset included, as the eye's draws used it). reprojection: the previous projection times
+// the previous view times the inverse of this view times the inverse of this projection, row-major, in double before
+// it is rounded (the views hold positions of thousands of game units: the rigid views' relative motion cancels them
+// first); it takes this frame's clip position of a still point to the previous frame's. jitter: this frame's offset
+// minus the previous one's as the picture moved in NDC (an offset at the projection's [0][2] and [1][2] moves the
+// picture by minus itself), which the vectors are cleaned of. false: this frame's projection has no inverse.
+static inline bool vr_eye_reprojection(const float view_now[12], const float projection_now[16],
+                                       const float view_previous[12], const float projection_previous[16],
+                                       float reprojection[16], float jitter[2]) {
+    double previous_view[16] = {0}, now_inverse[16] = {0}, relative[16], previous_projection[16], projection[16],
+        projection_inverse[16], partial[16], product[16];
+    for (unsigned i = 0; i < 12; ++i) previous_view[i] = view_previous[i];
+    previous_view[15] = 1;
+    // (the inverse of a rigid view: its rotation transposed, and minus that times the translation)
+    for (unsigned row = 0; row < 3; ++row) {
+        for (unsigned column = 0; column < 3; ++column) now_inverse[row * 4 + column] = view_now[column * 4 + row];
+        now_inverse[row * 4 + 3] = -((double)view_now[row] * view_now[3] + (double)view_now[4 + row] * view_now[7] +
+                                     (double)view_now[8 + row] * view_now[11]);
+    }
+    now_inverse[15] = 1;
+    for (unsigned i = 0; i < 16; ++i) previous_projection[i] = projection_previous[i], projection[i] = projection_now[i];
+    if (!vr_invert4(projection, projection_inverse)) return false;
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned column = 0; column < 4; ++column) {
+            double sum = 0;
+            for (unsigned k = 0; k < 4; ++k) sum += previous_view[row * 4 + k] * now_inverse[k * 4 + column];
+            relative[row * 4 + column] = sum;
+        }
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned column = 0; column < 4; ++column) {
+            double sum = 0;
+            for (unsigned k = 0; k < 4; ++k) sum += previous_projection[row * 4 + k] * relative[k * 4 + column];
+            partial[row * 4 + column] = sum;
+        }
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned column = 0; column < 4; ++column) {
+            double sum = 0;
+            for (unsigned k = 0; k < 4; ++k) sum += partial[row * 4 + k] * projection_inverse[k * 4 + column];
+            product[row * 4 + column] = sum;
+        }
+    for (unsigned i = 0; i < 16; ++i) reprojection[i] = (float)product[i];
+    jitter[0] = -(projection_now[2] - projection_previous[2]);
+    jitter[1] = -(projection_now[6] - projection_previous[6]);
+    return true;
+}
+
 // The offset in an eye image's pixels, as DLSS takes it, from the picture's move in NDC (jitter_ndc): x to the right,
 // and y along the image's rows as the renderer stores them, which follows the game's window origin (0: lower left;
 // exec.c dlss_scene's convention, the one its jitter test settled).

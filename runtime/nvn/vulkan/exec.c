@@ -2248,6 +2248,7 @@ static void pass_clear_fold_apply(PassClearFold *const st,
 static VkRect2D scissor_rect(void);
 
 #include "vr_exec_hud_image.inc"  // PC VR's HUD image (D057)
+#include "vr_exec_motion.inc"     // PC VR's per-object motion vectors for the eyes' scenes
 
 static void begin_pass(void) {
     barr.after_dispatch = false;  // (dispatch_compute: a pass in between)
@@ -2551,17 +2552,19 @@ static void begin_pass(void) {
                           has_s ? &sa : NULL);
     ps.mvec = -1;
     if (mvec_enabled() && has_d && ps.ncolor < 8 && ps.samples == 1) {  // (mvec.c) the motion target, appended
-        TexBackend *mt = mvec_pass_target(st.rt.depth, minw, minh);
+        VkAttachmentLoadOp eye_load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        TexBackend *eye_target = vr_eye_motion_target(st.rt.depth, minw, minh, &eye_load);  // (PC VR: an eye's scene)
+        TexBackend *mt = eye_target ? eye_target : mvec_pass_target(st.rt.depth, minw, minh);
         if (mt) {
             pass_barrier_note(mt);  // (the motion target is drawn into too)
             uint64_t frame = renderer_present_count();
             ca[ps.ncolor] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                                                           .imageView = post_view(mt), .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                                          .loadOp = mvec_cleared == frame ? VK_ATTACHMENT_LOAD_OP_LOAD
-                                                                                          : VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                                          .loadOp = eye_target ? eye_load
+                                                                    : mvec_cleared == frame ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                                                                            : VK_ATTACHMENT_LOAD_OP_CLEAR,
                                                           .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
-            mvec_cleared = frame;
-            mvec_depth = st.rt.depth;
+            if (!eye_target) mvec_cleared = frame, mvec_depth = st.rt.depth;
             ps.color[ps.ncolor] = mt->format;
             ps.mvec = (int)ps.ncolor++;
         }
@@ -9963,6 +9966,7 @@ static void draw_(CmdRec *r, bool indexed) {
         md.h.ncb = 0, md.h.ninst = 0, md.h.skey = 0;
         md.h.gen = __atomic_load_n(&gcopy_gen, __ATOMIC_RELAXED);
         md.h.pkey = mvec_mix(st.program->stages[0].code_addr, st.program->stages[1].code_addr);
+        vr_eye_motion_key(&md.h.pkey);  // (PC VR: each eye's draws matched to its own)
         md.h.vi = pr->vi;
         md.h.count = (uint32_t)r->x[2];
         if (indexed) {
@@ -11742,7 +11746,8 @@ static void scene_post(Prog *pr, CmdRec *r) {
                 pc_vr_render_trace_resolve(vr_draw_certificate, &certificate);
             TexBackend *depth = eye_known && vr_scene_depth.last_eye == (int)certificate.native_index ?
                 (TexBackend *)vr_scene_depth.depth[certificate.native_index] : NULL;
-            TexBackend *o = eye_known ? vr_dlaa_eye(cb, in, depth, &certificate, ow, oh) : NULL;
+            TexBackend *o = eye_known ? vr_dlaa_eye(cb, in, depth, vr_eye_motion_image(certificate.native_index),
+                                                    &certificate, ow, oh) : NULL;
             if (o) {
                 src = post_view(o);
                 out = o;

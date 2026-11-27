@@ -21,6 +21,11 @@ uint32_t nvn_window_origin(void);       // (objects.c) the game's window origin:
 // position now and then (link NULL: none). false: nothing made.
 bool vk_camera_motion_vectors(VkCommandBuffer cb, const float *camera, const double *previous_view_projection,
                               const float *link, const float *previous_link, TexBackend *depth, TexBackend *vectors);
+// (vr_exec_hub.inc) An eye's motion vectors from its scene's motion target (motion: the vectors of the draws that moved,
+// upstream's mvec.c), the camera's motion elsewhere by the reprojection (vr_math.h vr_eye_reprojection), the offsets'
+// difference taken out (upstream's mvec_fill.frag): into vectors (RG16F at depth's size, clip-space NDC differences).
+void vk_object_motion_vectors(VkCommandBuffer cb, TexBackend *motion, TexBackend *depth, const float reprojection[16],
+                              const float jitter[2], TexBackend *vectors);
 
 enum { VR_DLAA_CAMERA_FLOATS = 58 };  // (a camera candidate's floats, exec.c FG_CAMERA_FLOATS)
 
@@ -33,6 +38,7 @@ typedef struct {
     VrDlaaCamera camera;
     float link_position[3];
     bool has_link;
+    float view[12], device_projection[16];  // (the certificate's, as the eye was drawn: for the object vectors)
     uint64_t present;  // renderer_present_count() then
     bool valid;        // false: none, the next frame starts over
 } VrDlaaHistory;
@@ -42,7 +48,10 @@ static struct {
     // Its own images, shared by the eyes in turn (each eye's placement draws the output before the next eye's DLAA
     // writes it again, with a full barrier between): the camera vectors and DLSS's output.
     TexBackend vectors, output;
-    uint64_t runs, resets, first_logged[2];
+    // The eyes' scenes' motion target (vr_dlaa_motion_target), drawn by each eye's scene in turn and read at its
+    // placement, before the other eye's scene clears it
+    TexBackend motion;
+    uint64_t runs, resets, first_logged[2], object_vector_runs;
     uint64_t skipped[VR_DLAA_SKIP_COUNT];
 } vr_dlaa;
 
@@ -59,6 +68,8 @@ static _Atomic int vr_dlaa_requested = -1, vr_dlaa_shown = -1;  // the key's req
 static float vr_dlaa_bias;
 
 bool vr_dlaa_enabled(void) { return vr_dlaa_mode != VR_DLAA_MODE_NONE; }
+
+bool vr_dlaa_object_vectors(void) { return atomic_load(&vr_dlaa_shown) > VR_DLAA_MODE_NONE; }
 
 // The DLSS mode's render ratio and eye scale (vr_dlss_ratio, vr_dlss_eye_scale: 1.5, NVIDIA's Quality, and 3.0)
 static double vr_dlss_ratio(void) { return pc_vr_config()->settings.dlss_ratio; }
@@ -151,6 +162,10 @@ static TexBackend *vr_dlaa_image(TexBackend *image, uint32_t width, uint32_t hei
     return image;
 }
 
+TexBackend *vr_dlaa_motion_target(uint32_t width, uint32_t height) {
+    return vr_dlaa_image(&vr_dlaa.motion, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, 0);
+}
+
 // An eye image not anti-aliased: counted, the eye's history ended.
 static TexBackend *vr_dlaa_skip(unsigned eye, VrDlaaSkip why) {
     if (eye < 2) vr_dlaa.eyes[eye].valid = false;
@@ -164,8 +179,8 @@ static TexBackend *vr_dlaa_skip(unsigned eye, VrDlaaSkip why) {
 // DLSS on an eye image with that eye's depth at its size and certificate, to output_width x output_height: the module's
 // output image (RGBA16F, valid until the other eye's run), or NULL: not run, why counted and logged now and then.
 static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *color, TexBackend *depth,
-                               const PcVrRenderCertificate *certificate, uint32_t output_width,
-                               uint32_t output_height) {
+                               TexBackend *object_motion, const PcVrRenderCertificate *certificate,
+                               uint32_t output_width, uint32_t output_height) {
     const uint32_t width = color->width, height = color->height;
     const double ratio = (double)output_width / width;
     if (!depth || !depth->image || !(depth->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || depth->width != width ||
@@ -185,8 +200,18 @@ static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *col
     TexBackend *vectors = vr_dlaa_image(&vr_dlaa.vectors, width, height, VK_FORMAT_R16G16_SFLOAT,
                                         VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     vk_full_barrier(cb);  // (the other eye's DLSS read the vectors and the output before)
-    bool moved = vk_camera_motion_vectors(cb, camera_floats, previous, link ? certificate->link_position : NULL,
-                                          history->link_position, depth, vectors);
+    // The object vectors when this eye's scene drew the motion target this frame and its previous frame is known: the
+    // draws that moved carry their own (upstream's mvec.c), the rest the camera's motion by the reprojection.
+    float reprojection[16], offset_change[2];
+    const bool objects = object_motion && !reset && object_motion->width == width && object_motion->height == height &&
+        vr_eye_reprojection(certificate->view, certificate->device_projection, history->view,
+                            history->device_projection, reprojection, offset_change);
+    bool moved = true;
+    if (objects)
+        vk_object_motion_vectors(cb, object_motion, depth, reprojection, offset_change, vectors);
+    else
+        moved = vk_camera_motion_vectors(cb, camera_floats, previous, link ? certificate->link_position : NULL,
+                                         history->link_position, depth, vectors);
     if (!moved) {  // (zero vectors and no history)
         VkClearColorValue zero = {{0, 0, 0, 0}};
         VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -196,6 +221,8 @@ static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *col
     history->camera = camera;
     memcpy(history->link_position, certificate->link_position, sizeof history->link_position);
     history->has_link = certificate->has_link;
+    memcpy(history->view, certificate->view, sizeof history->view);
+    memcpy(history->device_projection, certificate->device_projection, sizeof history->device_projection);
     history->present = present;
     history->valid = moved;
     // (NGX writes its output as a storage image, whatever the eye image's format)
@@ -204,10 +231,14 @@ static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *col
     vk_full_barrier(cb);
     float jitter[2];
     vr_dlaa_jitter_pixels(certificate->jitter_ndc, width, height, nvn_window_origin(), jitter);
-    // (no bias mask: upstream makes its mask of the blended effects for the flat game's scene only)
+    // (no bias mask: upstream makes its mask of the blended effects for the flat game's scene only.) The vectors'
+    // scale: the object vectors are clip-space NDC differences, which upstream's DLSS scales so (exec.c dlss_scene);
+    // the camera vectors are in the image's own units.
+    const float vector_scale_x = objects ? -0.5f * (float)width : (float)vectors->width;
+    const float vector_scale_y = objects ? 0.5f * (float)height : (float)vectors->height;
     const bool ran = vk_dlss_apply(cb, VK_DLSS_SLOT_LEFT_EYE + eye, color, depth, vectors, NULL, output,
-                                   vr_dlaa_quality(ratio), jitter[0], jitter[1], (float)vectors->width,
-                                   (float)vectors->height, reset);
+                                   vr_dlaa_quality(ratio), jitter[0], jitter[1], vector_scale_x, vector_scale_y,
+                                   reset);
     vk_dyn_forget();
     if (!ran) {
         if (!vk_dlss_available()) {  // (NGX cannot make DLSS here after all: mode none from the next present)
@@ -221,26 +252,28 @@ static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *col
     vr_dlaa_bias = ratio > 1 ? (float)log2(1 / ratio) : 0;
     ++vr_dlaa.runs;
     vr_dlaa.resets += reset;
+    vr_dlaa.object_vector_runs += objects;
     if (vr_dlaa.first_logged[eye]++ == 0)
         LOG("[pc-vr-dlaa] eye %u: first %s %ux%u -> %ux%u (format %d), depth format %d, offset %.3f, %.3f pixels, "
             "texture bias %.2f, %s\n", eye, vr_dlaa_mode_names[vr_dlaa_mode], width, height, output_width,
             output_height, (int)color->format, (int)depth->format, jitter[0], jitter[1], vr_dlaa_bias,
-            link ? "Link's box moving" : "camera vectors only");
+            objects ? "object vectors" : link ? "Link's box moving" : "camera vectors only");
     if (vr_dlaa.runs % 4000 == 0)
-        LOG("[pc-vr-dlaa] %llu eye images anti-aliased, %llu with the history started over; not run: %llu depth, "
-            "%llu camera, %llu dlss\n", (unsigned long long)vr_dlaa.runs, (unsigned long long)vr_dlaa.resets,
+        LOG("[pc-vr-dlaa] %llu eye images anti-aliased, %llu with object vectors, %llu with the history started over; "
+            "not run: %llu depth, %llu camera, %llu dlss\n", (unsigned long long)vr_dlaa.runs,
+            (unsigned long long)vr_dlaa.object_vector_runs, (unsigned long long)vr_dlaa.resets,
             (unsigned long long)vr_dlaa.skipped[VR_DLAA_SKIP_DEPTH],
             (unsigned long long)vr_dlaa.skipped[VR_DLAA_SKIP_CAMERA],
             (unsigned long long)vr_dlaa.skipped[VR_DLAA_SKIP_DLSS]);
     return output;
 }
 
-TexBackend *vr_dlaa_eye(VkCommandBuffer cb, TexBackend *color, TexBackend *depth,
+TexBackend *vr_dlaa_eye(VkCommandBuffer cb, TexBackend *color, TexBackend *depth, TexBackend *object_motion,
                         const PcVrRenderCertificate *certificate, uint32_t output_width, uint32_t output_height) {
     const unsigned eye = certificate->native_index;
     if (eye >= 2) return NULL;
     // (within a pixel of the eye image's own size: DLAA at that size; the placement's size is rounded)
     if (output_width <= color->width + 1 && output_height <= color->height + 1)
         output_width = color->width, output_height = color->height;
-    return vr_dlaa_run(cb, eye, color, depth, certificate, output_width, output_height);
+    return vr_dlaa_run(cb, eye, color, depth, object_motion, certificate, output_width, output_height);
 }

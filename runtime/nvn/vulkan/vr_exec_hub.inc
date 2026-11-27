@@ -21,8 +21,9 @@
 // The two results: the per-draw route (vr_draw_route.h), asked by draw_ for every HUD draw; and the per-frame kind
 // (vr_frame.h), decided by vr_eyes.c at each present from the findings the draws below set.
 //
-// What stays in exec.c's translation unit (this file, vr_exec_hud_image.inc, vr_exec_rune_target.inc and the call
-// sites in exec.c), and why: the hubs that read the executor's private state (st, dc, the pass, the program and its
+// What stays in exec.c's translation unit (this file, vr_exec_hud_image.inc, vr_exec_motion.inc,
+// vr_exec_rune_target.inc and the call sites in exec.c), and why: the hubs that read the executor's private state
+// (st, dc, the pass, the program and its
 // textures, the guest-to-device mapping) and hand the modules plain values; the code on the per-draw path (the draw
 // hooks, the route's hub, the world-tied HUD's hooks, the rune aim), which stays in this translation unit because the
 // play build has no link-time optimisation, with the state it reads defined here so that its reads stay direct loads
@@ -421,6 +422,9 @@ static void vr_after_draw(Prog *program, const CmdRec *command) {
                 vr_shot_after_draw(output, side ? "scene1" : "scene0");
             }
         }
+        // (the eye scene's motion vectors: vr_exec_motion.inc)
+        vr_eye_motion_scene_finished(certified ? (int)certificate.native_index : -1,
+                                     certified ? vr_scene_depth.depth[certificate.native_index] : NULL);
         return;
     }
     // ---- job 2: the placement of an eye's image into the final image

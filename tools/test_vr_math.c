@@ -9,7 +9,10 @@
 // as they were. vr_letterbox (the window mirror's placement of the left eye) is checked at the scale of 1, a wider and
 // a taller window, a larger final image, a tiny window and the cases with nothing to copy. vr_aim_ray_hit (where the
 // aim ray meets the scene): a hit between two points, at the first and at the last, misses, stored depths out of range
-// or not numbers, a z behind the eye, terms with no z, both depth modes. No renderer, GPU or headset is involved.
+// or not numbers, a z behind the eye, terms with no z, both depth modes. vr_eye_reprojection (the eye's camera between
+// two frames, for the object motion vectors): still points in view near and far reprojected to where the previous
+// frame drew them for an eye that moved and turned far from the origin with another sub-pixel offset, the offsets'
+// difference, an unmoved eye, a projection with no inverse. No renderer, GPU or headset is involved.
 #include "../runtime/nvn/vulkan/vr_math.h"
 
 #include <math.h>
@@ -322,6 +325,90 @@ static void test_dlaa_camera(void) {
     CHECK(fabsf(pixels[0] - 0.25f) < 1e-5f && fabsf(pixels[1] - 0.1f) < 1e-5f);
 }
 
+// A world point through a view (3x4) and a projection (4x4, both row-major) to NDC (x, y, z); false: behind the eye.
+static bool project_to_ndc(const float view[12], const float projection[16], const double point[3], double ndc[3]) {
+    double in_view[4] = {0, 0, 0, 1}, clip[4] = {0};
+    for (unsigned row = 0; row < 3; ++row) {
+        in_view[row] = view[row * 4 + 3];
+        for (unsigned k = 0; k < 3; ++k) in_view[row] += (double)view[row * 4 + k] * point[k];
+    }
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned k = 0; k < 4; ++k) clip[row] += (double)projection[row * 4 + k] * in_view[k];
+    if (!(clip[3] > 0)) return false;
+    for (unsigned axis = 0; axis < 3; ++axis) ndc[axis] = clip[axis] / clip[3];
+    return true;
+}
+
+// A view (3x4, row-major) at place, turned by yaw and pitch: its rows are the right, up and back axes in the world.
+static void turned_view(double yaw, double pitch, const double place[3], float view[12]) {
+    const double axes[3][3] = {{cos(yaw), 0, -sin(yaw)},
+                               {sin(yaw) * sin(pitch), cos(pitch), cos(yaw) * sin(pitch)},
+                               {sin(yaw) * cos(pitch), -sin(pitch), cos(yaw) * cos(pitch)}};
+    for (unsigned row = 0; row < 3; ++row) {
+        double translation = 0;
+        for (unsigned k = 0; k < 3; ++k) view[row * 4 + k] = (float)axes[row][k], translation -= axes[row][k] * place[k];
+        view[row * 4 + 3] = (float)translation;
+    }
+}
+
+// Object motion vectors per eye (vr_eye_reprojection, vr_invert4): the reprojection takes this frame's NDC of a still
+// point to where the previous frame drew it, for an eye that moved and turned between two frames in the world far from
+// the origin, with a different sub-pixel offset in each frame's projection; the offsets' difference as the picture
+// moved; an unmoved eye with the same offset is the identity; a projection with no inverse is refused.
+static void test_eye_reprojection(void) {
+    const double left = -1.3, right = 1.0, up = 1.1, down = -1.2, near_plane = 0.25, far_plane = 25000;
+    float projection_now[16] = {0}, projection_previous[16];
+    projection_now[0] = (float)(2 / (right - left)); projection_now[2] = (float)((right + left) / (right - left));
+    projection_now[5] = (float)(2 / (up - down)); projection_now[6] = (float)((up + down) / (up - down));
+    projection_now[10] = (float)(-far_plane / (far_plane - near_plane));
+    projection_now[11] = (float)(-far_plane * near_plane / (far_plane - near_plane));
+    projection_now[14] = -1;
+    memcpy(projection_previous, projection_now, sizeof projection_previous);
+    projection_now[2] -= 0.25f * 2 / 1634, projection_now[6] -= -0.1f * 2 / 1763;  // (the offsets: the picture's move)
+    projection_previous[2] -= -0.375f * 2 / 1634, projection_previous[6] -= 0.3f * 2 / 1763;
+    const double place_now[3] = {-672.5, 171.25, 1816}, place_previous[3] = {-672.9, 171.20, 1816.3};
+    float view_now[12], view_previous[12];
+    turned_view(0.7, 0.2, place_now, view_now);
+    turned_view(0.72, 0.19, place_previous, view_previous);
+    float reprojection[16], jitter[2];
+    CHECK(vr_eye_reprojection(view_now, projection_now, view_previous, projection_previous, reprojection, jitter));
+    CHECK(fabsf(jitter[0] - (0.25f + 0.375f) * 2 / 1634) < 1e-7f && fabsf(jitter[1] - (-0.1f - 0.3f) * 2 / 1763) < 1e-7f);
+    // Still points in view, near (5 units ahead), middling and far: this frame's NDC through the reprojection is the
+    // previous frame's.
+    const double points[3][3] = {{-675.6, 172.2, 1812.3}, {-690.0, 168.0, 1790.0}, {-2500.0, 400.0, -900.0}};
+    for (unsigned p = 0; p < 3; ++p) {
+        double now[3], previous[3], reprojected[4] = {0};
+        CHECK(project_to_ndc(view_now, projection_now, points[p], now));
+        CHECK(fabs(now[0]) < 1 && fabs(now[1]) < 1);
+        CHECK(project_to_ndc(view_previous, projection_previous, points[p], previous));
+        const double position[4] = {now[0], now[1], now[2], 1};
+        for (unsigned row = 0; row < 4; ++row)
+            for (unsigned k = 0; k < 4; ++k) reprojected[row] += (double)reprojection[row * 4 + k] * position[k];
+        CHECK(fabs(reprojected[0] / reprojected[3] - previous[0]) < 1e-5 &&
+              fabs(reprojected[1] / reprojected[3] - previous[1]) < 1e-5);
+    }
+    // An eye that did not move, with the same offset: still points stay where they are (within a hundredth of a pixel:
+    // the float view's rotation, not quite orthonormal, times its translation, as upstream's has it), no offset.
+    CHECK(vr_eye_reprojection(view_now, projection_now, view_now, projection_now, reprojection, jitter));
+    for (unsigned p = 0; p < 3; ++p) {
+        double now[3], reprojected[4] = {0};
+        CHECK(project_to_ndc(view_now, projection_now, points[p], now));
+        const double position[4] = {now[0], now[1], now[2], 1};
+        for (unsigned row = 0; row < 4; ++row)
+            for (unsigned k = 0; k < 4; ++k) reprojected[row] += (double)reprojection[row * 4 + k] * position[k];
+        CHECK(fabs(reprojected[0] / reprojected[3] - now[0]) < 1e-5 && fabs(reprojected[1] / reprojected[3] - now[1]) < 1e-5);
+    }
+    CHECK(jitter[0] == 0 && jitter[1] == 0);
+    // A projection with no inverse.
+    float flat[16] = {0};
+    CHECK(!vr_eye_reprojection(view_now, flat, view_previous, projection_previous, reprojection, jitter));
+    double singular[16] = {0}, inverse[16];
+    singular[0] = singular[5] = singular[10] = 1;
+    CHECK(!vr_invert4(singular, inverse));
+    singular[15] = 2;
+    CHECK(vr_invert4(singular, inverse) && fabs(inverse[15] - 0.5) < 1e-15 && inverse[0] == 1);
+}
+
 int main(void) {
     const double quarter_turn = acos(-1.0) / 2;
     const double right[3] = {1, 0, 0}, up[3] = {0, 1, 0}, ahead[3] = {0, 0, -1};
@@ -583,6 +670,7 @@ int main(void) {
     }
 
     test_dlaa_camera();
+    test_eye_reprojection();
     printf("vr_math fixture: %u checks, %u failures\n", checks, failures);
     return failures != 0;
 }

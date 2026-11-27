@@ -14,6 +14,9 @@
 //    game built them, pc_vr_render_trace.h), now and at the eye's previous frame, for the camera's motion vectors
 //    (exec.c cam_motion, through vk_camera_motion_vectors; Link's box moves as he does, as upstream's DLSS has it, and
 //    anything else that moves has the vectors of a still object there);
+//  - in their place when this eye's scene drew them this frame, the eye scene's per-object motion vectors
+//    (vr_exec_motion.inc, upstream's mvec.c): a draw that moved carries its own, the camera's motion fills the rest
+//    by the eye's reprojection (vr_math.h vr_eye_reprojection, from the certificates' views and projections);
 //  - the eye's scene depth (vr_scene_depth.h): the one depth target the eyes share, which still holds this eye's scene
 //    at its placement (the other eye's scene comes after);
 //  - the sub-pixel offset the projection trace moved the eye's projection by (the certificate's jitter_ndc). This
@@ -23,8 +26,9 @@
 // at the game's reset.
 //
 // Not owned here: the offset's sequence and its place in the projection (runtime/hle/pc_vr_projection_trace.c), NGX and
-// its features (dlss.c), the camera vectors' pass (exec.c), the game's FXAA (exec.c turns it off with this), which
-// draw is an eye's placement (exec.c pc_vr_scene_placement, by the game's tag on it).
+// its features (dlss.c), the camera vectors' pass (exec.c), the eyes' object vectors: their target's passes, the draws'
+// keys and their fill pass (vr_exec_motion.inc, with upstream's mvec.c), the game's FXAA (exec.c turns it off with
+// this), which draw is an eye's placement (exec.c pc_vr_scene_placement, by the game's tag on it).
 //
 // Conventions: eyes as the certificates' native_index (0 left, 1 right); images are the renderer's (TexBackend, vk.h);
 // called on the thread that replays the game's commands, with the recorder's ordering (vk.h).
@@ -69,8 +73,19 @@ float vr_dlaa_mip_bias(void);
 // within a pixel of color's size, DLAA at that size). Returns the anti-aliased eye image (an image of this module's,
 // RGBA16F at the output size, valid until the next eye's call) for the placement to draw, or NULL: not run this frame
 // (the eye image as it is), why counted and logged now and then.
-TexBackend *vr_dlaa_eye(VkCommandBuffer cb, TexBackend *color, TexBackend *depth,
+// object_motion: the eyes' motion target when this eye's scene drew it this frame (vr_exec_motion.inc), else NULL; with
+// it and the eye's previous frame, the object vectors replace the camera's.
+TexBackend *vr_dlaa_eye(VkCommandBuffer cb, TexBackend *color, TexBackend *depth, TexBackend *object_motion,
                         const PcVrRenderCertificate *certificate, uint32_t output_width, uint32_t output_height);
+
+// Per-object motion vectors for the eyes' scenes are wanted (any thread): a mode other than none, as last applied at a
+// present. Upstream's motion vectors (mvec.c mvec_enabled) switch on with it.
+bool vr_dlaa_object_vectors(void);
+
+// The eyes' scenes' motion target at this size (RGBA16F, this module's image, made again when the size changes),
+// which upstream's motion programs draw into as the flat scene's (exec.c begin_pass): each eye's scene in turn, read
+// at that eye's placement before the other eye's scene clears it.
+TexBackend *vr_dlaa_motion_target(uint32_t width, uint32_t height);
 
 // The game's reset: every eye's history starts over.
 void vr_dlaa_reset(void);
