@@ -104,3 +104,13 @@ void vk_object_motion_vectors(VkCommandBuffer cb, TexBackend *motion, TexBackend
     gp_mark(cb, "PC VR: an eye's object motion vectors");
     post_pass_pc(cb, "mvec_fill.frag", inputs, 2, vectors, constants, sizeof constants, false);
 }
+
+// (vr_dlaa.c) An eye's effects mask for DLSS (its Bias Current Color: the pixels to take from this frame rather than
+// the history): the blended effects (fog, mist, particles) that upstream's motion programs marked in the motion
+// target's .z, as upstream's DLSS makes its mask for the flat scene (exec.c dlss_scene, fsr3_reactive.frag).
+void vk_eye_effects_mask(VkCommandBuffer cb, TexBackend *motion, TexBackend *mask) {
+    const float constants[8] = {1.0f};  // (the mask's strength: as upstream's DLSS has it)
+    VkImageView inputs[1] = {post_view(motion)};
+    gp_mark(cb, "PC VR: an eye's effects mask");
+    post_pass_pc(cb, "fsr3_reactive.frag", inputs, 1, mask, constants, sizeof constants, false);
+}

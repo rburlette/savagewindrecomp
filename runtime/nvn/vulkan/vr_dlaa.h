@@ -16,7 +16,10 @@
 //    anything else that moves has the vectors of a still object there);
 //  - in their place when this eye's scene drew them this frame, the eye scene's per-object motion vectors
 //    (vr_exec_motion.inc, upstream's mvec.c): a draw that moved carries its own, the camera's motion fills the rest
-//    by the eye's reprojection (vr_math.h vr_eye_reprojection, from the certificates' views and projections);
+//    by the eye's reprojection (vr_math.h vr_eye_reprojection, from the certificates' views and projections); and
+//    with them the effects mask, DLSS's Bias Current Color: the blended effects (fog, mist, particles), which have no
+//    vectors of their own, as upstream's motion programs mark them there (upstream's DLSS has it for the flat scene;
+//    its SAVAGEWIND_DLSS_REACTIVE=0 turns the mask off, the flat scene's and the eyes');
 //  - the eye's scene depth (vr_scene_depth.h): the one depth target the eyes share, which still holds this eye's scene
 //    at its placement (the other eye's scene comes after);
 //  - the sub-pixel offset the projection trace moved the eye's projection by (the certificate's jitter_ndc). This

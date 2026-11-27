@@ -21,11 +21,15 @@ uint32_t nvn_window_origin(void);       // (objects.c) the game's window origin:
 // position now and then (link NULL: none). false: nothing made.
 bool vk_camera_motion_vectors(VkCommandBuffer cb, const float *camera, const double *previous_view_projection,
                               const float *link, const float *previous_link, TexBackend *depth, TexBackend *vectors);
-// (vr_exec_hub.inc) An eye's motion vectors from its scene's motion target (motion: the vectors of the draws that moved,
-// upstream's mvec.c), the camera's motion elsewhere by the reprojection (vr_math.h vr_eye_reprojection), the offsets'
-// difference taken out (upstream's mvec_fill.frag): into vectors (RG16F at depth's size, clip-space NDC differences).
+// (vr_exec_motion.inc) An eye's motion vectors from its scene's motion target (motion: the vectors of the draws that
+// moved, upstream's mvec.c), the camera's motion elsewhere by the reprojection (vr_math.h vr_eye_reprojection), the
+// offsets' difference taken out (upstream's mvec_fill.frag): into vectors (RG16F at depth's size, clip-space NDC
+// differences).
 void vk_object_motion_vectors(VkCommandBuffer cb, TexBackend *motion, TexBackend *depth, const float reprojection[16],
                               const float jitter[2], TexBackend *vectors);
+// (vr_exec_motion.inc) An eye's effects mask (R8 at motion's size) from its scene's motion target: the blended effects
+// upstream's motion programs marked there, for DLSS's Bias Current Color.
+void vk_eye_effects_mask(VkCommandBuffer cb, TexBackend *motion, TexBackend *mask);
 
 enum { VR_DLAA_CAMERA_FLOATS = 58 };  // (a camera candidate's floats, exec.c FG_CAMERA_FLOATS)
 
@@ -51,7 +55,9 @@ static struct {
     // The eyes' scenes' motion target (vr_dlaa_motion_target), drawn by each eye's scene in turn and read at its
     // placement, before the other eye's scene clears it
     TexBackend motion;
-    uint64_t runs, resets, first_logged[2], object_vector_runs;
+    // The effects mask made from it for each eye's DLSS in turn (vk_eye_effects_mask)
+    TexBackend effects_mask;
+    uint64_t runs, resets, first_logged[2], object_vector_runs, effects_mask_runs;
     uint64_t skipped[VR_DLAA_SKIP_COUNT];
 } vr_dlaa;
 
@@ -176,6 +182,17 @@ static TexBackend *vr_dlaa_skip(unsigned eye, VrDlaaSkip why) {
     return NULL;
 }
 
+// Upstream's switch for its DLSS's effects mask (SAVAGEWIND_DLSS_REACTIVE=0: without it, for testing) holds for the
+// eyes' too.
+static bool vr_dlaa_effects_mask_wanted(void) {
+    static int wanted = -1;
+    if (wanted < 0) {
+        const char *value = getenv("SAVAGEWIND_DLSS_REACTIVE");
+        wanted = !value || atoi(value) != 0;
+    }
+    return wanted;
+}
+
 // DLSS on an eye image with that eye's depth at its size and certificate, to output_width x output_height: the module's
 // output image (RGBA16F, valid until the other eye's run), or NULL: not run, why counted and logged now and then.
 static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *color, TexBackend *depth,
@@ -218,6 +235,13 @@ static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *col
         rec_CmdClearColorImage(cb, vectors->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
         reset = true;
     }
+    // With the object vectors, the effects mask: the blended effects (fog, mist, particles) have no vectors of their
+    // own and would trail in the history without it, as upstream found for the flat scene.
+    TexBackend *effects_mask = NULL;
+    if (objects && vr_dlaa_effects_mask_wanted()) {
+        effects_mask = vr_dlaa_image(&vr_dlaa.effects_mask, width, height, VK_FORMAT_R8_UNORM, 0);
+        vk_eye_effects_mask(cb, object_motion, effects_mask);
+    }
     history->camera = camera;
     memcpy(history->link_position, certificate->link_position, sizeof history->link_position);
     history->has_link = certificate->has_link;
@@ -231,12 +255,11 @@ static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *col
     vk_full_barrier(cb);
     float jitter[2];
     vr_dlaa_jitter_pixels(certificate->jitter_ndc, width, height, nvn_window_origin(), jitter);
-    // (no bias mask: upstream makes its mask of the blended effects for the flat game's scene only.) The vectors'
-    // scale: the object vectors are clip-space NDC differences, which upstream's DLSS scales so (exec.c dlss_scene);
-    // the camera vectors are in the image's own units.
+    // The vectors' scale: the object vectors are clip-space NDC differences, which upstream's DLSS scales so (exec.c
+    // dlss_scene); the camera vectors are in the image's own units.
     const float vector_scale_x = objects ? -0.5f * (float)width : (float)vectors->width;
     const float vector_scale_y = objects ? 0.5f * (float)height : (float)vectors->height;
-    const bool ran = vk_dlss_apply(cb, VK_DLSS_SLOT_LEFT_EYE + eye, color, depth, vectors, NULL, output,
+    const bool ran = vk_dlss_apply(cb, VK_DLSS_SLOT_LEFT_EYE + eye, color, depth, vectors, effects_mask, output,
                                    vr_dlaa_quality(ratio), jitter[0], jitter[1], vector_scale_x, vector_scale_y,
                                    reset);
     vk_dyn_forget();
@@ -253,15 +276,19 @@ static TexBackend *vr_dlaa_run(VkCommandBuffer cb, unsigned eye, TexBackend *col
     ++vr_dlaa.runs;
     vr_dlaa.resets += reset;
     vr_dlaa.object_vector_runs += objects;
+    vr_dlaa.effects_mask_runs += effects_mask != NULL;
     if (vr_dlaa.first_logged[eye]++ == 0)
         LOG("[pc-vr-dlaa] eye %u: first %s %ux%u -> %ux%u (format %d), depth format %d, offset %.3f, %.3f pixels, "
             "texture bias %.2f, %s\n", eye, vr_dlaa_mode_names[vr_dlaa_mode], width, height, output_width,
             output_height, (int)color->format, (int)depth->format, jitter[0], jitter[1], vr_dlaa_bias,
-            objects ? "object vectors" : link ? "Link's box moving" : "camera vectors only");
+            effects_mask ? "object vectors and the effects mask" : objects ? "object vectors"
+            : link ? "Link's box moving" : "camera vectors only");
     if (vr_dlaa.runs % 4000 == 0)
-        LOG("[pc-vr-dlaa] %llu eye images anti-aliased, %llu with object vectors, %llu with the history started over; "
-            "not run: %llu depth, %llu camera, %llu dlss\n", (unsigned long long)vr_dlaa.runs,
-            (unsigned long long)vr_dlaa.object_vector_runs, (unsigned long long)vr_dlaa.resets,
+        LOG("[pc-vr-dlaa] %llu eye images anti-aliased, %llu with object vectors, %llu with the effects mask, %llu "
+            "with the history started over; not run: %llu depth, %llu camera, %llu dlss\n",
+            (unsigned long long)vr_dlaa.runs,
+            (unsigned long long)vr_dlaa.object_vector_runs, (unsigned long long)vr_dlaa.effects_mask_runs,
+            (unsigned long long)vr_dlaa.resets,
             (unsigned long long)vr_dlaa.skipped[VR_DLAA_SKIP_DEPTH],
             (unsigned long long)vr_dlaa.skipped[VR_DLAA_SKIP_CAMERA],
             (unsigned long long)vr_dlaa.skipped[VR_DLAA_SKIP_DLSS]);
