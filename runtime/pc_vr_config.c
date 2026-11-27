@@ -106,6 +106,7 @@ void pc_vr_config_parse(PcVrConfigLookup lookup, const void *context, PcVrConfig
         true, PC_VR_DLSS_RATIO_MAX, out);
     out->settings.dlss_eye_scale = number_setting(lookup, context, PC_VR_SETTING_DLSS_EYE_SCALE,
         PC_VR_DLSS_EYE_SCALE_DEFAULT, 1, true, PC_VR_DLSS_EYE_SCALE_MAX, out);
+    out->settings.sound_hrtf = switch_setting(lookup, context, PC_VR_SETTING_SOUND_HRTF, true);
 
     out->display_rate_tracking = out->settings.headset_pace ||
                                  exactly_one(lookup(context, "SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING"));
@@ -170,6 +171,7 @@ static void setting_value(const PcVrConfig *config, unsigned setting, char *text
         break;
     case PC_VR_SETTING_DLSS_RATIO: snprintf(text, size, "%.9g", config->settings.dlss_ratio); break;
     case PC_VR_SETTING_DLSS_EYE_SCALE: snprintf(text, size, "%.9g", config->settings.dlss_eye_scale); break;
+    case PC_VR_SETTING_SOUND_HRTF: snprintf(text, size, "%d", config->settings.sound_hrtf); break;
     default: snprintf(text, size, "?"); break;
     }
 }

@@ -66,7 +66,7 @@ enum {
     PC_VR_SETTING_VR, PC_VR_SETTING_EYE_SCALE, PC_VR_SETTING_GAME_UNITS_PER_METER, PC_VR_SETTING_MENU_DISTANCE,
     PC_VR_SETTING_HUD_DEPTH, PC_VR_SETTING_MODEL_DISTANCE, PC_VR_SETTING_HEADSET_PACE, PC_VR_SETTING_PACE_OFFSET_MS,
     PC_VR_SETTING_POSE_WAIT_MS, PC_VR_SETTING_DESKTOP_PICTURE, PC_VR_SETTING_ANTIALIASING, PC_VR_SETTING_DLSS_RATIO,
-    PC_VR_SETTING_DLSS_EYE_SCALE, PC_VR_SETTING_COUNT
+    PC_VR_SETTING_DLSS_EYE_SCALE, PC_VR_SETTING_SOUND_HRTF, PC_VR_SETTING_COUNT
 };
 // (runtime/pc_vr_settings.inc) The keys ("vr", "vr_eye_scale", ...) and vr_antialiasing's words, in PcVrAntialiasing
 // order ("off", "dlaa", "dlss")
@@ -100,6 +100,9 @@ typedef struct {
                                   // per axis
         double dlss_eye_scale;    // vr_dlss_eye_scale, above 1 to 5: the DLSS mode's eye scale (the size the headset
                                   // is given)
+        bool sound_hrtf;          // vr_sound_hrtf, on by default: each positional sound rendered binaurally at its
+                                  // own position (runtime/hle/pc_vr_sound_hrtf.c; with audio_output = headphones_3d);
+                                  // 0: the game's panning only
     } settings;
     // Not settings of their own: the head pose reaches the game every display frame with the pace (or, without it, by
     // SAVAGEWIND_PC_VR_DISPLAY_RATE_TRACKING=1), and pace 2 with it targets alternate refreshes (D128).

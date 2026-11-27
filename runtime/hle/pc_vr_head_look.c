@@ -33,6 +33,7 @@
 #include "pc_vr_head_look.h"
 #include "pc_vr_listener.h"
 #include "pc_vr_render_trace.h"
+#include "pc_vr_sound_hrtf.h"
 #include "pc_vr_head_look_math.h"
 #include "pc_vr_projection_trace.h"
 
@@ -264,6 +265,7 @@ void pc_vr_head_look_init(void) {
     LOG("[pc-vr-head-look] armed pinned DefaultCamera/eye composition\n");
     pc_vr_projection_trace_init();
     pc_vr_listener_init();
+    pc_vr_sound_hrtf_init();
 }
 
 RT_ON_RESET(pc_vr_head_look_reset) {

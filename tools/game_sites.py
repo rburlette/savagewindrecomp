@@ -651,6 +651,32 @@ SITES = [
     Site('pcvr_listener_poser', 'code', 'd10403ff fd004bea f9005ffb 6d09a3e9 a90afbfd a90c67fa a90d5ff8 a90e57f6 '
          'a90f4ff4 9102a3fd 9102c017 aa0003f4 aa0203f5 aa1703e0 aa0103f3 94000000/fc000000 bd40de80 1e202008 '
          '5400000c/ff00001f', 0),
+    # PC VR's sounds rendered binaurally at their own positions (runtime/hle/pc_vr_sound_hrtf.c,
+    # docs/evidence/pc-vr-per-sound-hrtf-2026-11-27.md in the project's records). The audio library's per-listener
+    # update of a sound's 3D component (x0 the component, w2 the listener), which hands each emitter's position in the
+    # listener's two frames to the sector update (x0 the listener's block, x1 the distance frame's, x2 the panning
+    # frame's); the sound's panner (x0 the sound), which hands its channels' gains to the sound's voice
+    Site('pcvr_sound_3d_update', 'code', 'd101c3ff a9027bfd f9001bf9 a9045ff8 a90557f6 a9064ff4 910083fd 91054014 '
+         'aa0003f6 2a0203f3 aa1403e0 aa0103f5 94000000/fc000000', 0),
+    Site('pcvr_sound_emitter_sector', 'code', 'fc1d0fe8 a9017bfd a9024ff4 910043fd 2d400420 1e210822 bd400821 1f000800 '
+         '1f010028 bd420800 1e202100 5400000b/ff00001f', 0),
+    Site('pcvr_sound_panner', 'code', 'fc1b0fe8 a900fbfd f9000ff9 a9025ff8 a90357f6 a9044ff4 910023fd 1e204008 2a0103f4 '
+         'aa0003f3 2a1f03f5 90000008/9f00001f 91000108/ffc003ff a9027d1f a9017d1f a9007d1f 37f80001/fff8001f', 0),
+    # ... and their one call each (tools/patches.py _sound_call: direct calls, which the runtime's overrides do not
+    # reach): the 3D update's from its component's update (1.9.0 0x7000f2f600), the sector update's from the 3D update,
+    # the panner's from the sound's update (0x7000f02418)
+    Site('pcvr_sound_3d_update_call', 'code', 'eb1702bf 54000001/ff00001f 14000000/fc000000 aa1303e0 aa1503e1 2a1403e2 '
+         '94000000/fc000000 52800028 f9403e69 910043e1', 6),
+    Site('pcvr_sound_emitter_sector_call', 'code', 'b94072c8 d10033a1 910023e2 f9403ec9 6b13011f 1a9f8268 9b392500 '
+         '94000000/fc000000 f9400718 eb17031f', 7),
+    Site('pcvr_sound_panner_call', 'code', '34000008/ff00001f 1e204008 2a1f03f4 1e204100 aa1303e0 2a1403e1 '
+         '94000000/fc000000 79419668 11000694 6b08029f', 6),
+    # ... the engine's audio system (its getter's static object: +0x610 its voices, +0x618 their count), and the
+    # client sound object's vtable symbol (the object's vtable pointer is 0x10 past it), from its constructor
+    Site('pcvr_audio_system', 'got', 'a9be7bfd f9000bf3 910003fd 90000008/9f00001f f9400108/ffc003ff 08dffd08 '
+         '36000008/fff8001f 90000000/9f00001f f9400000/ffc003ff f9400bf3 a8c27bfd d65f03c0', 8),
+    Site('pcvr_sound_client_vtable', 'got', 'f900fe93 90000008/9f00001f 91078289 f9400108/ffc003ff 9108268a b9020e9f '
+         'a91e2689 91084280 91000108/ffc003ff', 3),
     # sead::LookAtCamera::doUpdateMatrix (tools/patches.py _lookat_update): its first load of the eye (+0x38); eye,
     # at (+0x44) and up (+0x50) make the view matrix written to x1 (free camera, runtime/hle/freecam.c)
     Site('lookat_update', 'code', '2d470801 2d480c00 1e232020 2d491404 1e240440 1e250400 54000000/ff00001f 1e233823', 0),
@@ -891,6 +917,9 @@ OPTIONAL_GROUPS = [
      'pcvr_volume_copy'),  # (1.9.0 only)
     ('pcvr_model_detail_depth',),  # (1.9.0 only)
     ('pcvr_listener_poser',),  # (1.9.0 only; without it the sounds stay with the game camera)
+    ('pcvr_sound_3d_update', 'pcvr_sound_emitter_sector', 'pcvr_sound_panner', 'pcvr_sound_3d_update_call',
+     'pcvr_sound_emitter_sector_call', 'pcvr_sound_panner_call', 'pcvr_audio_system',
+     'pcvr_sound_client_vtable'),  # (1.9.0 only; without them vr_sound_hrtf does nothing)
     ('pcvr_ui_parallax',),
     ('pcvr_layer_final_draw', 'pcvr_layer_placement_draw', 'pcvr_display_lens_draw', 'pcvr_display_copy_draw'),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
@@ -1298,6 +1327,14 @@ KNOWN = {
         'pcvr_volume_copy': 0x700101a468,
         'pcvr_model_detail_depth': 0x70010575e0,
         'pcvr_listener_poser': 0x700138a278,
+        'pcvr_sound_3d_update': 0x7000f2fb0c,
+        'pcvr_sound_emitter_sector': 0x7000f30da4,
+        'pcvr_sound_panner': 0x7000f03808,
+        'pcvr_sound_3d_update_call': 0x7000f2f800,
+        'pcvr_sound_emitter_sector_call': 0x7000f2fb94,
+        'pcvr_sound_panner_call': 0x7000f024f8,
+        'pcvr_audio_system': 0x7001db38e8,
+        'pcvr_sound_client_vtable': 0x7001b7e2d8,
         'pcvr_ui_parallax': 0x7000eeee50,
         'pcvr_layer_final_draw': 0x700126c080,
         'pcvr_layer_placement_draw': 0x7000fec358,

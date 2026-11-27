@@ -165,7 +165,7 @@ static void test_ini_lines(void) {
     const char *expected = "vr = 1\nvr_eye_scale = 2.5\nvr_game_units_per_meter = 14.53\nvr_menu_distance = 30\n"
         "vr_hud_depth = 0.9\nvr_model_distance = 0.8\nvr_headset_pace = 2\nvr_pace_offset_ms = 1.5\n"
         "vr_pose_wait_ms = 8.5\nvr_desktop_picture = 0\nvr_antialiasing = dlss\nvr_dlss_ratio = 1.5\n"
-        "vr_dlss_eye_scale = 3\n";
+        "vr_dlss_eye_scale = 3\nvr_sound_hrtf = 1\n";
     CHECK(!strcmp(written, expected));
     // (each line back through the settings file's own reading: the parse of every default is the play configuration)
     const char *lines[2 * PC_VR_SETTING_COUNT + 1];
@@ -277,6 +277,11 @@ static void test_settings(void) {
     CHECK(with_setting("vr_desktop_picture", "1").settings.desktop_picture);
     CHECK(!with_setting("vr_desktop_picture", "0").settings.desktop_picture);
     CHECK(!with_setting("vr_desktop_picture", "yes").settings.desktop_picture);
+    // vr_sound_hrtf: a switch, on by default (the play setting)
+    CHECK(with_setting("vr_desktop_picture", "0").settings.sound_hrtf);
+    CHECK(with_setting("vr_sound_hrtf", "1").settings.sound_hrtf);
+    CHECK(!with_setting("vr_sound_hrtf", "0").settings.sound_hrtf);
+    CHECK(!with_setting("vr_sound_hrtf", "yes").settings.sound_hrtf);
     // (parsed without PC VR as well, for savagewind.ini; the renderer scales the eye targets only in PC VR)
     PcVrConfig desktop;
     test_pc_vr_parse((const char *const[]){"vr_eye_scale", "2", NULL}, &desktop);
@@ -345,8 +350,8 @@ static void test_describe(void) {
     char text[1024];
     const char *play = "vr_eye_scale=2.5 vr_game_units_per_meter=14.53 vr_menu_distance=0.77 vr_hud_depth=0.9 "
         "vr_model_distance=0.8 vr_headset_pace=2 vr_pace_offset_ms=1.5 vr_pose_wait_ms=8.5 vr_desktop_picture=0 "
-        "vr_antialiasing=dlss vr_dlss_ratio=1.5 vr_dlss_eye_scale=3; head pose every display frame, alternate "
-        "refreshes targeted; diagnostics: none; ignored: none";
+        "vr_antialiasing=dlss vr_dlss_ratio=1.5 vr_dlss_eye_scale=3 vr_sound_hrtf=1; head pose every display frame, "
+        "alternate refreshes targeted; diagnostics: none; ignored: none";
     CHECK(pc_vr_config_describe(&config, text, sizeof text) == strlen(play) && !strcmp(text, play));
     printf("[pc-vr] configuration: %s\n", text);
     test_pc_vr_parse((const char *const[]){"vr", "1", "vr_menu_distance", "30", "vr_headset_pace", "0",

@@ -146,7 +146,12 @@
     X(pcvr_volume_view)       /* a view volume set from a view matrix (runtime/hle/pc_vr_cull_view.c) */ \
     X(pcvr_volume_projection) /* a view volume set from a projection */ \
     X(pcvr_volume_copy)       /* a view volume copied */ \
-    X(pcvr_listener_poser)    /* the sound listener poser's calc (runtime/hle/pc_vr_listener.c) */
+    X(pcvr_listener_poser)    /* the sound listener poser's calc (runtime/hle/pc_vr_listener.c) */ \
+    X(pcvr_sound_3d_update)   /* a sound's 3D component per listener (runtime/hle/pc_vr_sound_hrtf.c) */ \
+    X(pcvr_sound_emitter_sector) /* an emitter's listener-frame positions into the listener's block */ \
+    X(pcvr_sound_panner)      /* a sound's panner (x0 the sound) */ \
+    X(pcvr_audio_system)      /* data: the engine's audio system (+0x610 its voices, +0x618 their count) */ \
+    X(pcvr_sound_client_vtable) /* data: the client sound object's vtable symbol (objects hold it + 0x10) */
 
 typedef struct {
 #define GAME_SITE_FIELD(n) uint64_t n;

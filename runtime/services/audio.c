@@ -1219,6 +1219,8 @@ static void sdk_take_sink(SdkRen *r, uint64_t list) {
                 for (uint32_t k = 0; k < inputs; k++) v[k] = ch[k] ? (float)ch[k][s] * (1.0f / 32768.0f) : 0.0f;
                 audio_mix_sample(&r->mix3d, v, inputs, mode, r->out + s * out_ch);
             }
+            // (PC VR: the voices rendered binaurally this frame, runtime/hle/pc_vr_sound_hrtf.c)
+            { extern void pc_vr_sound_hrtf_mix(float *, uint32_t, uint32_t); pc_vr_sound_hrtf_mix(r->out, n, out_ch); }
             r->out_n = n;
             return;
         }
@@ -1269,7 +1271,8 @@ static void sdk_sensor_volume(uint64_t list) {
 static void sdk_process(Cpu *c) {
     uint64_t list = *(const uint64_t *)(uintptr_t)c->x[0], lr = c->x[30];
     sdk_sensor_volume(list);
-    g_sdk_process(c);
+    // (PC VR: in segments around the voices rendered binaurally, runtime/hle/pc_vr_sound_hrtf.c; one call otherwise)
+    { extern void pc_vr_sound_hrtf_process(Cpu *, GuestFn); pc_vr_sound_hrtf_process(c, g_sdk_process); }
     c->x[30] = lr;
     sdk_take_sink(&g_sdkren, list);
 }

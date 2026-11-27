@@ -89,6 +89,7 @@ bool pc_vr_enabled(void) { return mock_pc_vr; }
 bool pc_vr_main_compatible(void) { return pc_vr_main_layout(gamelib_tables(), loader_module("main")); }
 void pc_vr_projection_trace_init(void) { ++trace_init_calls; }
 void pc_vr_listener_init(void) {}  // (the sound listener: runtime/hle/pc_vr_listener.c, its math its own fixture)
+void pc_vr_sound_hrtf_init(void) {}  // (sounds rendered binaurally: runtime/hle/pc_vr_sound_hrtf.c, likewise)
 bool pc_vr_pace_pose_wait_on(void) { return false; }  // (the pose wait experiment: off here)
 void pc_vr_pace_pose_wait(void) {}
 bool pc_vr_projection_trace_root(uint64_t guest_frame_pointer) {

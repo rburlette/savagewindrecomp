@@ -1710,6 +1710,20 @@ def _model_detail_depth(gen, address):
             'eye) */')
 
 
+# PC VR's sounds rendered binaurally at their own positions (runtime/hle/pc_vr_sound_hrtf.c): the audio library's call
+# of a sound's 3D update, of the sector update for each of its emitters, and of the sound's panner run unchanged, with
+# the runtime told before and after (what it reads: the call's arguments, kept before the call).
+def _sound_call(target_site, before, after, what):
+    def patch(gen, address):
+        word = _word(gen, address)
+        assert word >> 26 == 0x25, hex(word)  # bl
+        target = address + sext(word & 0x3ffffff, 26) * 4
+        assert target == gen.sites.get(target_site), f'{target:#x} is not {target_site}'
+        return (f'{{ extern void f_{target:x}(Cpu *); {before} c->x[30] = {address + 4:#x}ull; f_{target:x}(c); '
+                f'{after} }}  /* {address:#x}: bl ({what}) */')
+    return patch
+
+
 # PC VR's eye images (runtime/hle/pc_vr_render_trace.h): the game finishes every render layer with one call of its
 # screen-quad draw for the layer's finished image (kind 1) and one for that image's placement in the final image
 # (kind 2), and shows the frame by drawing the final image to the display (kind 3): through the callback Labo's
@@ -1909,6 +1923,20 @@ PATCHES = {
     'pcvr_grass_projection': _grass_matrix(1, 0x610, 'projection matrix'),
     'pcvr_grass_view': _grass_matrix(0, 0x608, 'view matrix'),
     'pcvr_model_detail_depth': _model_detail_depth,
+    'pcvr_sound_3d_update_call': _sound_call(
+        'pcvr_sound_3d_update',
+        'extern void rt_pc_vr_sound_3d_begin(uint64_t, uint32_t); extern void rt_pc_vr_sound_3d_end(uint64_t); '
+        'const uint64_t component = c->x[0]; rt_pc_vr_sound_3d_begin(component, (uint32_t)c->x[2]);',
+        'rt_pc_vr_sound_3d_end(component);', "a sound's 3D component for a listener"),
+    'pcvr_sound_emitter_sector_call': _sound_call(
+        'pcvr_sound_emitter_sector',
+        'extern void rt_pc_vr_sound_emitter(uint64_t, uint64_t, uint64_t); '
+        'rt_pc_vr_sound_emitter(c->x[0], c->x[1], c->x[2]);',
+        '', "an emitter's positions in the listener's frames"),
+    'pcvr_sound_panner_call': _sound_call(
+        'pcvr_sound_panner',
+        'extern void rt_pc_vr_sound_panned(uint64_t); const uint64_t sound = c->x[0];',
+        'rt_pc_vr_sound_panned(sound);', "a sound's panner"),
     'pcvr_ui_parallax': _ui_parallax,
     # (the site: ldrb w9 the mask flag, cmp w9, #0, csel the full-screen triangle or the polygon, then the bl)
     'pcvr_lens_draw': _lens_draw(0, "the eye scenes' screen-quad draw: Labo's lens polygon", flag_register=9),

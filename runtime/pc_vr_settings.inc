@@ -7,7 +7,7 @@
 const char *const pc_vr_setting_keys[PC_VR_SETTING_COUNT] = {
     "vr", "vr_eye_scale", "vr_game_units_per_meter", "vr_menu_distance", "vr_hud_depth", "vr_model_distance",
     "vr_headset_pace", "vr_pace_offset_ms", "vr_pose_wait_ms", "vr_desktop_picture", "vr_antialiasing",
-    "vr_dlss_ratio", "vr_dlss_eye_scale",
+    "vr_dlss_ratio", "vr_dlss_eye_scale", "vr_sound_hrtf",
 };
 const char *const pc_vr_antialiasing_names[PC_VR_ANTIALIASING_COUNT] = {"off", "dlaa", "dlss"};
 
@@ -26,6 +26,7 @@ static const double pc_vr_setting_defaults[PC_VR_SETTING_COUNT] = {
     [PC_VR_SETTING_ANTIALIASING] = PC_VR_ANTIALIASING_DEFAULT,
     [PC_VR_SETTING_DLSS_RATIO] = PC_VR_DLSS_RATIO_DEFAULT,
     [PC_VR_SETTING_DLSS_EYE_SCALE] = PC_VR_DLSS_EYE_SCALE_DEFAULT,
+    [PC_VR_SETTING_SOUND_HRTF] = 1,
 };
 
 // The values read, a slot per key; written by settings_load before the process's configuration is read
