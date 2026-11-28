@@ -30,7 +30,6 @@ FIXTURE = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
-#include "pc_vr_config.h"
 #define MAX_BIND 96
 #define GMEM_BUFFER_INDEX 20
 #define GMEM2_BUFFER_INDEX 21
@@ -65,7 +64,7 @@ static struct {
     float tex_sc[2][64][2];
     uint32_t tex_wh[2][64][2];
 } drw;
-static PcVrRuneAim vr_draw_rune_aim;
+static bool vr_draw_rune_test;
 #define LOG(...) ((void)0)
 static _Atomic int stage_cpu_options=-1;
 #define CPU_OPTS_REUSE 3
@@ -166,12 +165,11 @@ int main(void) {
     call(&p,&si,images,row,tint,da,&na);int before=calls;
     call(&p,&si,images,row,tint,db,&nb);
     assert(na==nb && !memcmp(da,db,na*4));assert(cached ? calls==before : calls>before);
-    // Both eye-specific rune modes must prepare fresh constants for otherwise identical draws.
-    for (int mode=PC_VR_RUNE_AIM_ON; mode<=PC_VR_RUNE_AIM_FLIP; mode++) {
-        vr_draw_rune_aim=(PcVrRuneAim)mode;
-        before=calls;call(&p,&si,images,row,tint,db,&nb);assert(calls>before);
-    }
-    vr_draw_rune_aim=PC_VR_RUNE_AIM_OFF;
+    // The rune target's test draw (its constants moved onto this eye's aim ray) must prepare fresh constants for an
+    // otherwise identical draw.
+    vr_draw_rune_test=true;
+    before=calls;call(&p,&si,images,row,tint,db,&nb);assert(calls>before);
+    vr_draw_rune_test=false;
     before=calls;call(&p,&si,images,row,tint,db,&nb);assert(cached ? calls==before : calls>before);
     Prog p2=p;NvnProgram program2=program;st.program=&program2;
     before=calls;call(&p2,&si,images,row,tint,db,&nb);
